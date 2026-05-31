@@ -11,6 +11,7 @@ from quarry.schemas import (
     ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
+    FinalFinding,
     Report,
     Scan,
     ScanStatus,
@@ -89,6 +90,19 @@ class ReportRecord(Base):
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
     report_path: Mapped[str] = mapped_column(Text, nullable=False)
     report_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class FinalFindingRecord(Base):
+    __tablename__ = "final_findings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(String, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    vuln_class: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    finding_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 @dataclass(frozen=True)
@@ -245,6 +259,28 @@ class QuarryRepository:
                 select(CandidateFindingRecord).where(CandidateFindingRecord.scan_id == scan_id)
             ).all()
             return [CandidateFinding.model_validate_json(record.finding_json) for record in records]
+
+    def save_final_finding(self, finding: FinalFinding) -> None:
+        with session_scope(self.engine) as session:
+            session.add(
+                FinalFindingRecord(
+                    id=finding.id,
+                    scan_id=finding.scan_id,
+                    workspace_id=finding.workspace_id,
+                    fingerprint=finding.fingerprint,
+                    vuln_class=finding.vuln_class.value,
+                    severity=finding.severity.value,
+                    title=finding.title,
+                    finding_json=finding.model_dump_json(),
+                )
+            )
+
+    def load_final_findings(self, scan_id: str) -> list[FinalFinding]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(FinalFindingRecord).where(FinalFindingRecord.scan_id == scan_id)
+            ).all()
+            return [FinalFinding.model_validate_json(record.finding_json) for record in records]
 
     def list_scan_summaries(self) -> list[ScanSummary]:
         with session_scope(self.engine) as session:
