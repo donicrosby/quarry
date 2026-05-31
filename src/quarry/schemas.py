@@ -155,6 +155,20 @@ class CodeIndex(BaseModel):
     created_at: datetime
 
 
+class AttackSurfaceItem(BaseModel):
+    id: str
+    scan_id: str
+    route: str
+    method: str
+    handler_file: str
+    handler_symbol: str | None = None
+    params: list[str] = Field(default_factory=_empty_strings)
+    auth_required: bool | None = None
+    auth_hint: str | None = None
+    source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class Workspace(BaseModel):
     id: str
     name: str

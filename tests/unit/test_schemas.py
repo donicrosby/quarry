@@ -3,11 +3,13 @@ from datetime import UTC, datetime
 from quarry.schemas import (
     ArtifactKind,
     ArtifactRef,
+    AttackSurfaceItem,
     CandidateFinding,
     Confidence,
     RedactionStatus,
     Scan,
     ScanStatus,
+    SourceRef,
     VulnerabilityClass,
     local_scan_profile,
 )
@@ -61,3 +63,40 @@ def test_candidate_finding_keeps_artifact_refs() -> None:
 
     assert loaded.evidence_refs[0].kind is ArtifactKind.REPORT
     assert loaded.confidence is Confidence.LOW
+
+
+def test_attack_surface_item_serializes_and_deserializes() -> None:
+    item = AttackSurfaceItem(
+        id="asi-1",
+        scan_id="scan-1",
+        route="/users/{user_id}",
+        method="GET",
+        handler_file="app.py",
+        handler_symbol="read_user",
+        params=["user_id"],
+        auth_required=False,
+        auth_hint=None,
+        source_refs=[
+            SourceRef(
+                file_path="app.py",
+                start_line=27,
+                end_line=32,
+                symbol="read_user",
+            )
+        ],
+        metadata={"framework": "FastAPI"},
+    )
+
+    loaded = AttackSurfaceItem.model_validate_json(item.model_dump_json())
+
+    assert loaded.id == "asi-1"
+    assert loaded.route == "/users/{user_id}"
+    assert loaded.method == "GET"
+    assert loaded.handler_file == "app.py"
+    assert loaded.handler_symbol == "read_user"
+    assert loaded.params == ["user_id"]
+    assert loaded.auth_required is False
+    assert loaded.auth_hint is None
+    assert len(loaded.source_refs) == 1
+    assert loaded.source_refs[0].symbol == "read_user"
+    assert loaded.metadata == {"framework": "FastAPI"}
