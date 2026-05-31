@@ -65,7 +65,7 @@ tasks:
   demo:
     desc: Run the local demo scan.
     cmds:
-      - uv run quarry scan run --repo .
+      - uv run quarry scan run --repo examples/vulnerable-fastapi --target http://localhost:8000
 
   benchmark-local:
     desc: Run the local vulnerable-app benchmark.

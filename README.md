@@ -8,14 +8,14 @@ The current walking skeleton takes a repository path, persists a fake candidate 
 
 ```bash
 uv sync --extra dev
-uv run quarry scan run --repo .
+uv run quarry scan run --repo examples/vulnerable-fastapi --target http://localhost:8000
 uv run quarry tui --db .quarry/quarry.db
 ```
 
 ## Current demo
 
 ```bash
-uv run quarry scan run --repo .
+uv run quarry scan run --repo examples/vulnerable-fastapi --target http://localhost:8000
 ```
 
 This creates:

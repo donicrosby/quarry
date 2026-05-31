@@ -22,7 +22,10 @@ def test_fake_scan_writes_report_and_persists_candidate(tmp_path: Path) -> None:
 
     assert result.candidate_finding_count == 1
     assert report_path.exists()
-    assert "Fake candidate finding" in report_path.read_text(encoding="utf-8")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Fake candidate finding" in report_text
+    assert "## Repository snapshot" in report_text
+    assert "Frameworks: `unknown`" in report_text
     assert len(findings) == 1
     assert summary.status == "completed"
     assert summary.report_path == str(report_path)

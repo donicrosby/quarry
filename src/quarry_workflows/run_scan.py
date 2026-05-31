@@ -22,6 +22,7 @@ from quarry.schemas import (
     local_scan_profile,
     utc_now,
 )
+from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_persistence import QuarryRepository
 
@@ -81,6 +82,22 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
     repository.update_scan_status(scan.id, ScanStatus.RUNNING, started_at=started_at)
     _append_event(repository, scan.id, "scan.started", {"repo_path": str(repo_path)})
 
+    snapshot = create_repository_snapshot(
+        repo_path,
+        scan_id=scan.id,
+        artifact_root=Path(scan_input.output_dir) / "artifacts",
+    )
+    repository.save_artifact_ref(scan.id, snapshot.file_manifest_ref)
+    _append_event(
+        repository,
+        scan.id,
+        "scan.prepared",
+        {
+            "file_count": str(snapshot.file_count),
+            "frameworks": ",".join(snapshot.detected_frameworks),
+        },
+    )
+
     finding = CandidateFinding(
         id=str(uuid4()),
         scan_id=scan.id,
@@ -100,7 +117,7 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
     )
-    report_text = render_markdown_report(reporting_scan, [finding])
+    report_text = render_markdown_report(reporting_scan, [finding], snapshot)
     report_path = Path(scan_input.output_dir) / "reports" / f"{scan.id}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")

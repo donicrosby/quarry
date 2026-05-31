@@ -2,7 +2,7 @@
 
 from jinja2 import Template
 
-from quarry.schemas import CandidateFinding, Scan
+from quarry.schemas import CandidateFinding, RepositorySnapshot, Scan
 
 REPORT_TEMPLATE = Template(
     """# Quarry Scan Report
@@ -16,6 +16,16 @@ Profile: `{{ scan.profile.id }}`
 ## Summary
 
 {{ summary }}
+
+{% if snapshot -%}
+## Repository snapshot
+
+- Files: `{{ snapshot.file_count }}`
+- Total bytes: `{{ snapshot.total_size_bytes }}`
+- Frameworks: `{{ snapshot.detected_frameworks | join(", ") or "unknown" }}`
+- Manifest: `{{ snapshot.file_manifest_ref.uri }}`
+
+{% endif -%}
 
 ## Candidate findings
 
@@ -51,8 +61,15 @@ Known broken:
 )
 
 
-def render_markdown_report(scan: Scan, findings: list[CandidateFinding]) -> str:
-    summary = (
-        f"Quarry generated {len(findings)} fake candidate finding(s) for the walking skeleton."
+def render_markdown_report(
+    scan: Scan,
+    findings: list[CandidateFinding],
+    snapshot: RepositorySnapshot | None = None,
+) -> str:
+    summary = f"Quarry generated {len(findings)} candidate finding(s) for the local scan."
+    return REPORT_TEMPLATE.render(
+        scan=scan,
+        findings=findings,
+        summary=summary,
+        snapshot=snapshot,
     )
-    return REPORT_TEMPLATE.render(scan=scan, findings=findings, summary=summary)
