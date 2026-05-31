@@ -9,12 +9,14 @@ description = "Local-first agentic vulnerability research harness."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.115.13",
   "jinja2>=3.1.6",
   "pydantic>=2.11.5",
   "sqlalchemy>=2.0.41",
   "temporalio>=1.11.1",
   "textual>=3.2.0",
   "typer>=0.16.0",
+  "uvicorn>=0.34.3",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +35,7 @@ quarry = "quarry_cli.main:app"
 module-name = [
   "quarry",
   "quarry_activities",
+  "quarry_artifacts",
   "quarry_cli",
   "quarry_persistence",
   "quarry_tui",
