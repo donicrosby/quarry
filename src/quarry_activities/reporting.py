@@ -1,6 +1,12 @@
 from jinja2 import Template
 
-from quarry.schemas import AttackSurfaceItem, CandidateFinding, RepositorySnapshot, Scan
+from quarry.schemas import (
+    AttackSurfaceItem,
+    CandidateFinding,
+    FinalFinding,
+    RepositorySnapshot,
+    Scan,
+)
 
 REPORT_TEMPLATE = Template(
     """# Quarry Scan Report
@@ -38,6 +44,21 @@ Profile: `{{ scan.profile.id }}`
 No routes mapped.
 {% endif %}
 
+{% if final_findings -%}
+## Final findings
+
+{% for finding in final_findings -%}
+### {{ finding.title }}
+
+- Class: `{{ finding.vuln_class.value }}`
+- Severity: `{{ finding.severity.value }}`
+- Component: `{{ finding.affected_component or "unknown" }}`
+
+{{ finding.summary }}
+
+{% endfor %}
+{% endif -%}
+
 ## Candidate findings
 
 {% for finding in findings -%}
@@ -53,22 +74,6 @@ No routes mapped.
 {% else -%}
 No candidate findings recorded.
 {% endfor %}
-
-## Demo honesty
-
-Real:
-- Scan record persisted.
-- Candidate finding persisted.
-- Markdown report written.
-- Attack surface mapped and persisted.
-
-Fake or stubbed:
-- Vulnerability detection.
-- Validation and proof.
-- Model calls.
-
-Known broken:
-- Temporal server execution is not required for this local smoke path.
 """
 )
 
@@ -78,12 +83,19 @@ def render_markdown_report(
     findings: list[CandidateFinding],
     snapshot: RepositorySnapshot | None = None,
     attack_surface: list[AttackSurfaceItem] | None = None,
+    final_findings: list[FinalFinding] | None = None,
 ) -> str:
-    summary = f"Quarry generated {len(findings)} candidate finding(s) for the local scan."
+    finding_count = len(final_findings) if final_findings else 0
+    candidate_count = len(findings)
+    summary = (
+        f"Quarry produced {finding_count} validated finding(s) "
+        f"and {candidate_count} candidate finding(s) for the local scan."
+    )
     return REPORT_TEMPLATE.render(
         scan=scan,
         findings=findings,
         summary=summary,
         snapshot=snapshot,
         attack_surface=attack_surface or [],
+        final_findings=final_findings or [],
     )
