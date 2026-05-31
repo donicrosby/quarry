@@ -1,4 +1,4 @@
-"""Fake scan workflow and local runner."""
+"""Scan workflow and local runner."""
 
 from dataclasses import dataclass
 from hashlib import sha256
@@ -12,13 +12,13 @@ from quarry.schemas import (
     ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
-    Confidence,
+    FinalFinding,
     RedactionStatus,
     Report,
     Scan,
     ScanStatus,
+    Severity,
     Target,
-    VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
     utc_now,
@@ -26,7 +26,12 @@ from quarry.schemas import (
 from quarry_activities.attack_surface import extract_fastapi_routes
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
+from quarry_activities.validation import validate_secret_candidate
 from quarry_persistence import QuarryRepository
+from quarry_plugins.vuln_classes.secrets import (
+    scan_repo_for_secrets,
+    secret_match_to_candidate_finding,
+)
 
 
 @dataclass(frozen=True)
@@ -42,16 +47,17 @@ class RunScanResult:
     scan_id: str
     report_path: str
     candidate_finding_count: int
+    final_finding_count: int
 
 
 @workflow.defn
 class RunScanWorkflow:
     @workflow.run
     async def run(self, scan_input: RunScanInput) -> RunScanResult:
-        return run_fake_scan(scan_input)
+        return run_scan(scan_input)
 
 
-def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
+def run_scan(scan_input: RunScanInput) -> RunScanResult:
     repo_path = Path(scan_input.repo_path).resolve()
     if not repo_path.exists():
         msg = f"Repository path does not exist: {repo_path}"
@@ -110,26 +116,52 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
     if attack_surface_items:
         repository.save_attack_surface_items(attack_surface_items)
 
-    finding = CandidateFinding(
-        id=str(uuid4()),
-        scan_id=scan.id,
-        workspace_id="local",
-        vuln_class=VulnerabilityClass.SECRETS,
-        title="Fake candidate finding",
-        hypothesis="This is a deterministic fake finding used to prove the scan pipeline works.",
-        affected_component=str(repo_path),
-        confidence=Confidence.LOW,
-        created_by="walking-skeleton",
-        created_at=utc_now(),
-        metadata={"fake": True},
-    )
-    repository.save_candidate_finding(finding)
-    _append_event(repository, scan.id, "finding.candidate_created", {"finding_id": finding.id})
+    secret_matches = scan_repo_for_secrets(repo_path)
+    candidate_findings: list[CandidateFinding] = []
+    final_findings: list[FinalFinding] = []
+
+    for match in secret_matches:
+        candidate = secret_match_to_candidate_finding(
+            match,
+            scan_id=scan.id,
+            workspace_id="local",
+            created_by="secrets-scanner",
+        )
+        repository.save_candidate_finding(candidate)
+        candidate_findings.append(candidate)
+        _append_event(
+            repository, scan.id, "finding.candidate_created", {"finding_id": candidate.id}
+        )
+
+        validation = validate_secret_candidate(candidate)
+        if validation.is_valid:
+            final = FinalFinding(
+                id=candidate.id,
+                scan_id=scan.id,
+                workspace_id="local",
+                fingerprint=candidate.id,
+                vuln_class=candidate.vuln_class,
+                severity=Severity.HIGH,
+                title=candidate.title,
+                summary=candidate.hypothesis,
+                affected_component=candidate.affected_component,
+                source_refs=candidate.source_refs,
+                validation_result_id=f"{candidate.id}-validation",
+                remediation="Move the secret to an environment variable or secret manager.",
+                created_at=utc_now(),
+            )
+            repository.save_final_finding(final)
+            final_findings.append(final)
+            _append_event(repository, scan.id, "finding.validated", {"finding_id": final.id})
+        else:
+            _append_event(repository, scan.id, "finding.rejected", {"finding_id": candidate.id})
 
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
     )
-    report_text = render_markdown_report(reporting_scan, [finding], snapshot, attack_surface_items)
+    report_text = render_markdown_report(
+        reporting_scan, candidate_findings, snapshot, attack_surface_items, final_findings
+    )
     report_path = Path(scan_input.output_dir) / "reports" / f"{scan.id}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")
@@ -141,8 +173,9 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
         scan_id=scan.id,
         workspace_id="local",
         title="Quarry Scan Report",
-        summary="Fake candidate finding generated for walking skeleton demo.",
-        finding_ids=[finding.id],
+        summary=f"Scan found {len(final_findings)} validated finding(s) "
+        f"and {len(candidate_findings)} candidate finding(s).",
+        finding_ids=[f.id for f in final_findings],
         formats=["markdown"],
         artifact_refs=[report_ref],
         generated_at=utc_now(),
@@ -158,7 +191,17 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
         report_path=report_path,
     )
     _append_event(repository, scan.id, "scan.completed", {"report_path": str(report_path)})
-    return RunScanResult(scan_id=scan.id, report_path=str(report_path), candidate_finding_count=1)
+    return RunScanResult(
+        scan_id=scan.id,
+        report_path=str(report_path),
+        candidate_finding_count=len(candidate_findings),
+        final_finding_count=len(final_findings),
+    )
+
+
+def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
+    """Legacy entry point kept for backward compatibility."""
+    return run_scan(scan_input)
 
 
 def _append_event(
