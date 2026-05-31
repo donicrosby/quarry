@@ -1,4 +1,5 @@
 from jinja2 import Template
+from temporalio import activity
 
 from quarry.schemas import (
     AttackSurfaceItem,
@@ -78,6 +79,7 @@ No candidate findings recorded.
 )
 
 
+@activity.defn(name="render-markdown-report")
 def render_markdown_report(
     scan: Scan,
     findings: list[CandidateFinding],

@@ -11,6 +11,8 @@ This is intentionally simple and deterministic. No LLM review, no entropy analys
 
 import re
 
+from temporalio import activity
+
 from quarry.schemas import CandidateFinding
 
 SECRET_NAME_INDICATORS = re.compile(
@@ -63,9 +65,9 @@ class SecretValidationResult:
         return self.verdict == "validated"
 
 
+@activity.defn(name="validate-secret-candidate")
 def validate_secret_candidate(
     finding: CandidateFinding,
-    *,
     allowlist: frozenset[str] | None = None,
 ) -> SecretValidationResult:
     """Validate a candidate secret finding deterministically."""
@@ -120,6 +122,7 @@ def validate_secret_candidate(
     )
 
 
+@activity.defn(name="promote-to-final-finding")
 def promote_to_final_finding_metadata(
     finding: CandidateFinding,
     result: SecretValidationResult,

@@ -9,8 +9,11 @@ no allowlist management beyond common placeholder patterns.
 """
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+from temporalio import activity
 
 from quarry.fingerprints import compute_fingerprint
 from quarry.schemas import (
@@ -84,14 +87,19 @@ def scan_file_for_secrets(file_path: Path, repo_root: Path) -> list[SecretMatch]
     return matches
 
 
+@activity.defn(name="scan-repo-for-secrets")
 def scan_repo_for_secrets(repo_root: Path) -> list[SecretMatch]:
     """Scan all source files in a repository for hardcoded secrets."""
     all_matches: list[SecretMatch] = []
-    for path in sorted(repo_root.rglob("*")):
+    files = sorted(repo_root.rglob("*"))
+    for i, path in enumerate(files):
         if not path.is_file():
             continue
         if _is_ignored_path(path, repo_root):
             continue
+        if i > 0 and i % 50 == 0:
+            with suppress(RuntimeError):
+                activity.heartbeat(f"Scanned {i}/{len(files)} files")
         all_matches.extend(scan_file_for_secrets(path, repo_root))
     return all_matches
 

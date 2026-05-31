@@ -4,6 +4,8 @@ from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
+from temporalio import activity
+
 from quarry.schemas import (
     ArtifactKind,
     FileManifest,
@@ -38,12 +40,12 @@ LANGUAGES_BY_SUFFIX = {
 }
 
 
+@activity.defn(name="create-repository-snapshot")
 def create_repository_snapshot(
     repo_path: Path,
-    *,
     scan_id: str,
-    workspace_id: str = "local",
     artifact_root: Path,
+    workspace_id: str = "local",
 ) -> RepositorySnapshot:
     root = repo_path.resolve()
     manifest = build_file_manifest(root)
@@ -70,11 +72,12 @@ def create_repository_snapshot(
 
 
 def build_file_manifest(repo_path: Path) -> FileManifest:
-    entries = [
-        _manifest_entry(path, repo_path)
-        for path in sorted(repo_path.rglob("*"))
-        if path.is_file() and not _is_ignored(path, repo_path)
-    ]
+    entries: list[FileManifestEntry] = []
+    for i, path in enumerate(sorted(repo_path.rglob("*"))):
+        if i > 0 and i % 100 == 0:
+            activity.heartbeat(f"Processed {i} files")
+        if path.is_file() and not _is_ignored(path, repo_path):
+            entries.append(_manifest_entry(path, repo_path))
     return FileManifest(
         entries=entries,
         total_size_bytes=sum(entry.size_bytes for entry in entries),

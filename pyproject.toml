@@ -62,3 +62,4 @@ include = ["src", "tests"]
 extraPaths = ["src"]
 venv = ".venv"
 venvPath = "."
+reportUnknownMemberType = "none"

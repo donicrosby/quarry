@@ -3,11 +3,14 @@
 import ast
 from pathlib import Path
 
+from temporalio import activity
+
 from quarry.schemas import AttackSurfaceItem, SourceRef
 
 HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "trace"})
 
 
+@activity.defn(name="extract-fastapi-routes")
 def extract_fastapi_routes(file_path: Path) -> list[AttackSurfaceItem]:
     """Parse a Python file and extract FastAPI route definitions."""
     source = file_path.read_text(encoding="utf-8")

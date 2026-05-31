@@ -1,5 +1,7 @@
 """Quarry domain schemas."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -83,11 +85,11 @@ class RedactionStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
-def _empty_source_refs() -> list["SourceRef"]:
+def _empty_source_refs() -> list[SourceRef]:
     return []
 
 
-def _empty_artifact_refs() -> list["ArtifactRef"]:
+def _empty_artifact_refs() -> list[ArtifactRef]:
     return []
 
 
@@ -287,6 +289,62 @@ class WorkflowEvent(BaseModel):
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class DiffLabel(StrEnum):
+    INTRODUCED_BY_DIFF = "introduced_by_diff"
+    TOUCHED_BY_DIFF = "touched_by_diff"
+    POSSIBLY_EXPOSED_BY_DIFF = "possibly_exposed_by_diff"
+    UNCHANGED = "unchanged"
+
+
+class ChangedFile(BaseModel):
+    path: str
+    status: str
+    additions: int = 0
+    deletions: int = 0
+    hunks: list[str] = Field(default_factory=list)
+
+
+class ImpactedCodeRegion(BaseModel):
+    file_path: str
+    start_line: int
+    end_line: int
+    label: DiffLabel
+    scope_name: str | None = None
+    scope_type: str | None = None
+
+
+def _empty_changed_files() -> list[ChangedFile]:
+    return []
+
+
+def _empty_impacted_regions() -> list[ImpactedCodeRegion]:
+    return []
+
+
+class GitDiff(BaseModel):
+    base_commit: str
+    head_commit: str
+    changed_files: list[ChangedFile] = Field(default_factory=_empty_changed_files)
+    total_additions: int = 0
+    total_deletions: int = 0
+
+
+class DiffScanInput(BaseModel):
+    repo_path: str
+    base_commit: str
+    head_commit: str
+    db_path: str
+    target_url: str | None = None
+
+
+class DiffScanResult(BaseModel):
+    scan_id: str
+    git_diff: GitDiff
+    impacted_regions: list[ImpactedCodeRegion] = Field(default_factory=_empty_impacted_regions)
+    candidate_finding_count: int = 0
+    final_finding_count: int = 0
 
 
 def local_scan_profile() -> ScanProfile:
