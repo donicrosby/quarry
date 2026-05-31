@@ -1,0 +1,73 @@
+version: '3'
+
+tasks:
+  setup:
+    desc: Install project dependencies.
+    cmds:
+      - uv sync --extra dev
+
+  test:
+    desc: Run tests.
+    cmds:
+      - uv run pytest
+
+  lint:
+    desc: Run lint checks.
+    cmds:
+      - uv run ruff check .
+
+  format:
+    desc: Format code.
+    cmds:
+      - uv run ruff format .
+
+  format-check:
+    desc: Check code formatting.
+    cmds:
+      - uv run ruff format --check .
+
+  typecheck:
+    desc: Run type checks.
+    cmds:
+      - uv run pyright
+
+  hooks:
+    desc: Run pre-commit hooks against all files.
+    cmds:
+      - uv run pre-commit run --all-files
+
+  install-hooks:
+    desc: Install pre-commit and commit-msg hooks.
+    cmds:
+      - uv run pre-commit install
+      - uv run pre-commit install --hook-type commit-msg
+
+  target:
+    desc: Start the local vulnerable FastAPI target.
+    cmds:
+      - uv run quarry target start examples/vulnerable-fastapi
+
+  worker:
+    desc: Start the Quarry worker.
+    cmds:
+      - uv run quarry worker
+
+  tui:
+    desc: Start the Quarry TUI.
+    cmds:
+      - uv run quarry tui
+
+  report:
+    desc: Show report commands.
+    cmds:
+      - uv run quarry report --help
+
+  demo:
+    desc: Run the local demo scan.
+    cmds:
+      - uv run quarry scan run --repo .
+
+  benchmark-local:
+    desc: Run the local vulnerable-app benchmark.
+    cmds:
+      - uv run quarry benchmark local
