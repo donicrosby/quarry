@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quarry.schemas import (
     ArtifactRef,
+    AttackSurfaceItem,
     CandidateFinding,
     Report,
     Scan,
@@ -70,6 +71,17 @@ class CandidateFindingRecord(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     vuln_class: Mapped[str] = mapped_column(String, nullable=False)
     finding_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AttackSurfaceItemRecord(Base):
+    __tablename__ = "attack_surface_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    route: Mapped[str] = mapped_column(Text, nullable=False)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    handler_file: Mapped[str] = mapped_column(Text, nullable=False)
+    item_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ReportRecord(Base):
@@ -190,6 +202,27 @@ class QuarryRepository:
                     finding_json=finding.model_dump_json(),
                 )
             )
+
+    def save_attack_surface_items(self, items: list[AttackSurfaceItem]) -> None:
+        with session_scope(self.engine) as session:
+            for item in items:
+                session.add(
+                    AttackSurfaceItemRecord(
+                        id=item.id,
+                        scan_id=item.scan_id,
+                        route=item.route,
+                        method=item.method,
+                        handler_file=item.handler_file,
+                        item_json=item.model_dump_json(),
+                    )
+                )
+
+    def load_attack_surface_items(self, scan_id: str) -> list[AttackSurfaceItem]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(AttackSurfaceItemRecord).where(AttackSurfaceItemRecord.scan_id == scan_id)
+            ).all()
+            return [AttackSurfaceItem.model_validate_json(record.item_json) for record in records]
 
     def save_report(self, report: Report, report_path: Path | str) -> None:
         with session_scope(self.engine) as session:

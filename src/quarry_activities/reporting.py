@@ -2,7 +2,7 @@
 
 from jinja2 import Template
 
-from quarry.schemas import CandidateFinding, RepositorySnapshot, Scan
+from quarry.schemas import AttackSurfaceItem, CandidateFinding, RepositorySnapshot, Scan
 
 REPORT_TEMPLATE = Template(
     """# Quarry Scan Report
@@ -27,6 +27,19 @@ Profile: `{{ scan.profile.id }}`
 
 {% endif -%}
 
+## Attack surface
+
+{% if attack_surface -%}
+| Method | Route | Handler | Parameters |
+|--------|-------|---------|------------|
+{% for item in attack_surface -%}
+{% set param_str = item.params | join(", ") or "-" %}
+| {{ item.method }} | `{{ item.route }}` | {{ item.handler_symbol or "unknown" }} | {{ param_str }}|
+{% endfor %}
+{% else -%}
+No routes mapped.
+{% endif %}
+
 ## Candidate findings
 
 {% for finding in findings -%}
@@ -49,6 +62,7 @@ Real:
 - Scan record persisted.
 - Candidate finding persisted.
 - Markdown report written.
+- Attack surface mapped and persisted.
 
 Fake or stubbed:
 - Vulnerability detection.
@@ -65,6 +79,7 @@ def render_markdown_report(
     scan: Scan,
     findings: list[CandidateFinding],
     snapshot: RepositorySnapshot | None = None,
+    attack_surface: list[AttackSurfaceItem] | None = None,
 ) -> str:
     summary = f"Quarry generated {len(findings)} candidate finding(s) for the local scan."
     return REPORT_TEMPLATE.render(
@@ -72,4 +87,5 @@ def render_markdown_report(
         findings=findings,
         summary=summary,
         snapshot=snapshot,
+        attack_surface=attack_surface or [],
     )
