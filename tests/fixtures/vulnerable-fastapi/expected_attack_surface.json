@@ -1,0 +1,114 @@
+[
+  {
+    "id": "",
+    "scan_id": "",
+    "route": "/health",
+    "method": "GET",
+    "handler_file": "app.py",
+    "handler_symbol": "health",
+    "params": [],
+    "auth_required": null,
+    "auth_hint": null,
+    "source_refs": [
+      {
+        "artifact_ref": null,
+        "file_path": "app.py",
+        "start_line": 18,
+        "end_line": 19,
+        "symbol": "health",
+        "snippet_hash": null
+      }
+    ],
+    "metadata": {}
+  },
+  {
+    "id": "",
+    "scan_id": "",
+    "route": "/config",
+    "method": "GET",
+    "handler_file": "app.py",
+    "handler_symbol": "config",
+    "params": [],
+    "auth_required": null,
+    "auth_hint": null,
+    "source_refs": [
+      {
+        "artifact_ref": null,
+        "file_path": "app.py",
+        "start_line": 23,
+        "end_line": 24,
+        "symbol": "config",
+        "snippet_hash": null
+      }
+    ],
+    "metadata": {}
+  },
+  {
+    "id": "",
+    "scan_id": "",
+    "route": "/users/{user_id}",
+    "method": "GET",
+    "handler_file": "app.py",
+    "handler_symbol": "read_user",
+    "params": [
+      "user_id"
+    ],
+    "auth_required": null,
+    "auth_hint": null,
+    "source_refs": [
+      {
+        "artifact_ref": null,
+        "file_path": "app.py",
+        "start_line": 28,
+        "end_line": 32,
+        "symbol": "read_user",
+        "snippet_hash": null
+      }
+    ],
+    "metadata": {}
+  },
+  {
+    "id": "",
+    "scan_id": "",
+    "route": "/debug/ping",
+    "method": "GET",
+    "handler_file": "app.py",
+    "handler_symbol": "ping",
+    "params": [],
+    "auth_required": null,
+    "auth_hint": null,
+    "source_refs": [
+      {
+        "artifact_ref": null,
+        "file_path": "app.py",
+        "start_line": 36,
+        "end_line": 45,
+        "symbol": "ping",
+        "snippet_hash": null
+      }
+    ],
+    "metadata": {}
+  },
+  {
+    "id": "",
+    "scan_id": "",
+    "route": "/fetch-local",
+    "method": "GET",
+    "handler_file": "app.py",
+    "handler_symbol": "fetch_local",
+    "params": [],
+    "auth_required": null,
+    "auth_hint": null,
+    "source_refs": [
+      {
+        "artifact_ref": null,
+        "file_path": "app.py",
+        "start_line": 49,
+        "end_line": 52,
+        "symbol": "fetch_local",
+        "snippet_hash": null
+      }
+    ],
+    "metadata": {}
+  }
+]
