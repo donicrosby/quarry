@@ -38,6 +38,7 @@ module-name = [
   "quarry_artifacts",
   "quarry_cli",
   "quarry_persistence",
+  "quarry_plugins",
   "quarry_tui",
   "quarry_worker",
   "quarry_workflows",

@@ -1,0 +1,1 @@
+"""Quarry vulnerability scanning plugins."""
