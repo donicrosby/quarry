@@ -1,0 +1,1 @@
+"""Quarry core package."""
