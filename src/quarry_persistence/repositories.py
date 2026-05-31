@@ -1,10 +1,7 @@
-"""Repository helpers for local persistence."""
-
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy import ForeignKey, Integer, String, Text, select
 from sqlalchemy.engine import Engine
@@ -283,7 +280,3 @@ def _encode_optional_datetime(value: datetime | None) -> str | None:
 
 def _encode_datetime(value: datetime) -> str:
     return value.isoformat()
-
-
-def json_dict(value: dict[str, Any]) -> str:
-    return json.dumps(value, sort_keys=True)
