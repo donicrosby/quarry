@@ -5,6 +5,7 @@ from typing import Annotated
 
 import typer
 
+from quarry_activities.target import start_local_target
 from quarry_workflows import RunScanInput, run_fake_scan
 
 app = typer.Typer(help="Quarry local vulnerability research harness.")
@@ -54,8 +55,22 @@ def tui(db: Annotated[Path, typer.Option("--db")] = Path(".quarry/quarry.db")) -
 
 
 @target_app.command("start")
-def target_start(path: Path) -> None:
-    typer.echo(f"Target launching is not implemented yet: {path}")
+def target_start(
+    path: Annotated[Path, typer.Argument(exists=True, file_okay=False, dir_okay=True)],
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 8000,
+) -> None:
+    try:
+        process = start_local_target(path, host=host, port=port)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    typer.echo(f"target=http://{host}:{port}")
+    typer.echo("health=ok")
+    try:
+        process.wait()
+    except KeyboardInterrupt:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 @report_app.callback(invoke_without_command=True)
