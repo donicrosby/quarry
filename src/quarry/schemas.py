@@ -116,6 +116,45 @@ class ArtifactRef(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class FileManifestEntry(BaseModel):
+    path: str
+    size_bytes: int
+    sha256: str
+    language: str | None = None
+    ignored: bool = False
+    ignore_reason: str | None = None
+
+
+class FileManifest(BaseModel):
+    entries: list[FileManifestEntry]
+    total_size_bytes: int
+
+
+class RepositorySnapshot(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    repo_path: str
+    commit_sha: str | None = None
+    file_manifest_ref: ArtifactRef
+    file_count: int
+    total_size_bytes: int
+    detected_frameworks: list[str] = Field(default_factory=_empty_strings)
+    ignored_paths: list[str] = Field(default_factory=_empty_strings)
+    created_at: datetime
+
+
+class CodeIndex(BaseModel):
+    id: str
+    scan_id: str
+    snapshot_id: str
+    symbols_ref: ArtifactRef | None = None
+    routes_ref: ArtifactRef | None = None
+    imports_ref: ArtifactRef | None = None
+    dependencies_ref: ArtifactRef | None = None
+    created_at: datetime
+
+
 class Workspace(BaseModel):
     id: str
     name: str
