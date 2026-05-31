@@ -10,6 +10,7 @@ from temporalio import workflow
 from quarry.schemas import (
     ArtifactKind,
     ArtifactRef,
+    AttackSurfaceItem,
     CandidateFinding,
     Confidence,
     RedactionStatus,
@@ -22,6 +23,7 @@ from quarry.schemas import (
     local_scan_profile,
     utc_now,
 )
+from quarry_activities.attack_surface import extract_fastapi_routes
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_persistence import QuarryRepository
@@ -98,6 +100,16 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
         },
     )
 
+    attack_surface_items: list[AttackSurfaceItem] = []
+    for py_file in repo_path.rglob("*.py"):
+        extracted = extract_fastapi_routes(py_file)
+        for item in extracted:
+            attack_surface_items.append(
+                item.model_copy(update={"id": str(uuid4()), "scan_id": scan.id})
+            )
+    if attack_surface_items:
+        repository.save_attack_surface_items(attack_surface_items)
+
     finding = CandidateFinding(
         id=str(uuid4()),
         scan_id=scan.id,
@@ -117,7 +129,7 @@ def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
     )
-    report_text = render_markdown_report(reporting_scan, [finding], snapshot)
+    report_text = render_markdown_report(reporting_scan, [finding], snapshot, attack_surface_items)
     report_path = Path(scan_input.output_dir) / "reports" / f"{scan.id}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")
