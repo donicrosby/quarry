@@ -4,6 +4,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Header
 
@@ -12,7 +13,15 @@ from quarry_tui.widgets.route_table import RouteTable
 
 
 class AttackSurfaceScreen(Screen[None]):
-    BINDINGS = [Binding("escape,q", "app.pop_screen", "Back", key_display="esc/q")]
+    BINDINGS = [
+        Binding("escape,q", "app.pop_screen", "Back", key_display="esc/q"),
+        Binding("f", "show_findings", "Findings", key_display="f"),
+    ]
+
+    class ShowFindings(Message):
+        def __init__(self, scan_id: str) -> None:
+            super().__init__()
+            self.scan_id = scan_id
 
     def __init__(self, db_path: Path, scan_id: str) -> None:
         super().__init__()
@@ -24,3 +33,6 @@ class AttackSurfaceScreen(Screen[None]):
         repository = QuarryRepository(self.db_path)
         items = repository.load_attack_surface_items(self.scan_id)
         yield RouteTable(items)
+
+    def action_show_findings(self) -> None:
+        self.post_message(self.ShowFindings(self.scan_id))
