@@ -1,0 +1,19 @@
+{
+  "detected_frameworks": [
+    "FastAPI"
+  ],
+  "entries": [
+    {
+      "language": "markdown",
+      "path": "README.md"
+    },
+    {
+      "language": "python",
+      "path": "app.py"
+    },
+    {
+      "language": "toml",
+      "path": "pyproject.toml"
+    }
+  ]
+}
