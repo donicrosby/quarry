@@ -1,0 +1,1 @@
+"""Quarry worker package."""
