@@ -1,5 +1,3 @@
-"""Report rendering activities."""
-
 from jinja2 import Template
 
 from quarry.schemas import AttackSurfaceItem, CandidateFinding, RepositorySnapshot, Scan
