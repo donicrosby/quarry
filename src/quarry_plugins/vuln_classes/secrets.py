@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from temporalio import activity
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from quarry.fingerprints import compute_fingerprint
 from quarry.schemas import (
@@ -110,15 +111,27 @@ def _scan_repo_for_secrets_impl(
     all_matches: list[SecretMatch] = []
     files = _candidate_secret_files(repo_root, file_paths)
     for i, path in enumerate(files):
+        if i % 10 == 0:
+            _heartbeat(f"Scanned {i}/{len(files)} files")
+        if _activity_cancel_requested():
+            raise TemporalCancelledError("Secrets scan cancelled")
         if not path.is_file():
             continue
         if _is_ignored_path(path, repo_root):
             continue
-        if i > 0 and i % 50 == 0:
-            with suppress(RuntimeError):
-                activity.heartbeat(f"Scanned {i}/{len(files)} files")
         all_matches.extend(scan_file_for_secrets(path, repo_root))
     return all_matches
+
+
+def _heartbeat(message: str) -> None:
+    with suppress(RuntimeError):
+        activity.heartbeat(message)
+
+
+def _activity_cancel_requested() -> bool:
+    with suppress(RuntimeError):
+        return activity.is_cancelled()
+    return False
 
 
 def _candidate_secret_files(repo_root: Path, file_paths: tuple[str, ...] | None) -> list[Path]:

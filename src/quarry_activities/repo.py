@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from temporalio import activity
@@ -135,7 +136,7 @@ def detect_frameworks(repo_path: Path) -> list[str]:
 
 
 @activity.defn(name="persist-scan-state")
-def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> None:
+def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
     """Persist workflow state changes outside the deterministic workflow runner."""
     if isinstance(input, dict):
         input = PersistScanStateInput(**input)
@@ -156,6 +157,32 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> None:
                 completed_at=_optional_datetime(payload.get("completed_at")),
                 report_path=payload.get("report_path"),
             )
+        case "update_scan_metadata":
+            metadata = payload["metadata"]
+            if not isinstance(metadata, dict):
+                msg = "metadata must be a JSON object"
+                raise TypeError(msg)
+            repository.update_scan_metadata(payload["scan_id"], cast(dict[str, object], metadata))
+        case "load_scan":
+            try:
+                return repository.load_scan(payload["scan_id"]).model_dump(mode="json")
+            except ValueError:
+                return None
+        case "load_attack_surface_items":
+            return [
+                item.model_dump(mode="json")
+                for item in repository.load_attack_surface_items(payload["scan_id"])
+            ]
+        case "load_candidate_findings":
+            return [
+                finding.model_dump(mode="json")
+                for finding in repository.load_candidate_findings(payload["scan_id"])
+            ]
+        case "load_final_findings":
+            return [
+                finding.model_dump(mode="json")
+                for finding in repository.load_final_findings(payload["scan_id"])
+            ]
         case "append_event":
             repository.append_event(WorkflowEvent.model_validate(payload["event"]))
         case "save_artifact_ref":

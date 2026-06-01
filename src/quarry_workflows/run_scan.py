@@ -1,5 +1,6 @@
 """Scan workflow and local runner."""
 
+import asyncio
 import json
 from datetime import timedelta
 from hashlib import sha256
@@ -10,6 +11,8 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import is_cancelled_exception
 
 from quarry.schemas import (
     ArtifactKind,
@@ -49,15 +52,25 @@ from quarry_plugins.vuln_classes.secrets import (
 )
 
 ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
+COMPLETED_STAGE_ORDER = {
+    "CREATED": 0,
+    "SNAPSHOT": 1,
+    "ATTACK_SURFACE": 2,
+    "SECRETS_SCAN": 3,
+    "REPORT": 4,
+    "COMPLETED": 5,
+}
 
 
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     repo_path: str
+    scan_id: str | None = None
     db_path: str = ".quarry/quarry.db"
     output_dir: str = ".quarry"
     target_url: str | None = None
+    resume: bool = False
 
 
 class RunScanResult(BaseModel):
@@ -80,35 +93,59 @@ class RunScanWorkflow:
 
     @workflow.run
     async def run(self, scan_input: RunScanInput) -> RunScanResult:
+        scan_id = scan_input.scan_id or workflow.info().workflow_id
+        try:
+            return await self._run(scan_input, scan_id)
+        except (asyncio.CancelledError, TemporalCancelledError):
+            await self._persist_cancelled_scan(scan_input.db_path, scan_id)
+            raise
+        except BaseException as exc:
+            if not is_cancelled_exception(exc):
+                raise
+            await self._persist_cancelled_scan(scan_input.db_path, scan_id)
+            raise
+
+    async def _run(self, scan_input: RunScanInput, scan_id: str) -> RunScanResult:
         created_at = workflow.now()
-        scan_id = str(workflow.uuid4())
         artifact_root = _join_path(scan_input.output_dir, "artifacts")
         report_path = _join_path(scan_input.output_dir, "reports", f"{scan_id}.md")
-        target = Target(
-            id=str(workflow.uuid4()),
-            workspace_id="local",
-            repo_path=scan_input.repo_path,
-            target_url=scan_input.target_url,
-            target_kind="local_repo" if scan_input.target_url is None else "local_web_app",
-            allowed_hosts=["localhost", "127.0.0.1"] if scan_input.target_url else [],
-            created_at=created_at,
+        persisted_scan = (
+            await _load_scan(scan_input.db_path, scan_id) if scan_input.resume else None
         )
-        scan = Scan(
-            id=scan_id,
-            workspace_id="local",
-            target_id=target.id,
-            requested_by="local-user",
-            profile=local_scan_profile(),
-            status=ScanStatus.CREATED,
-            created_at=created_at,
-            metadata={"repo_path": scan_input.repo_path},
-        )
-
-        await _persist_scan_state(
-            scan_input.db_path,
-            "create_scan_if_missing",
-            {"scan": _model_json_dict(scan), "target": _model_json_dict(target)},
-        )
+        completed_stage = _persisted_stage(persisted_scan) if persisted_scan is not None else None
+        if persisted_scan is None:
+            target = Target(
+                id=str(workflow.uuid4()),
+                workspace_id="local",
+                repo_path=scan_input.repo_path,
+                target_url=scan_input.target_url,
+                target_kind="local_repo" if scan_input.target_url is None else "local_web_app",
+                allowed_hosts=["localhost", "127.0.0.1"] if scan_input.target_url else [],
+                created_at=created_at,
+            )
+            scan = Scan(
+                id=scan_id,
+                workspace_id="local",
+                target_id=target.id,
+                requested_by="local-user",
+                profile=local_scan_profile(),
+                status=ScanStatus.CREATED,
+                created_at=created_at,
+                metadata={
+                    "repo_path": scan_input.repo_path,
+                    "target_url": scan_input.target_url,
+                    "output_dir": scan_input.output_dir,
+                    "current_stage": "CREATED",
+                },
+            )
+            await _persist_scan_state(
+                scan_input.db_path,
+                "create_scan_if_missing",
+                {"scan": _model_json_dict(scan), "target": _model_json_dict(target)},
+            )
+        else:
+            scan = persisted_scan
+            self._current_stage = completed_stage or "CREATED"
         started_at = workflow.now()
         await _persist_scan_state(
             scan_input.db_path,
@@ -124,120 +161,137 @@ class RunScanWorkflow:
         await _append_workflow_event(
             scan_input.db_path,
             scan.id,
-            "scan.started",
+            "scan.resumed" if scan_input.resume and persisted_scan is not None else "scan.started",
             {"repo_path": scan_input.repo_path},
         )
 
-        self._current_stage = "SNAPSHOT"
-        snapshot_payload = await workflow.execute_activity(
-            "create-repository-snapshot",
-            CreateSnapshotInput(
-                repo_path=scan_input.repo_path,
-                scan_id=scan.id,
-                artifact_root=artifact_root,
-            ),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
-        snapshot = _repository_snapshot_from_activity(snapshot_payload)
-        await _persist_scan_state(
-            scan_input.db_path,
-            "save_artifact_ref",
-            {"scan_id": scan.id, "artifact_ref": _model_json_dict(snapshot.file_manifest_ref)},
-        )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "scan.prepared",
-            {
-                "file_count": str(snapshot.file_count),
-                "frameworks": ",".join(snapshot.detected_frameworks),
-            },
-        )
-
-        self._current_stage = "ATTACK_SURFACE"
-        attack_surface_payload = await workflow.execute_activity(
-            "extract-fastapi-routes-for-repo",
-            ExtractRoutesForRepoInput(repo_path=scan_input.repo_path, scan_id=scan.id),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
-        attack_surface_items = _attack_surface_from_activity(attack_surface_payload)
-        if attack_surface_items:
+        snapshot: RepositorySnapshot | None = None
+        if not _stage_completed(completed_stage, "SNAPSHOT"):
+            self._current_stage = "SNAPSHOT"
+            snapshot_payload = await workflow.execute_activity(
+                "create-repository-snapshot",
+                CreateSnapshotInput(
+                    repo_path=scan_input.repo_path,
+                    scan_id=scan.id,
+                    artifact_root=artifact_root,
+                ),
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=ACTIVITY_RETRY_POLICY,
+            )
+            snapshot = _repository_snapshot_from_activity(snapshot_payload)
             await _persist_scan_state(
                 scan_input.db_path,
-                "save_attack_surface_items",
-                {"items": [_model_json_dict(item) for item in attack_surface_items]},
+                "save_artifact_ref",
+                {"scan_id": scan.id, "artifact_ref": _model_json_dict(snapshot.file_manifest_ref)},
             )
-
-        self._current_stage = "SECRETS_SCAN"
-        secret_match_payload = await workflow.execute_activity(
-            "scan-repo-for-secrets",
-            ScanSecretsInput(repo_root=scan_input.repo_path),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
-        secret_matches = _secret_matches_from_activity(secret_match_payload)
-        candidate_findings: list[CandidateFinding] = []
-        final_findings: list[FinalFinding] = []
-
-        for match in secret_matches:
-            candidate = secret_match_to_candidate_finding(
-                match,
-                scan_id=scan.id,
-                workspace_id="local",
-                created_by="secrets-scanner",
-            ).model_copy(update={"created_at": workflow.now()})
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_candidate_finding",
-                {"finding": _model_json_dict(candidate)},
-            )
-            candidate_findings.append(candidate)
             await _append_workflow_event(
                 scan_input.db_path,
                 scan.id,
-                "finding.candidate_created",
-                {"finding_id": candidate.id},
+                "scan.prepared",
+                {
+                    "file_count": str(snapshot.file_count),
+                    "frameworks": ",".join(snapshot.detected_frameworks),
+                },
             )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "SNAPSHOT")
 
-            self._current_stage = "VALIDATION"
-            validation_payload = await workflow.execute_activity(
-                "validate-secret-candidate",
-                ValidateCandidateInput(finding_json=candidate.model_dump_json()),
-                start_to_close_timeout=timedelta(seconds=30),
+        if _stage_completed(completed_stage, "ATTACK_SURFACE"):
+            attack_surface_items = await _load_attack_surface_items(scan_input.db_path, scan.id)
+        else:
+            self._current_stage = "ATTACK_SURFACE"
+            attack_surface_payload = await workflow.execute_activity(
+                "extract-fastapi-routes-for-repo",
+                ExtractRoutesForRepoInput(repo_path=scan_input.repo_path, scan_id=scan.id),
+                start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=ACTIVITY_RETRY_POLICY,
             )
-            validation = _validation_result_from_activity(validation_payload)
-            if validation.is_valid:
-                final = FinalFinding(
-                    id=candidate.id,
-                    scan_id=scan.id,
-                    workspace_id="local",
-                    fingerprint=candidate.id,
-                    vuln_class=candidate.vuln_class,
-                    severity=Severity.HIGH,
-                    title=candidate.title,
-                    summary=candidate.hypothesis,
-                    affected_component=candidate.affected_component,
-                    source_refs=candidate.source_refs,
-                    validation_result_id=f"{candidate.id}-validation",
-                    remediation="Move the secret to an environment variable or secret manager.",
-                    created_at=workflow.now(),
-                )
+            attack_surface_items = _attack_surface_from_activity(attack_surface_payload)
+            if attack_surface_items:
                 await _persist_scan_state(
                     scan_input.db_path,
-                    "save_final_finding",
-                    {"finding": _model_json_dict(final)},
+                    "save_attack_surface_items",
+                    {"items": [_model_json_dict(item) for item in attack_surface_items]},
                 )
-                final_findings.append(final)
+            await _persist_scan_stage(scan_input.db_path, scan.id, "ATTACK_SURFACE")
+
+        candidate_findings: list[CandidateFinding] = []
+        final_findings: list[FinalFinding] = []
+        if _stage_completed(completed_stage, "SECRETS_SCAN"):
+            candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
+            final_findings = await _load_final_findings(scan_input.db_path, scan.id)
+        else:
+            self._current_stage = "SECRETS_SCAN"
+            secret_match_payload = await workflow.execute_activity(
+                "scan-repo-for-secrets",
+                ScanSecretsInput(repo_root=scan_input.repo_path),
+                start_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(seconds=10),
+                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+                retry_policy=ACTIVITY_RETRY_POLICY,
+            )
+            secret_matches = _secret_matches_from_activity(secret_match_payload)
+
+            for match in secret_matches:
+                candidate = secret_match_to_candidate_finding(
+                    match,
+                    scan_id=scan.id,
+                    workspace_id="local",
+                    created_by="secrets-scanner",
+                ).model_copy(update={"created_at": workflow.now()})
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
                 await _append_workflow_event(
-                    scan_input.db_path, scan.id, "finding.validated", {"finding_id": final.id}
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id},
                 )
-            else:
-                await _append_workflow_event(
-                    scan_input.db_path, scan.id, "finding.rejected", {"finding_id": candidate.id}
+
+                self._current_stage = "VALIDATION"
+                validation_payload = await workflow.execute_activity(
+                    "validate-secret-candidate",
+                    ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=ACTIVITY_RETRY_POLICY,
                 )
+                validation = _validation_result_from_activity(validation_payload)
+                if validation.is_valid:
+                    final = FinalFinding(
+                        id=candidate.id,
+                        scan_id=scan.id,
+                        workspace_id="local",
+                        fingerprint=candidate.id,
+                        vuln_class=candidate.vuln_class,
+                        severity=Severity.HIGH,
+                        title=candidate.title,
+                        summary=candidate.hypothesis,
+                        affected_component=candidate.affected_component,
+                        source_refs=candidate.source_refs,
+                        validation_result_id=f"{candidate.id}-validation",
+                        remediation="Move the secret to an environment variable or secret manager.",
+                        created_at=workflow.now(),
+                    )
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    final_findings.append(final)
+                    await _append_workflow_event(
+                        scan_input.db_path, scan.id, "finding.validated", {"finding_id": final.id}
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.rejected",
+                        {"finding_id": candidate.id},
+                    )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "SECRETS_SCAN")
 
         self._current_stage = "REPORT"
         reporting_scan = scan.model_copy(
@@ -248,7 +302,7 @@ class RunScanWorkflow:
             RenderReportInput(
                 scan_json=reporting_scan.model_dump_json(),
                 findings_json=_model_list_json(candidate_findings),
-                snapshot_json=snapshot.model_dump_json(),
+                snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
                 attack_surface_json=_model_list_json(attack_surface_items),
                 final_findings_json=_model_list_json(final_findings),
                 report_path=report_path,
@@ -287,8 +341,10 @@ class RunScanWorkflow:
             "report.generated",
             {"report_path": rendered_report.report_path},
         )
+        await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
 
         self._current_stage = "COMPLETED"
+        await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
         completed_at = workflow.now()
         await _persist_scan_state(
             scan_input.db_path,
@@ -312,6 +368,23 @@ class RunScanWorkflow:
             report_path=rendered_report.report_path,
             candidate_finding_count=len(candidate_findings),
             final_finding_count=len(final_findings),
+        )
+
+    async def _persist_cancelled_scan(self, db_path: str, scan_id: str) -> None:
+        self._current_stage = "CANCELLED"
+        await asyncio.shield(
+            _persist_scan_state(
+                db_path,
+                "update_scan_status",
+                {
+                    "scan_id": scan_id,
+                    "status": ScanStatus.CANCELLED.value,
+                    "started_at": None,
+                    "completed_at": workflow.now().isoformat(),
+                    "report_path": None,
+                },
+                cancellation_type=workflow.ActivityCancellationType.ABANDON,
+            )
         )
 
 
@@ -508,8 +581,12 @@ async def _persist_scan_state(
     db_path: str,
     operation: str,
     payload: dict[str, Any],
-) -> None:
-    await workflow.execute_activity(
+    *,
+    cancellation_type: workflow.ActivityCancellationType = (
+        workflow.ActivityCancellationType.TRY_CANCEL
+    ),
+) -> object:
+    return await workflow.execute_activity(
         "persist-scan-state",
         PersistScanStateInput(
             db_path=db_path,
@@ -518,7 +595,62 @@ async def _persist_scan_state(
         ),
         start_to_close_timeout=timedelta(minutes=1),
         retry_policy=ACTIVITY_RETRY_POLICY,
+        cancellation_type=cancellation_type,
     )
+
+
+async def _persist_scan_stage(db_path: str, scan_id: str, stage: str) -> None:
+    await _persist_scan_state(
+        db_path,
+        "update_scan_metadata",
+        {"scan_id": scan_id, "metadata": {"current_stage": stage}},
+    )
+
+
+async def _load_scan(db_path: str, scan_id: str) -> Scan | None:
+    payload = await _persist_scan_state(db_path, "load_scan", {"scan_id": scan_id})
+    if payload is None:
+        return None
+    if isinstance(payload, dict):
+        return Scan.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected scan payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+async def _load_attack_surface_items(db_path: str, scan_id: str) -> list[AttackSurfaceItem]:
+    payload = await _persist_scan_state(db_path, "load_attack_surface_items", {"scan_id": scan_id})
+    return _attack_surface_from_activity(payload)
+
+
+async def _load_candidate_findings(db_path: str, scan_id: str) -> list[CandidateFinding]:
+    payload = await _persist_scan_state(db_path, "load_candidate_findings", {"scan_id": scan_id})
+    if not isinstance(payload, list):
+        msg = f"Unexpected candidate findings payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    return [CandidateFinding.model_validate(item) for item in cast(list[object], payload)]
+
+
+async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]:
+    payload = await _persist_scan_state(db_path, "load_final_findings", {"scan_id": scan_id})
+    if not isinstance(payload, list):
+        msg = f"Unexpected final findings payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
+
+
+def _persisted_stage(scan: Scan | None) -> str | None:
+    if scan is None:
+        return None
+    stage = scan.metadata.get("current_stage")
+    return stage if isinstance(stage, str) else None
+
+
+def _stage_completed(current_stage: str | None, stage: str) -> bool:
+    if current_stage is None:
+        return False
+    current_order = COMPLETED_STAGE_ORDER.get(current_stage, -1)
+    stage_order = COMPLETED_STAGE_ORDER[stage]
+    return current_order >= stage_order
 
 
 def _model_json_dict(model: BaseModel) -> dict[str, Any]:

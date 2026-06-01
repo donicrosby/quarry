@@ -127,6 +127,7 @@ async def test_start_scan_posts_scan_request(client_context: ClientTestContext) 
     assert started_workflow.workflow_id == response["scan_id"]
     assert started_workflow.scan_input == RunScanInput(
         repo_path="/tmp/example-repo",
+        scan_id=response["scan_id"],
         target_url="http://localhost:8000",
         output_dir=".quarry",
         db_path=".quarry/quarry.db",
@@ -209,6 +210,23 @@ async def test_cancel_scan_posts_cancel_request(client_context: ClientTestContex
 
     assert response == {"scan_id": "scan-1", "status": "CANCELLING"}
     assert handle.cancelled is True
+
+
+async def test_resume_scan_posts_resume_request(client_context: ClientTestContext) -> None:
+    seed_scan_database(client_context.db_path, status=ScanStatus.CANCELLED)
+
+    response = await client_context.client.resume_scan("scan-1")
+
+    assert response == {"scan_id": "scan-1", "status": "RUNNING"}
+    assert len(client_context.temporal_client.started_workflows) == 1
+    started_workflow = client_context.temporal_client.started_workflows[0]
+    assert started_workflow.workflow == "RunScanWorkflow"
+    assert started_workflow.scan_input == RunScanInput(
+        repo_path="/tmp/example-repo",
+        scan_id="scan-1",
+        db_path=str(client_context.db_path),
+        resume=True,
+    )
 
 
 async def test_get_findings_returns_finding_models(client_context: ClientTestContext) -> None:

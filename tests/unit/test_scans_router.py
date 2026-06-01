@@ -102,10 +102,37 @@ async def test_start_scan_starts_temporal_workflow(scan_api: ScanApiTestContext)
     assert started_workflow.task_queue == "quarry-control"
     assert started_workflow.scan_input == RunScanInput(
         repo_path="/tmp/example-repo",
+        scan_id=body["scan_id"],
         target_url="http://localhost:8000",
         output_dir="/tmp/quarry-output",
         db_path=str(scan_api.db_path),
     )
+
+
+async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext) -> None:
+    seed_scan_database(scan_api.db_path, status=ScanStatus.CANCELLED)
+
+    response = await scan_api.client.post("/scans/scan-1/resume")
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body == {"scan_id": "scan-1", "status": "RUNNING"}
+    assert len(scan_api.temporal_client.started_workflows) == 1
+    started_workflow = scan_api.temporal_client.started_workflows[0]
+    assert started_workflow.workflow == "RunScanWorkflow"
+    assert started_workflow.workflow_id.startswith("scan-1-resume-")
+    assert started_workflow.scan_input == RunScanInput(
+        repo_path="/tmp/example-repo",
+        scan_id="scan-1",
+        db_path=str(scan_api.db_path),
+        resume=True,
+    )
+
+
+async def test_resume_scan_returns_404_for_unknown_scan(scan_api: ScanApiTestContext) -> None:
+    response = await scan_api.client.post("/scans/missing/resume")
+
+    assert response.status_code == 404
 
 
 async def test_start_diff_scan_starts_temporal_workflow(scan_api: ScanApiTestContext) -> None:
@@ -235,6 +262,7 @@ async def test_get_attack_surface_returns_404_for_unknown_scan(
 def seed_scan_database(
     db_path: Path,
     *,
+    status: ScanStatus = ScanStatus.COMPLETED,
     include_findings: bool = False,
     include_attack_surface: bool = False,
 ) -> None:
@@ -252,7 +280,7 @@ def seed_scan_database(
         target_id=target.id,
         requested_by="local-user",
         profile=local_scan_profile(),
-        status=ScanStatus.COMPLETED,
+        status=status,
         created_at=now,
         metadata={"repo_path": "/tmp/example-repo"},
     )

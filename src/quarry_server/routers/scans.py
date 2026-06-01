@@ -30,11 +30,42 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
         "RunScanWorkflow",
         RunScanInput(
             repo_path=body.repo_path,
+            scan_id=scan_id,
             db_path=body.db_path,
             output_dir=body.output_dir,
             target_url=body.target_url,
         ),
         id=scan_id,
+        task_queue=settings.task_queue,
+    )
+    return ScanResponse(scan_id=scan_id, status="RUNNING")
+
+
+@router.post("/{scan_id}/resume", status_code=202)
+async def resume_scan(scan_id: str, request: Request) -> ScanResponse:
+    """Resume an interrupted full scan from its persisted checkpoint."""
+    settings = _settings_from_request(request)
+    scan = _load_existing_scan(_repository_from_request(request), scan_id)
+    temporal_client = cast(Client, request.app.state.temporal_client)
+    if scan.metadata.get("scan_kind") == "diff":
+        raise HTTPException(status_code=409, detail="Diff scans cannot be resumed")
+    if scan.status is ScanStatus.COMPLETED or scan.metadata.get("current_stage") == "COMPLETED":
+        raise HTTPException(status_code=409, detail="Scan is already completed")
+
+    repo_path = _required_metadata_str(scan, "repo_path")
+    output_dir = _metadata_str(scan, "output_dir", default=".quarry") or ".quarry"
+    target_url = _metadata_str(scan, "target_url", default=None)
+    await temporal_client.start_workflow(
+        "RunScanWorkflow",
+        RunScanInput(
+            repo_path=repo_path,
+            scan_id=scan_id,
+            db_path=settings.db_path,
+            output_dir=output_dir,
+            target_url=target_url,
+            resume=True,
+        ),
+        id=f"{scan_id}-resume-{uuid4()}",
         task_queue=settings.task_queue,
     )
     return ScanResponse(scan_id=scan_id, status="RUNNING")
@@ -160,3 +191,17 @@ def _load_existing_scan(repository: QuarryRepository, scan_id: str) -> Scan:
         return repository.load_scan(scan_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Scan not found") from exc
+
+
+def _metadata_str(scan: Scan, key: str, *, default: str | None = None) -> str | None:
+    value = scan.metadata.get(key, default)
+    if value is None or isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _required_metadata_str(scan: Scan, key: str) -> str:
+    value = _metadata_str(scan, key)
+    if value is None:
+        raise HTTPException(status_code=409, detail=f"Scan is missing {key} metadata")
+    return value

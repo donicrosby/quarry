@@ -174,6 +174,15 @@ class QuarryRepository:
                 }
             ).model_dump_json()
 
+    def update_scan_metadata(self, scan_id: str, metadata: dict[str, object]) -> None:
+        with session_scope(self.engine) as session:
+            record = _get_scan_record(session, scan_id)
+            scan = Scan.model_validate_json(record.scan_json)
+            updated_metadata = {**scan.metadata, **metadata}
+            record.scan_json = scan.model_copy(
+                update={"metadata": updated_metadata}
+            ).model_dump_json()
+
     def append_event(self, event: WorkflowEvent) -> None:
         with session_scope(self.engine) as session:
             record = _get_scan_record(session, event.scan_id)

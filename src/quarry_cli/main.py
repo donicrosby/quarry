@@ -54,6 +54,17 @@ def cancel_scan(scan_id: Annotated[str, typer.Argument(help="Scan ID to cancel")
     _echo_key_values(result)
 
 
+@scan_app.command("resume")
+def scan_resume(scan_id: Annotated[str, typer.Argument(help="Scan ID to resume")]) -> None:
+    """Resume a scan from its last checkpoint."""
+    settings = QuarrySettings()
+    try:
+        result = asyncio.run(_resume_scan_command(settings, scan_id))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_key_values(result)
+
+
 @scan_app.command("list")
 def list_scans() -> None:
     settings = QuarrySettings()
@@ -122,6 +133,11 @@ async def _run_scan_command(
 async def _cancel_scan_command(settings: QuarrySettings, scan_id: str) -> dict[str, str]:
     async with QuarryClient(base_url=settings.server_url) as client:
         return await client.cancel_scan(scan_id)
+
+
+async def _resume_scan_command(settings: QuarrySettings, scan_id: str) -> dict[str, str]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.resume_scan(scan_id)
 
 
 async def _list_scans_command(settings: QuarrySettings) -> list[ScanSummary]:
