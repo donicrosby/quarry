@@ -1,18 +1,25 @@
 """Command-line interface for Quarry."""
 
+import asyncio
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 
+import httpx
 import typer
 
+from quarry.config import QuarrySettings
+from quarry.schemas import ScanSummary
 from quarry_activities.target import start_local_target
-from quarry_workflows import RunScanInput, run_fake_scan
+from quarry_client.client import QuarryClient
 
 app = typer.Typer(help="Quarry local vulnerability research harness.")
 scan_app = typer.Typer(help="Run scans.")
 target_app = typer.Typer(help="Manage local targets.")
 report_app = typer.Typer(help="Inspect reports.")
 benchmark_app = typer.Typer(help="Run local benchmarks.")
+POLL_INTERVAL_SECONDS = 1.0
+TERMINAL_SCAN_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CANCELED"})
 
 app.add_typer(scan_app, name="scan")
 app.add_typer(target_app, name="target")
@@ -22,22 +29,124 @@ app.add_typer(benchmark_app, name="benchmark")
 
 @scan_app.command("run")
 def run_scan(
-    repo: Annotated[Path, typer.Option("--repo", exists=True, file_okay=False, dir_okay=True)],
-    db: Annotated[Path, typer.Option("--db")] = Path(".quarry/quarry.db"),
-    output_dir: Annotated[Path, typer.Option("--output-dir")] = Path(".quarry"),
-    target: Annotated[str | None, typer.Option("--target")] = None,
+    repo: Annotated[str, typer.Option("--repo", help="Path to repository")],
+    target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
+    async_mode: Annotated[
+        bool,
+        typer.Option("--async", help="Return immediately"),
+    ] = False,
 ) -> None:
-    result = run_fake_scan(
-        RunScanInput(
-            repo_path=str(repo),
-            db_path=str(db),
-            output_dir=str(output_dir),
-            target_url=target,
-        )
-    )
-    typer.echo(f"scan_id={result.scan_id}")
-    typer.echo(f"candidate_findings={result.candidate_finding_count}")
-    typer.echo(f"report={result.report_path}")
+    settings = QuarrySettings()
+    try:
+        lines = asyncio.run(_run_scan_command(settings, repo, target, async_mode))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_lines(lines)
+
+
+@scan_app.command("cancel")
+def cancel_scan(scan_id: Annotated[str, typer.Argument(help="Scan ID to cancel")]) -> None:
+    settings = QuarrySettings()
+    try:
+        result = asyncio.run(_cancel_scan_command(settings, scan_id))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_key_values(result)
+
+
+@scan_app.command("list")
+def list_scans() -> None:
+    settings = QuarrySettings()
+    try:
+        scans = asyncio.run(_list_scans_command(settings))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+
+    if not scans:
+        typer.echo("No scans found.")
+        return
+
+    typer.echo("scan_id\tstatus\trepo_path\treport")
+    for scan in scans:
+        report_path = scan.report_path or "-"
+        typer.echo(f"{scan.scan_id}\t{scan.status}\t{scan.repo_path}\t{report_path}")
+
+
+@scan_app.command("status")
+def scan_status(scan_id: Annotated[str, typer.Argument(help="Scan ID to inspect")]) -> None:
+    settings = QuarrySettings()
+    try:
+        result = asyncio.run(_scan_status_command(settings, scan_id))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_key_values(result)
+
+
+@scan_app.command("diff")
+def scan_diff() -> None:
+    typer.echo("scan diff is not implemented until T23.")
+
+
+async def _run_scan_command(
+    settings: QuarrySettings,
+    repo: str,
+    target: str | None,
+    async_mode: bool,
+) -> list[str]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        result = await client.start_scan(repo_path=repo, target_url=target)
+        scan_id = result["scan_id"]
+        if async_mode:
+            return [scan_id]
+
+        lines = [f"Scan {scan_id} started..."]
+        while True:
+            status = await client.get_scan_status(scan_id)
+            lines.extend(_format_key_values(status))
+            if _is_terminal_status(status):
+                lines.append(f"Scan {scan_id} completed.")
+                return lines
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+
+
+async def _cancel_scan_command(settings: QuarrySettings, scan_id: str) -> dict[str, str]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.cancel_scan(scan_id)
+
+
+async def _list_scans_command(settings: QuarrySettings) -> list[ScanSummary]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.list_scans()
+
+
+async def _scan_status_command(settings: QuarrySettings, scan_id: str) -> dict[str, Any]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.get_scan_status(scan_id)
+
+
+def _is_terminal_status(status: Mapping[str, Any]) -> bool:
+    status_value = status.get("stage") or status.get("status")
+    if status_value is None:
+        return False
+    return str(status_value).upper() in TERMINAL_SCAN_STATES
+
+
+def _format_key_values(values: Mapping[str, object]) -> list[str]:
+    return [f"{key}={value}" for key, value in values.items()]
+
+
+def _echo_key_values(values: Mapping[str, object]) -> None:
+    _echo_lines(_format_key_values(values))
+
+
+def _echo_lines(lines: list[str]) -> None:
+    for line in lines:
+        typer.echo(line)
+
+
+def _exit_server_not_reachable(settings: QuarrySettings) -> NoReturn:
+    typer.echo(f"Error: Quarry server not reachable at {settings.server_url}", err=True)
+    raise typer.Exit(1)
 
 
 @app.command("worker")
