@@ -17,7 +17,7 @@ from typing import Any, cast
 from temporalio import activity
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
-from quarry.fingerprints import compute_fingerprint
+from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
@@ -155,6 +155,11 @@ def secret_match_to_candidate_finding(
         key_name=match.key_name,
         evidence_kind="hardcoded_assignment",
     )
+    root_cause_key = compute_root_cause_key(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=match.file_path,
+        sink=match.key_name,
+    )
     return CandidateFinding(
         id=fingerprint[:32],
         scan_id=scan_id,
@@ -163,6 +168,7 @@ def secret_match_to_candidate_finding(
         title=f"Hardcoded secret: {match.key_name}",
         hypothesis=f"Variable '{match.key_name}' in {match.file_path}:{match.line_number} "
         f"contains a hardcoded value that may be a secret.",
+        root_cause_key=root_cause_key,
         affected_component=match.file_path,
         source_refs=[
             SourceRef(
