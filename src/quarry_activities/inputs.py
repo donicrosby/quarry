@@ -7,6 +7,8 @@ Temporal boundary. Activities convert strings back to richer domain objects or
 
 from pydantic import BaseModel, ConfigDict
 
+from quarry.schemas import ChangedFile
+
 
 class CreateSnapshotInput(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -36,6 +38,12 @@ class GitDiffInput(BaseModel):
     repo_path: str
     base_commit: str
     head_commit: str
+
+
+class MapRegionsInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    changed_files: tuple[ChangedFile, ...]
 
 
 class ScanSecretsInput(BaseModel):
