@@ -50,6 +50,19 @@ class ScanSecretsInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     repo_root: str
+    file_paths: tuple[str, ...] | None = None
+
+
+class RunDiffScanInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    repo_path: str
+    base_commit: str
+    head_commit: str
+    db_path: str = ".quarry/quarry.db"
+    output_dir: str = ".quarry"
+    target_url: str = ""
 
 
 class ValidateCandidateInput(BaseModel):

@@ -83,8 +83,18 @@ def scan_status(scan_id: Annotated[str, typer.Argument(help="Scan ID to inspect"
 
 
 @scan_app.command("diff")
-def scan_diff() -> None:
-    typer.echo("scan diff is not implemented until T23.")
+def scan_diff(
+    repo: Annotated[str, typer.Option("--repo", help="Path to repository")],
+    base: Annotated[str, typer.Option("--base", help="Base commit")],
+    head: Annotated[str, typer.Option("--head", help="Head commit")],
+) -> None:
+    """Scan only the changes between two commits."""
+    settings = QuarrySettings()
+    try:
+        result = asyncio.run(_scan_diff_command(settings, repo, base, head))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_key_values(result)
 
 
 async def _run_scan_command(
@@ -122,6 +132,16 @@ async def _list_scans_command(settings: QuarrySettings) -> list[ScanSummary]:
 async def _scan_status_command(settings: QuarrySettings, scan_id: str) -> dict[str, Any]:
     async with QuarryClient(base_url=settings.server_url) as client:
         return await client.get_scan_status(scan_id)
+
+
+async def _scan_diff_command(
+    settings: QuarrySettings,
+    repo: str,
+    base: str,
+    head: str,
+) -> dict[str, str]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.start_diff_scan(repo_path=repo, base_commit=base, head_commit=head)
 
 
 def _is_terminal_status(status: Mapping[str, Any]) -> bool:

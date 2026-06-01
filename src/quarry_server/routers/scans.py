@@ -12,8 +12,9 @@ from temporalio.client import Client
 
 from quarry.config import QuarrySettings
 from quarry.schemas import AttackSurfaceItem, CandidateFinding, FinalFinding, Scan, ScanStatus
+from quarry_activities.inputs import RunDiffScanInput
 from quarry_persistence import QuarryRepository, ScanSummary
-from quarry_server.schemas import ScanResponse, StartScanRequest
+from quarry_server.schemas import DiffScanRequest, ScanResponse, StartScanRequest
 from quarry_workflows.run_scan import RunScanInput
 
 router = APIRouter(prefix="/scans", tags=["scans"])
@@ -29,6 +30,29 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
         "RunScanWorkflow",
         RunScanInput(
             repo_path=body.repo_path,
+            db_path=body.db_path,
+            output_dir=body.output_dir,
+            target_url=body.target_url,
+        ),
+        id=scan_id,
+        task_queue=settings.task_queue,
+    )
+    return ScanResponse(scan_id=scan_id, status="RUNNING")
+
+
+@router.post("/diff", status_code=202)
+async def start_diff_scan(request: Request, body: DiffScanRequest) -> ScanResponse:
+    """Start a commit-to-commit diff scan by launching the Temporal workflow."""
+    temporal_client = cast(Client, request.app.state.temporal_client)
+    settings = _settings_from_request(request)
+    scan_id = str(uuid4())
+    await temporal_client.start_workflow(
+        "RunDiffScanWorkflow",
+        RunDiffScanInput(
+            scan_id=scan_id,
+            repo_path=body.repo_path,
+            base_commit=body.base_commit,
+            head_commit=body.head_commit,
             db_path=body.db_path,
             output_dir=body.output_dir,
             target_url=body.target_url,

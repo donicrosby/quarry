@@ -23,6 +23,7 @@ from quarry.schemas import (
     VulnerabilityClass,
     local_scan_profile,
 )
+from quarry_activities.inputs import RunDiffScanInput
 from quarry_client.client import QuarryClient
 from quarry_persistence import QuarryRepository
 from quarry_server.app import create_app
@@ -32,7 +33,7 @@ from quarry_workflows.run_scan import RunScanInput
 @dataclass(frozen=True)
 class StartedWorkflow:
     workflow: str
-    scan_input: RunScanInput
+    scan_input: RunScanInput | RunDiffScanInput
     workflow_id: str
     task_queue: str
 
@@ -45,7 +46,7 @@ class RecordingTemporalClient:
     async def start_workflow(
         self,
         workflow: str,
-        scan_input: RunScanInput,
+        scan_input: RunScanInput | RunDiffScanInput,
         *,
         id: str,
         task_queue: str,
@@ -129,6 +130,29 @@ async def test_start_scan_posts_scan_request(client_context: ClientTestContext) 
         target_url="http://localhost:8000",
         output_dir=".quarry",
         db_path=".quarry/quarry.db",
+    )
+
+
+async def test_start_diff_scan_posts_diff_scan_request(
+    client_context: ClientTestContext,
+) -> None:
+    response = await client_context.client.start_diff_scan(
+        repo_path="/tmp/example-repo",
+        base_commit="abc123",
+        head_commit="def456",
+    )
+
+    assert response["status"] == "RUNNING"
+    assert response["scan_id"]
+    assert len(client_context.temporal_client.started_workflows) == 1
+    started_workflow = client_context.temporal_client.started_workflows[0]
+    assert started_workflow.workflow == "RunDiffScanWorkflow"
+    assert started_workflow.workflow_id == response["scan_id"]
+    assert started_workflow.scan_input == RunDiffScanInput(
+        scan_id=response["scan_id"],
+        repo_path="/tmp/example-repo",
+        base_commit="abc123",
+        head_commit="def456",
     )
 
 

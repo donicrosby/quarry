@@ -17,6 +17,7 @@ runner = CliRunner()
 class FakeQuarryClient:
     base_urls: ClassVar[list[str]] = []
     started_scans: ClassVar[list[tuple[str, str | None]]] = []
+    started_diff_scans: ClassVar[list[tuple[str, str, str]]] = []
     status_calls: ClassVar[list[str]] = []
     cancel_calls: ClassVar[list[str]] = []
     closed_count: ClassVar[int] = 0
@@ -47,6 +48,17 @@ class FakeQuarryClient:
         self.started_scans.append((repo_path, target_url))
         return self.start_response
 
+    async def start_diff_scan(
+        self,
+        repo_path: str,
+        base_commit: str,
+        head_commit: str,
+    ) -> dict[str, str]:
+        if self.connect_error_on == "diff":
+            raise httpx.ConnectError("server unavailable")
+        self.started_diff_scans.append((repo_path, base_commit, head_commit))
+        return self.start_response
+
     async def get_scan_status(self, scan_id: str) -> dict[str, Any]:
         if self.connect_error_on == "status":
             raise httpx.ConnectError("server unavailable")
@@ -70,6 +82,7 @@ class FakeQuarryClient:
 def setup_fake_client(monkeypatch: Any) -> None:
     FakeQuarryClient.base_urls = []
     FakeQuarryClient.started_scans = []
+    FakeQuarryClient.started_diff_scans = []
     FakeQuarryClient.status_calls = []
     FakeQuarryClient.cancel_calls = []
     FakeQuarryClient.closed_count = 0
@@ -165,11 +178,26 @@ def test_scan_status_uses_client(monkeypatch: Any) -> None:
     assert FakeQuarryClient.status_calls == ["scan-1"]
 
 
-def test_scan_diff_is_stub_until_t23() -> None:
-    result = runner.invoke(main.app, ["scan", "diff"])
+def test_scan_diff_uses_client(monkeypatch: Any) -> None:
+    setup_fake_client(monkeypatch)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "scan",
+            "diff",
+            "--repo",
+            "/tmp/example-repo",
+            "--base",
+            "abc123",
+            "--head",
+            "def456",
+        ],
+    )
 
     assert result.exit_code == 0
-    assert result.output == "scan diff is not implemented until T23.\n"
+    assert result.output == "scan_id=scan-123\nstatus=RUNNING\n"
+    assert FakeQuarryClient.started_diff_scans == [("/tmp/example-repo", "abc123", "def456")]
 
 
 def test_scan_commands_show_clear_error_when_server_unreachable(monkeypatch: Any) -> None:

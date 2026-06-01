@@ -13,6 +13,7 @@ from quarry.config import QuarrySettings
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.mapper import map_impacted_regions
 from quarry_server.app import create_app, lifespan
+from quarry_workflows import RunDiffScanWorkflow
 
 
 class RecordingTemporalClient:
@@ -74,7 +75,8 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert app.state.temporal_client is client
             assert worker.client is client
             assert worker.task_queue == QuarrySettings().task_queue
-            assert len(worker.workflows) == 1
+            assert len(worker.workflows) == 2
+            assert RunDiffScanWorkflow in worker.workflows
             assert len(worker.activities) == 10
             assert git_diff_commits in worker.activities
             assert map_impacted_regions in worker.activities

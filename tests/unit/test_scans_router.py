@@ -23,6 +23,7 @@ from quarry.schemas import (
     VulnerabilityClass,
     local_scan_profile,
 )
+from quarry_activities.inputs import RunDiffScanInput
 from quarry_persistence import QuarryRepository
 from quarry_server.app import create_app
 from quarry_workflows.run_scan import RunScanInput
@@ -31,7 +32,7 @@ from quarry_workflows.run_scan import RunScanInput
 @dataclass(frozen=True)
 class StartedWorkflow:
     workflow: str
-    scan_input: RunScanInput
+    scan_input: RunScanInput | RunDiffScanInput
     workflow_id: str
     task_queue: str
 
@@ -43,7 +44,7 @@ class RecordingTemporalClient:
     async def start_workflow(
         self,
         workflow: str,
-        scan_input: RunScanInput,
+        scan_input: RunScanInput | RunDiffScanInput,
         *,
         id: str,
         task_queue: str,
@@ -102,6 +103,38 @@ async def test_start_scan_starts_temporal_workflow(scan_api: ScanApiTestContext)
     assert started_workflow.scan_input == RunScanInput(
         repo_path="/tmp/example-repo",
         target_url="http://localhost:8000",
+        output_dir="/tmp/quarry-output",
+        db_path=str(scan_api.db_path),
+    )
+
+
+async def test_start_diff_scan_starts_temporal_workflow(scan_api: ScanApiTestContext) -> None:
+    response = await scan_api.client.post(
+        "/scans/diff",
+        json={
+            "repo_path": "/tmp/example-repo",
+            "base_commit": "abc123",
+            "head_commit": "def456",
+            "output_dir": "/tmp/quarry-output",
+            "db_path": str(scan_api.db_path),
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert set(body) == {"scan_id", "status"}
+    assert body["scan_id"]
+    assert body["status"] == "RUNNING"
+    assert len(scan_api.temporal_client.started_workflows) == 1
+    started_workflow = scan_api.temporal_client.started_workflows[0]
+    assert started_workflow.workflow == "RunDiffScanWorkflow"
+    assert started_workflow.workflow_id == body["scan_id"]
+    assert started_workflow.task_queue == "quarry-control"
+    assert started_workflow.scan_input == RunDiffScanInput(
+        scan_id=body["scan_id"],
+        repo_path="/tmp/example-repo",
+        base_commit="abc123",
+        head_commit="def456",
         output_dir="/tmp/quarry-output",
         db_path=str(scan_api.db_path),
     )

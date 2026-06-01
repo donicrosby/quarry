@@ -12,6 +12,7 @@ import re
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from temporalio import activity
 
@@ -89,18 +90,25 @@ def scan_file_for_secrets(file_path: Path, repo_root: Path) -> list[SecretMatch]
 
 
 @activity.defn(name="scan-repo-for-secrets")
-def scan_repo_for_secrets(repo_root: ScanSecretsInput | dict[str, str] | Path) -> list[SecretMatch]:
+def scan_repo_for_secrets(
+    repo_root: ScanSecretsInput | dict[str, object] | Path,
+) -> list[SecretMatch]:
     """Scan all source files in a repository for hardcoded secrets."""
+    file_paths: tuple[str, ...] | None = None
     if isinstance(repo_root, dict):
-        repo_root = ScanSecretsInput(**repo_root)
+        repo_root = ScanSecretsInput(**cast(dict[str, Any], repo_root))
     if isinstance(repo_root, ScanSecretsInput):
+        file_paths = repo_root.file_paths
         repo_root = Path(repo_root.repo_root)
-    return _scan_repo_for_secrets_impl(repo_root)
+    return _scan_repo_for_secrets_impl(repo_root, file_paths)
 
 
-def _scan_repo_for_secrets_impl(repo_root: Path) -> list[SecretMatch]:
+def _scan_repo_for_secrets_impl(
+    repo_root: Path,
+    file_paths: tuple[str, ...] | None = None,
+) -> list[SecretMatch]:
     all_matches: list[SecretMatch] = []
-    files = sorted(repo_root.rglob("*"))
+    files = _candidate_secret_files(repo_root, file_paths)
     for i, path in enumerate(files):
         if not path.is_file():
             continue
@@ -111,6 +119,12 @@ def _scan_repo_for_secrets_impl(repo_root: Path) -> list[SecretMatch]:
                 activity.heartbeat(f"Scanned {i}/{len(files)} files")
         all_matches.extend(scan_file_for_secrets(path, repo_root))
     return all_matches
+
+
+def _candidate_secret_files(repo_root: Path, file_paths: tuple[str, ...] | None) -> list[Path]:
+    if file_paths is None:
+        return sorted(repo_root.rglob("*"))
+    return [repo_root / file_path for file_path in file_paths]
 
 
 def secret_match_to_candidate_finding(

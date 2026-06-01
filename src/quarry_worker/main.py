@@ -18,7 +18,7 @@ from quarry_activities.validation import (
     validate_secret_candidate,
 )
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
-from quarry_workflows import RunScanWorkflow
+from quarry_workflows import RunDiffScanWorkflow, RunScanWorkflow
 
 
 async def run_worker() -> None:
@@ -30,7 +30,7 @@ async def run_worker() -> None:
     worker = Worker(
         client,
         task_queue="quarry-control",
-        workflows=[RunScanWorkflow],
+        workflows=[RunScanWorkflow, RunDiffScanWorkflow],
         activities=[
             create_repository_snapshot,
             persist_scan_state,

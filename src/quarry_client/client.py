@@ -47,6 +47,24 @@ class QuarryClient:
         payload = _json_object(response)
         return {"scan_id": str(payload["scan_id"]), "status": str(payload["status"])}
 
+    async def start_diff_scan(
+        self,
+        repo_path: str,
+        base_commit: str,
+        head_commit: str,
+    ) -> dict[str, str]:
+        response = await self._client.post(
+            "/scans/diff",
+            json={
+                "repo_path": repo_path,
+                "base_commit": base_commit,
+                "head_commit": head_commit,
+            },
+        )
+        response.raise_for_status()
+        payload = _json_object(response)
+        return {"scan_id": str(payload["scan_id"]), "status": str(payload["status"])}
+
     async def get_scan(self, scan_id: str) -> Scan:
         response = await self._client.get(f"/scans/{scan_id}")
         response.raise_for_status()
