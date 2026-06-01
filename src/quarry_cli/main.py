@@ -182,10 +182,12 @@ def server(
 
 
 @app.command("tui")
-def tui(db: Annotated[Path, typer.Option("--db")] = Path(".quarry/quarry.db")) -> None:
+def tui(
+    api_url: Annotated[str, typer.Option("--api-url")] = "http://localhost:8000",
+) -> None:
     from quarry_tui.app import QuarryTuiApp
 
-    QuarryTuiApp(db_path=db).run()
+    QuarryTuiApp(api_url=api_url).run()
 
 
 @target_app.command("start")

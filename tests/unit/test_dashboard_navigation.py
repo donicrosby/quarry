@@ -1,5 +1,4 @@
-from pathlib import Path
-
+from quarry_client.client import QuarryClient
 from quarry_tui.screens.attack_surface import AttackSurfaceScreen
 from quarry_tui.screens.dashboard import Dashboard
 
@@ -10,7 +9,7 @@ async def test_scan_selected_message_carries_scan_id() -> None:
 
 
 async def test_attack_surface_screen_is_valid_screen() -> None:
-    db_path = Path("/tmp/nonexistent-test.db")
-    screen = AttackSurfaceScreen(db_path, "scan-1")
+    client = QuarryClient(base_url="http://localhost:8000")
+    screen = AttackSurfaceScreen(client, "scan-1")
     assert screen.scan_id == "scan-1"
-    assert screen.db_path == db_path
+    assert screen.client is client
