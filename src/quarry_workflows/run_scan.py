@@ -241,7 +241,8 @@ class RunScanWorkflow:
                     scan_id=scan.id,
                     workspace_id="local",
                     created_by="secrets-scanner",
-                ).model_copy(update={"created_at": workflow.now()})
+                    created_at=workflow.now(),
+                )
                 await _persist_scan_state(
                     scan_input.db_path,
                     "save_candidate_finding",

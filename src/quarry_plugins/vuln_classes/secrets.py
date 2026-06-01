@@ -11,6 +11,7 @@ no allowlist management beyond common placeholder patterns.
 import re
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -146,8 +147,14 @@ def secret_match_to_candidate_finding(
     scan_id: str,
     workspace_id: str = "local",
     created_by: str = "secrets-scanner",
+    created_at: datetime | None = None,
 ) -> CandidateFinding:
-    """Convert a secret match into a CandidateFinding."""
+    """Convert a secret match into a CandidateFinding.
+
+    ``created_at`` must be supplied from workflow code (``workflow.now()``) so
+    this stays deterministic inside Temporal's sandbox; it defaults to wall-clock
+    time only for direct, non-workflow callers.
+    """
     fingerprint = compute_fingerprint(
         vuln_class=VulnerabilityClass.SECRETS,
         file_path=match.file_path,
@@ -180,7 +187,7 @@ def secret_match_to_candidate_finding(
         ],
         confidence=Confidence.MEDIUM,
         created_by=created_by,
-        created_at=utc_now(),
+        created_at=created_at or utc_now(),
         metadata={
             "key_name": match.key_name,
             "value_length": len(match.value),
