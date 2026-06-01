@@ -234,6 +234,17 @@ class Scan(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ScanSummary(BaseModel):
+    scan_id: str
+    repo_path: str
+    status: str
+    profile_id: str
+    event_count: int
+    report_path: str | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
