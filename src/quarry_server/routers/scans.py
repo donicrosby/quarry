@@ -1,13 +1,17 @@
 """Scan lifecycle API router."""
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
 from quarry.config import QuarrySettings
-from quarry.schemas import AttackSurfaceItem, CandidateFinding, FinalFinding, Scan
+from quarry.schemas import AttackSurfaceItem, CandidateFinding, FinalFinding, Scan, ScanStatus
 from quarry_persistence import QuarryRepository, ScanSummary
 from quarry_server.schemas import ScanResponse, StartScanRequest
 from quarry_workflows.run_scan import RunScanInput
@@ -46,6 +50,51 @@ async def list_scans(request: Request) -> list[ScanSummary]:
 async def get_scan(scan_id: str, request: Request) -> Scan:
     """Load one scan by id from SQLite."""
     return _load_existing_scan(_repository_from_request(request), scan_id)
+
+
+@router.get("/{scan_id}/status")
+async def scan_status_sse(scan_id: str, request: Request) -> EventSourceResponse:
+    """Stream Temporal workflow stage updates for one scan."""
+
+    async def event_generator() -> AsyncIterator[dict[str, str]]:
+        temporal_client = cast(Client, request.app.state.temporal_client)
+        last_stage: str | None = None
+        try:
+            handle = temporal_client.get_workflow_handle(scan_id)
+        except Exception:
+            yield {"event": "error", "data": json.dumps({"error": "Workflow not found"})}
+            return
+
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                stage = cast(str, await handle.query("get_stage"))
+            except Exception:
+                yield {"event": "error", "data": json.dumps({"error": "Workflow not found"})}
+                break
+
+            if stage != last_stage:
+                yield {"event": "stage_update", "data": json.dumps({"stage": stage})}
+                last_stage = stage
+            if stage == "COMPLETED":
+                yield {"event": "done", "data": json.dumps({"stage": "COMPLETED"})}
+                break
+            await asyncio.sleep(1)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/{scan_id}/cancel", status_code=202)
+async def cancel_scan(scan_id: str, request: Request) -> dict[str, str]:
+    """Request cancellation of a running scan workflow."""
+    temporal_client = cast(Client, request.app.state.temporal_client)
+    scan = _load_existing_scan(_repository_from_request(request), scan_id)
+    if scan.status in (ScanStatus.COMPLETED, ScanStatus.CANCELLED):
+        raise HTTPException(status_code=409, detail=f"Scan is already {scan.status.value}")
+    handle = temporal_client.get_workflow_handle(scan_id)
+    await handle.cancel()
+    return {"scan_id": scan_id, "status": "CANCELLING"}
 
 
 @router.get("/{scan_id}/findings")
