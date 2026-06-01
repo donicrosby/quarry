@@ -12,6 +12,7 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from quarry_activities.attack_surface import extract_fastapi_routes, extract_fastapi_routes_for_repo
+from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
@@ -79,6 +80,7 @@ async def temporal_worker(
             scan_repo_for_secrets,
             validate_secret_candidate,
             promote_to_final_finding_metadata,
+            build_coverage_ledger_activity,
             render_markdown_report_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),

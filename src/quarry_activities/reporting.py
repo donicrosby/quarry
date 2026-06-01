@@ -11,6 +11,7 @@ from quarry.schemas import (
     ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
+    CoverageLedger,
     FinalFinding,
     RedactionStatus,
     RepositorySnapshot,
@@ -54,6 +55,31 @@ Profile: `{{ scan.profile.id }}`
 {% else -%}
 No routes mapped.
 {% endif %}
+
+{% if coverage -%}
+{% set scanned = coverage.attack_surface_items_scanned -%}
+{% set total = coverage.attack_surface_items_total -%}
+## Coverage
+
+- Vuln classes requested: `{{ coverage.vuln_classes_requested | join(", ") or "none" }}`
+- Vuln classes completed: `{{ coverage.vuln_classes_completed | join(", ") or "none" }}`
+- Attack surface items scanned: `{{ scanned }}` of `{{ total }}`
+
+{% if coverage.skipped_items -%}
+### Skipped coverage
+
+| Item | Class | Reason | Recommended next task |
+|------|-------|--------|-----------------------|
+{% for gap in coverage.skipped_items -%}
+{% set gap_item = gap.attack_surface_item_id or "-" -%}
+{% set gap_class = gap.vuln_class.value if gap.vuln_class else "-" -%}
+{% set gap_next = gap.recommended_next_task or "-" -%}
+| {{ gap_item }} | {{ gap_class }} | {{ gap.reason }} | {{ gap_next }} |
+{% endfor %}
+{% else -%}
+Full coverage: no items were skipped.
+{% endif %}
+{% endif -%}
 
 {% if final_findings -%}
 ## Final findings
@@ -105,6 +131,7 @@ def render_markdown_report_activity(
             attack_surface_json=input.get("attack_surface_json"),
             final_findings_json=input.get("final_findings_json"),
             report_path=input.get("report_path"),
+            coverage_json=input.get("coverage_json"),
         )
     return _render_markdown_report_from_input(input)
 
@@ -115,8 +142,11 @@ def render_markdown_report(
     snapshot: RepositorySnapshot | None = None,
     attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
+    coverage: CoverageLedger | None = None,
 ) -> str:
-    return _render_markdown_report_impl(scan, findings, snapshot, attack_surface, final_findings)
+    return _render_markdown_report_impl(
+        scan, findings, snapshot, attack_surface, final_findings, coverage
+    )
 
 
 def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReportOutput:
@@ -137,12 +167,18 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         if input.final_findings_json is not None
         else None
     )
+    coverage = (
+        CoverageLedger.model_validate_json(input.coverage_json)
+        if input.coverage_json is not None
+        else None
+    )
     report_text = _render_markdown_report_impl(
         scan,
         findings,
         snapshot,
         attack_surface,
         final_findings,
+        coverage,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -163,6 +199,7 @@ def _render_markdown_report_impl(
     snapshot: RepositorySnapshot | None = None,
     attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
+    coverage: CoverageLedger | None = None,
 ) -> str:
     summary = (
         f"Quarry produced {len(final_findings or [])} validated finding(s) "
@@ -175,6 +212,7 @@ def _render_markdown_report_impl(
         snapshot=snapshot,
         attack_surface=attack_surface or [],
         final_findings=final_findings or [],
+        coverage=coverage,
     )
 
 

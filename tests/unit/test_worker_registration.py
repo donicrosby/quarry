@@ -1,6 +1,7 @@
 """Test worker registration and configuration."""
 
 from quarry_activities.attack_surface import extract_fastapi_routes
+from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import (
@@ -22,9 +23,10 @@ class TestWorkerImports:
             scan_repo_for_secrets,
             validate_secret_candidate,
             promote_to_final_finding_metadata,
+            build_coverage_ledger_activity,
             render_markdown_report,
         ]
-        assert len(activities) == 6
+        assert len(activities) == 7
         for act in activities:
             assert callable(act)
 
@@ -37,6 +39,7 @@ class TestActivityDecorators:
             scan_repo_for_secrets,
             validate_secret_candidate,
             promote_to_final_finding_metadata,
+            build_coverage_ledger_activity,
             render_markdown_report,
         ]
         for act in activities:
@@ -82,6 +85,7 @@ class TestWorkerConfiguration:
             "scan_repo_for_secrets",
             "validate_secret_candidate",
             "promote_to_final_finding_metadata",
+            "build_coverage_ledger_activity",
             "render_markdown_report",
         ]
         for act_name in expected_activities:
