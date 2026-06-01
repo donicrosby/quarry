@@ -1,5 +1,3 @@
-"""Tests for the async Quarry HTTP client."""
-
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator

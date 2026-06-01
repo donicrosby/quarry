@@ -17,8 +17,6 @@ from quarry_workflows import RunDiffScanWorkflow
 
 
 class RecordingTemporalClient:
-    """Minimal Temporal client test double with async close support."""
-
     def __init__(self) -> None:
         self.closed = False
 
@@ -27,8 +25,6 @@ class RecordingTemporalClient:
 
 
 class RecordingWorker:
-    """Worker test double that records construction and cancellation."""
-
     instances: ClassVar[list[RecordingWorker]] = []
 
     def __init__(

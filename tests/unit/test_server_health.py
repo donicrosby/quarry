@@ -13,7 +13,6 @@ from quarry_server.app import create_app
 
 @pytest.fixture
 async def client() -> AsyncGenerator[AsyncClient]:
-    """Create an async HTTP client for testing."""
     mock_client = AsyncMock()
     with patch("quarry_server.app.Client.connect", return_value=mock_client):
         app = create_app()
@@ -23,7 +22,6 @@ async def client() -> AsyncGenerator[AsyncClient]:
 
 
 async def test_healthz(client: AsyncClient) -> None:
-    """GET /healthz should return 200 and status ok."""
     response = await client.get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}

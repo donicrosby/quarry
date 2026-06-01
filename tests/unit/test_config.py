@@ -1,5 +1,3 @@
-"""Tests for QuarrySettings configuration."""
-
 import os
 from unittest import mock
 
@@ -8,7 +6,6 @@ from pydantic import ValidationError
 
 
 def test_config_defaults() -> None:
-    """Test that QuarrySettings uses correct default values."""
     from quarry.config import QuarrySettings
 
     settings = QuarrySettings()
@@ -22,7 +19,6 @@ def test_config_defaults() -> None:
 
 
 def test_config_env_var_override() -> None:
-    """Test that environment variables override defaults."""
     from quarry.config import QuarrySettings
 
     with mock.patch.dict(
@@ -38,26 +34,21 @@ def test_config_env_var_override() -> None:
         assert settings.temporal_address == "remote-temporal:7233"
         assert settings.server_url == "https://api.example.com"
         assert settings.task_queue == "custom-queue"
-        # Unset env vars should use defaults
         assert settings.server_host == "127.0.0.1"
         assert settings.server_port == 8000
 
 
 def test_config_type_validation_port() -> None:
-    """Test that server_port validates as integer."""
     from quarry.config import QuarrySettings
 
-    # Valid integer
     settings = QuarrySettings(server_port=9000)
     assert settings.server_port == 9000
 
-    # String that can be coerced should work
     settings = QuarrySettings(server_port="8080")  # type: ignore[arg-type]
     assert settings.server_port == 8080
 
 
 def test_config_type_validation_port_failure() -> None:
-    """Test that invalid port type raises validation error."""
     from quarry.config import QuarrySettings
 
     with pytest.raises(ValidationError):
@@ -65,7 +56,6 @@ def test_config_type_validation_port_failure() -> None:
 
 
 def test_config_all_fields_present() -> None:
-    """Test initialization with all fields explicitly set."""
     from quarry.config import QuarrySettings
 
     settings = QuarrySettings(

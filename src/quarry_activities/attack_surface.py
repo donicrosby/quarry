@@ -110,8 +110,8 @@ def _string_literal(node: ast.expr) -> str | None:
 
 def _extract_path_params(route: str) -> list[str]:
     """Extract {param} placeholders from a route path."""
-    params: list[str] = []
-    for segment in route.split("/"):
-        if segment.startswith("{") and segment.endswith("}"):
-            params.append(segment[1:-1])
-    return params
+    return [
+        segment[1:-1]
+        for segment in route.split("/")
+        if segment.startswith("{") and segment.endswith("}")
+    ]

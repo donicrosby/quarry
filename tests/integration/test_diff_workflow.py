@@ -1,5 +1,3 @@
-"""Integration tests for commit-to-commit diff scanning."""
-
 import subprocess
 from pathlib import Path
 

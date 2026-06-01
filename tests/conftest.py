@@ -57,7 +57,6 @@ async def temporal_env() -> AsyncGenerator[WorkflowEnvironment]:
 async def temporal_client(
     temporal_env: WorkflowEnvironment,
 ) -> AsyncGenerator[Client]:
-    """Yield the Temporal client from the test environment."""
     yield temporal_env.client
 
 

@@ -1,5 +1,3 @@
-"""Integration test: Temporal workflow execution with activity calls."""
-
 from pathlib import Path
 
 import pytest

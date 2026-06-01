@@ -36,7 +36,6 @@ from quarry_workflows.diff_scan import RunDiffScanInput, RunDiffScanWorkflow
 
 
 def _git(repo_path: Path, *args: str) -> str:
-    """Run a git command inside *repo_path* and return stripped stdout."""
     result = subprocess.run(
         ["git", *args],
         cwd=repo_path,
@@ -63,7 +62,6 @@ def _seed_interrupted_scan(
     repo_path: str,
     output_dir: str,
 ) -> None:
-    """Persist a CANCELLED scan at the SNAPSHOT checkpoint for resume testing."""
     repository = QuarryRepository(db_path)
     now = datetime(2026, 1, 1, tzinfo=UTC)
     target = Target(
@@ -90,7 +88,6 @@ def _seed_interrupted_scan(
 
 
 def _create_repo_with_secrets(repo_path: Path) -> None:
-    """Initialise a git repo containing a file with a known secret."""
     repo_path.mkdir()
     _git(repo_path, "init")
     _git(repo_path, "config", "user.email", "quarry@e2e.test")
@@ -104,7 +101,6 @@ def _create_repo_with_secrets(repo_path: Path) -> None:
 
 
 async def _wait_for_status(db_path: Path, scan_id: str, status: ScanStatus) -> None:
-    """Wait until the scan reaches *status* or a terminal state."""
     repository = QuarryRepository(db_path)
     deadline = asyncio.get_running_loop().time() + 10
     while asyncio.get_running_loop().time() < deadline:
@@ -125,7 +121,6 @@ async def _wait_for_status(db_path: Path, scan_id: str, status: ScanStatus) -> N
 def slow_scan_repo_for_secrets(
     repo_root: ScanSecretsInput | dict[str, object] | Path,
 ) -> list[SecretMatch]:
-    """Slow secrets scanner that heartbeats and checks for cancellation."""
     for index in range(1_000):
         with suppress(RuntimeError):
             activity.heartbeat(f"Waiting for cancellation {index}")

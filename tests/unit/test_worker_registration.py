@@ -12,14 +12,10 @@ from quarry_worker.main import run_worker
 
 
 class TestWorkerImports:
-    """Test that all required imports work."""
-
     def test_run_worker_function_exists(self) -> None:
-        """Test that run_worker function is importable."""
         assert callable(run_worker)
 
     def test_all_activities_importable(self) -> None:
-        """Test that all activity functions can be imported."""
         activities = [
             create_repository_snapshot,
             extract_fastapi_routes,
@@ -34,10 +30,7 @@ class TestWorkerImports:
 
 
 class TestActivityDecorators:
-    """Test that all activities are properly decorated with @activity.defn."""
-
     def test_all_activities_are_functions(self) -> None:
-        """Test that all activities are callable functions."""
         activities = [
             create_repository_snapshot,
             extract_fastapi_routes,
@@ -51,10 +44,7 @@ class TestActivityDecorators:
 
 
 class TestWorkerConfiguration:
-    """Test worker configuration from source code inspection."""
-
     def test_task_queue_name(self) -> None:
-        """Test that task queue is 'quarry-control'."""
         import inspect
 
         from quarry_worker.main import run_worker
@@ -63,7 +53,6 @@ class TestWorkerConfiguration:
         assert 'task_queue="quarry-control"' in source
 
     def test_thread_pool_executor_configured(self) -> None:
-        """Test that ThreadPoolExecutor is configured with max_workers=10."""
         import inspect
 
         from quarry_worker.main import run_worker
@@ -73,7 +62,6 @@ class TestWorkerConfiguration:
         assert "activity_executor=ThreadPoolExecutor" in source
 
     def test_uses_quarry_settings(self) -> None:
-        """Test that QuarrySettings is used for temporal_address."""
         import inspect
 
         from quarry_worker.main import run_worker
@@ -83,7 +71,6 @@ class TestWorkerConfiguration:
         assert "settings.temporal_address" in source
 
     def test_all_activities_registered(self) -> None:
-        """Test that all 6 activities are registered in the worker."""
         import inspect
 
         from quarry_worker.main import run_worker

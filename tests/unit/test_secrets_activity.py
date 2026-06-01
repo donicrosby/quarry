@@ -41,12 +41,9 @@ class TestScanRepoForSecretsDirectCall:
         assert matches == []
 
     def test_direct_call_with_many_files(self, tmp_path: Path) -> None:
-        """Exercise heartbeat path with >50 files."""
         for idx in range(55):
             f = tmp_path / f"file_{idx:03d}.py"
             f.write_text(f'VAR_{idx} = "value_{idx}"\n', encoding="utf-8")
-        # Only file_000 through file_054 have no secret-pattern names,
-        # so results should be empty (VAR_N doesn't match SECRET_NAME_PATTERN)
         matches = scan_repo_for_secrets(tmp_path)
         assert isinstance(matches, list)
 

@@ -1,5 +1,3 @@
-"""Tests for the TUI using the HTTP client SDK instead of SQLite."""
-
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator

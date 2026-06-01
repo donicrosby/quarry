@@ -1,5 +1,3 @@
-"""Integration tests for resuming interrupted full scans."""
-
 from __future__ import annotations
 
 import sqlite3

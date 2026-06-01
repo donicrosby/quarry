@@ -97,8 +97,7 @@ def render_markdown_report_activity(
         scan_json = input["scan_json"]
         findings_json = input["findings_json"]
         if not isinstance(scan_json, str) or not isinstance(findings_json, str):
-            msg = "scan_json and findings_json must be strings"
-            raise TypeError(msg)
+            raise TypeError("scan_json and findings_json must be strings")
         input = RenderReportInput(
             scan_json=scan_json,
             findings_json=findings_json,
@@ -146,8 +145,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         final_findings,
     )
     if input.report_path is None:
-        msg = "report_path is required for Temporal report rendering"
-        raise TypeError(msg)
+        raise TypeError("report_path is required for Temporal report rendering")
     report_path = Path(input.report_path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")
@@ -166,11 +164,9 @@ def _render_markdown_report_impl(
     attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
 ) -> str:
-    finding_count = len(final_findings) if final_findings else 0
-    candidate_count = len(findings)
     summary = (
-        f"Quarry produced {finding_count} validated finding(s) "
-        f"and {candidate_count} candidate finding(s) for the local scan."
+        f"Quarry produced {len(final_findings or [])} validated finding(s) "
+        f"and {len(findings)} candidate finding(s) for the local scan."
     )
     return REPORT_TEMPLATE.render(
         scan=scan,

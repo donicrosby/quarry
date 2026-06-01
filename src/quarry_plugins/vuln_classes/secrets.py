@@ -185,9 +185,7 @@ def secret_match_to_candidate_finding(
 
 def _is_placeholder(value: str) -> bool:
     stripped = value.strip().lower()
-    if stripped in PLACEHOLDER_VALUES:
-        return True
-    return bool(PLACEHOLDER_PATTERNS.search(stripped))
+    return stripped in PLACEHOLDER_VALUES or bool(PLACEHOLDER_PATTERNS.search(stripped))
 
 
 def _is_text_file(path: Path) -> bool:

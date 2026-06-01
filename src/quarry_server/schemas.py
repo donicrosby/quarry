@@ -4,8 +4,6 @@ from pydantic import BaseModel, ConfigDict
 
 
 class StartScanRequest(BaseModel):
-    """Request body for starting a scan workflow."""
-
     model_config = ConfigDict(frozen=True)
 
     repo_path: str
@@ -15,8 +13,6 @@ class StartScanRequest(BaseModel):
 
 
 class DiffScanRequest(BaseModel):
-    """Request body for starting a commit-to-commit diff scan workflow."""
-
     model_config = ConfigDict(frozen=True)
 
     repo_path: str
@@ -28,8 +24,6 @@ class DiffScanRequest(BaseModel):
 
 
 class ScanResponse(BaseModel):
-    """Response returned after a scan workflow is started."""
-
     model_config = ConfigDict(frozen=True)
 
     scan_id: str

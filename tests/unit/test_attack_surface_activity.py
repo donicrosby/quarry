@@ -1,5 +1,3 @@
-"""Tests for extract_fastapi_routes Temporal activity decorator."""
-
 from pathlib import Path
 
 from quarry.schemas import AttackSurfaceItem
@@ -7,19 +5,16 @@ from quarry_activities.attack_surface import extract_fastapi_routes
 
 
 def test_has_activity_decorator_attribute() -> None:
-    """The function should carry the __temporal_activity_definition marker."""
     assert hasattr(extract_fastapi_routes, "__temporal_activity_definition")
 
 
 def test_decorator_registered_name() -> None:
-    """The activity should be registered with the name 'extract-fastapi-routes'."""
     defn = getattr(extract_fastapi_routes, "__temporal_activity_definition", None)
     assert defn is not None
     assert defn.name == "extract-fastapi-routes"
 
 
 def test_directly_callable_backward_compat() -> None:
-    """Function must remain directly callable without a Temporal worker."""
     app_path = Path("examples/vulnerable-fastapi/app.py")
     routes = extract_fastapi_routes(app_path)
 
@@ -29,7 +24,6 @@ def test_directly_callable_backward_compat() -> None:
 
 
 def test_direct_call_returns_correct_routes() -> None:
-    """Direct call should produce the same results as the existing extractor tests."""
     app_path = Path("examples/vulnerable-fastapi/app.py")
     routes = extract_fastapi_routes(app_path)
 

@@ -1,5 +1,3 @@
-"""Tests for diff scanning schemas."""
-
 from quarry.schemas import (
     ChangedFile,
     DiffLabel,
@@ -11,7 +9,6 @@ from quarry.schemas import (
 
 
 def test_diff_label_enum_values() -> None:
-    """Test that DiffLabel enum has the correct values."""
     assert DiffLabel.INTRODUCED_BY_DIFF.value == "introduced_by_diff"
     assert DiffLabel.TOUCHED_BY_DIFF.value == "touched_by_diff"
     assert DiffLabel.POSSIBLY_EXPOSED_BY_DIFF.value == "possibly_exposed_by_diff"
@@ -19,7 +16,6 @@ def test_diff_label_enum_values() -> None:
 
 
 def test_diff_label_from_string() -> None:
-    """Test that DiffLabel can be created from string values."""
     assert DiffLabel("introduced_by_diff") is DiffLabel.INTRODUCED_BY_DIFF
     assert DiffLabel("touched_by_diff") is DiffLabel.TOUCHED_BY_DIFF
     assert DiffLabel("possibly_exposed_by_diff") is DiffLabel.POSSIBLY_EXPOSED_BY_DIFF
@@ -27,7 +23,6 @@ def test_diff_label_from_string() -> None:
 
 
 def test_changed_file_minimal() -> None:
-    """Test ChangedFile with minimal required fields."""
     changed_file = ChangedFile(path="app.py", status="modified")
 
     assert changed_file.path == "app.py"
@@ -38,7 +33,6 @@ def test_changed_file_minimal() -> None:
 
 
 def test_changed_file_with_all_fields() -> None:
-    """Test ChangedFile with all fields populated."""
     changed_file = ChangedFile(
         path="app.py",
         status="modified",
@@ -56,7 +50,6 @@ def test_changed_file_with_all_fields() -> None:
 
 
 def test_changed_file_serialization_round_trip() -> None:
-    """Test ChangedFile serialization and deserialization."""
     changed_file = ChangedFile(
         path="app.py",
         status="modified",
@@ -75,7 +68,6 @@ def test_changed_file_serialization_round_trip() -> None:
 
 
 def test_impacted_code_region_minimal() -> None:
-    """Test ImpactedCodeRegion with minimal required fields."""
     region = ImpactedCodeRegion(
         file_path="app.py",
         start_line=10,
@@ -92,7 +84,6 @@ def test_impacted_code_region_minimal() -> None:
 
 
 def test_impacted_code_region_with_scope() -> None:
-    """Test ImpactedCodeRegion with scope information."""
     region = ImpactedCodeRegion(
         file_path="app.py",
         start_line=10,
@@ -111,7 +102,6 @@ def test_impacted_code_region_with_scope() -> None:
 
 
 def test_impacted_code_region_serialization_round_trip() -> None:
-    """Test ImpactedCodeRegion serialization and deserialization."""
     region = ImpactedCodeRegion(
         file_path="app.py",
         start_line=10,
@@ -132,7 +122,6 @@ def test_impacted_code_region_serialization_round_trip() -> None:
 
 
 def test_git_diff_minimal() -> None:
-    """Test GitDiff with minimal required fields."""
     git_diff = GitDiff(base_commit="abc123", head_commit="def456")
 
     assert git_diff.base_commit == "abc123"
@@ -143,7 +132,6 @@ def test_git_diff_minimal() -> None:
 
 
 def test_git_diff_with_changed_files() -> None:
-    """Test GitDiff with changed files."""
     git_diff = GitDiff(
         base_commit="abc123",
         head_commit="def456",
@@ -167,7 +155,6 @@ def test_git_diff_with_changed_files() -> None:
 
 
 def test_git_diff_serialization_round_trip() -> None:
-    """Test GitDiff serialization and deserialization."""
     git_diff = GitDiff(
         base_commit="abc123",
         head_commit="def456",
@@ -189,7 +176,6 @@ def test_git_diff_serialization_round_trip() -> None:
 
 
 def test_diff_scan_input_minimal() -> None:
-    """Test DiffScanInput with minimal required fields."""
     scan_input = DiffScanInput(
         repo_path="/path/to/repo",
         base_commit="abc123",
@@ -205,7 +191,6 @@ def test_diff_scan_input_minimal() -> None:
 
 
 def test_diff_scan_input_with_target() -> None:
-    """Test DiffScanInput with optional target_url."""
     scan_input = DiffScanInput(
         repo_path="/path/to/repo",
         base_commit="abc123",
@@ -222,7 +207,6 @@ def test_diff_scan_input_with_target() -> None:
 
 
 def test_diff_scan_input_serialization_round_trip() -> None:
-    """Test DiffScanInput serialization and deserialization."""
     scan_input = DiffScanInput(
         repo_path="/path/to/repo",
         base_commit="abc123",
@@ -241,7 +225,6 @@ def test_diff_scan_input_serialization_round_trip() -> None:
 
 
 def test_diff_scan_result_minimal() -> None:
-    """Test DiffScanResult with minimal required fields."""
     git_diff = GitDiff(base_commit="abc123", head_commit="def456")
     result = DiffScanResult(scan_id="scan-1", git_diff=git_diff)
 
@@ -254,7 +237,6 @@ def test_diff_scan_result_minimal() -> None:
 
 
 def test_diff_scan_result_with_regions() -> None:
-    """Test DiffScanResult with impacted regions."""
     git_diff = GitDiff(base_commit="abc123", head_commit="def456")
     impacted_regions = [
         ImpactedCodeRegion(
@@ -283,7 +265,6 @@ def test_diff_scan_result_with_regions() -> None:
 
 
 def test_diff_scan_result_serialization_round_trip() -> None:
-    """Test DiffScanResult serialization and deserialization."""
     git_diff = GitDiff(
         base_commit="abc123",
         head_commit="def456",
