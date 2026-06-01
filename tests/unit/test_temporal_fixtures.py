@@ -4,7 +4,7 @@ from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from tests.conftest import PingInput, PingWorkflow
+from tests.ping_workflow import PingInput, PingWorkflow
 
 
 async def test_temporal_env_is_workflow_environment(

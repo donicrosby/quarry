@@ -19,6 +19,7 @@ from quarry.schemas import (
     ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
+    CoverageGap,
     FinalFinding,
     RedactionStatus,
     Report,
@@ -32,7 +33,10 @@ from quarry.schemas import (
     utc_now,
 )
 from quarry_activities.attack_surface import extract_fastapi_routes
+from quarry_activities.coverage import build_coverage_ledger, write_coverage_artifact
 from quarry_activities.inputs import (
+    BuildCoverageLedgerInput,
+    BuildCoverageLedgerOutput,
     CreateSnapshotInput,
     ExtractRoutesForRepoInput,
     PersistScanStateInput,
@@ -237,7 +241,8 @@ class RunScanWorkflow:
                     scan_id=scan.id,
                     workspace_id="local",
                     created_by="secrets-scanner",
-                ).model_copy(update={"created_at": workflow.now()})
+                    created_at=workflow.now(),
+                )
                 await _persist_scan_state(
                     scan_input.db_path,
                     "save_candidate_finding",
@@ -293,6 +298,15 @@ class RunScanWorkflow:
                     )
             await _persist_scan_stage(scan_input.db_path, scan.id, "SECRETS_SCAN")
 
+        self._current_stage = "COVERAGE"
+        coverage_ledger_json = await self._record_coverage(
+            scan_input,
+            scan,
+            attack_surface_items,
+            final_findings,
+            artifact_root,
+        )
+
         self._current_stage = "REPORT"
         reporting_scan = scan.model_copy(
             update={"status": ScanStatus.COMPLETED, "started_at": started_at}
@@ -306,6 +320,7 @@ class RunScanWorkflow:
                 attack_surface_json=_model_list_json(attack_surface_items),
                 final_findings_json=_model_list_json(final_findings),
                 report_path=report_path,
+                coverage_json=coverage_ledger_json,
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=ACTIVITY_RETRY_POLICY,
@@ -369,6 +384,61 @@ class RunScanWorkflow:
             candidate_finding_count=len(candidate_findings),
             final_finding_count=len(final_findings),
         )
+
+    async def _record_coverage(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        attack_surface_items: list[AttackSurfaceItem],
+        final_findings: list[FinalFinding],
+        artifact_root: str,
+    ) -> str:
+        """Build and persist the coverage ledger, returning its JSON for the report."""
+        requested = tuple(vc.value for vc in scan.profile.vuln_classes)
+        completed = tuple(sorted({f.vuln_class.value for f in final_findings}))
+        skipped = [
+            {
+                "attack_surface_item_id": item.id,
+                "vuln_class": None,
+                "reason": "Mapped HTTP route not probed; secrets scanning is file-based.",
+                "recommended_next_task": (
+                    "Add route-level scanners (IDOR, command injection, SSRF)."
+                ),
+            }
+            for item in attack_surface_items
+        ]
+        payload = await workflow.execute_activity(
+            "build-coverage-ledger",
+            BuildCoverageLedgerInput(
+                scan_id=scan.id,
+                workspace_id="local",
+                artifact_root=artifact_root,
+                requested_vuln_classes=requested,
+                completed_vuln_classes=completed,
+                attack_surface_items_total=len(attack_surface_items),
+                attack_surface_items_scanned=0,
+                skipped_json=json.dumps(skipped, sort_keys=True),
+            ),
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=ACTIVITY_RETRY_POLICY,
+        )
+        output = _coverage_output_from_activity(payload)
+        artifact_ref = ArtifactRef.model_validate_json(output.artifact_ref_json)
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_artifact_ref",
+            {"scan_id": scan.id, "artifact_ref": _model_json_dict(artifact_ref)},
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "coverage.recorded",
+            {
+                "attack_surface_total": str(len(attack_surface_items)),
+                "skipped": str(len(skipped)),
+            },
+        )
+        return output.ledger_json
 
     async def _persist_cancelled_scan(self, db_path: str, scan_id: str) -> None:
         self._current_stage = "CANCELLED"
@@ -487,11 +557,49 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         else:
             _append_event(repository, scan.id, "finding.rejected", {"finding_id": candidate.id})
 
+    coverage_gaps = [
+        CoverageGap(
+            id=str(uuid4()),
+            scan_id=scan.id,
+            attack_surface_item_id=item.id,
+            reason="Mapped HTTP route not probed; secrets scanning is file-based.",
+            recommended_next_task="Add route-level scanners (IDOR, command injection, SSRF).",
+        )
+        for item in attack_surface_items
+    ]
+    coverage_ledger = build_coverage_ledger(
+        scan_id=scan.id,
+        workspace_id="local",
+        requested_vuln_classes=list(scan.profile.vuln_classes),
+        completed_vuln_classes=sorted({f.vuln_class for f in final_findings}),
+        attack_surface_items_total=len(attack_surface_items),
+        attack_surface_items_scanned=0,
+        skipped_items=coverage_gaps,
+    )
+    coverage_ref = write_coverage_artifact(
+        coverage_ledger, Path(scan_input.output_dir) / "artifacts"
+    )
+    repository.save_artifact_ref(scan.id, coverage_ref)
+    _append_event(
+        repository,
+        scan.id,
+        "coverage.recorded",
+        {
+            "attack_surface_total": str(len(attack_surface_items)),
+            "skipped": str(len(coverage_gaps)),
+        },
+    )
+
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
     )
     report_text = render_markdown_report(
-        reporting_scan, candidate_findings, snapshot, attack_surface_items, final_findings
+        reporting_scan,
+        candidate_findings,
+        snapshot,
+        attack_surface_items,
+        final_findings,
+        coverage_ledger,
     )
     report_path = Path(scan_input.output_dir) / "reports" / f"{scan.id}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -709,6 +817,19 @@ def _validation_result_from_activity(payload: object) -> SecretValidationResult:
             checks_run=_required_str_list(values, "checks_run"),
         )
     msg = f"Unexpected validation payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _coverage_output_from_activity(payload: object) -> BuildCoverageLedgerOutput:
+    if isinstance(payload, BuildCoverageLedgerOutput):
+        return payload
+    if isinstance(payload, dict):
+        values = cast(dict[str, Any], payload)
+        return BuildCoverageLedgerOutput(
+            ledger_json=_required_str(values, "ledger_json"),
+            artifact_ref_json=_required_str(values, "artifact_ref_json"),
+        )
+    msg = f"Unexpected coverage payload: {type(payload).__name__}"
     raise TypeError(msg)
 
 

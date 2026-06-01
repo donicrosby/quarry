@@ -11,13 +11,14 @@ no allowlist management beyond common placeholder patterns.
 import re
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
 from temporalio import activity
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
-from quarry.fingerprints import compute_fingerprint
+from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
@@ -146,14 +147,25 @@ def secret_match_to_candidate_finding(
     scan_id: str,
     workspace_id: str = "local",
     created_by: str = "secrets-scanner",
+    created_at: datetime | None = None,
 ) -> CandidateFinding:
-    """Convert a secret match into a CandidateFinding."""
+    """Convert a secret match into a CandidateFinding.
+
+    ``created_at`` must be supplied from workflow code (``workflow.now()``) so
+    this stays deterministic inside Temporal's sandbox; it defaults to wall-clock
+    time only for direct, non-workflow callers.
+    """
     fingerprint = compute_fingerprint(
         vuln_class=VulnerabilityClass.SECRETS,
         file_path=match.file_path,
         start_line=match.line_number,
         key_name=match.key_name,
         evidence_kind="hardcoded_assignment",
+    )
+    root_cause_key = compute_root_cause_key(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=match.file_path,
+        sink=match.key_name,
     )
     return CandidateFinding(
         id=fingerprint[:32],
@@ -163,6 +175,7 @@ def secret_match_to_candidate_finding(
         title=f"Hardcoded secret: {match.key_name}",
         hypothesis=f"Variable '{match.key_name}' in {match.file_path}:{match.line_number} "
         f"contains a hardcoded value that may be a secret.",
+        root_cause_key=root_cause_key,
         affected_component=match.file_path,
         source_refs=[
             SourceRef(
@@ -174,7 +187,7 @@ def secret_match_to_candidate_finding(
         ],
         confidence=Confidence.MEDIUM,
         created_by=created_by,
-        created_at=utc_now(),
+        created_at=created_at or utc_now(),
         metadata={
             "key_name": match.key_name,
             "value_length": len(match.value),

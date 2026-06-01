@@ -79,6 +79,26 @@ class PromoteFindingInput(BaseModel):
     validation_json: str
 
 
+class BuildCoverageLedgerInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    artifact_root: str
+    requested_vuln_classes: tuple[str, ...]
+    completed_vuln_classes: tuple[str, ...]
+    attack_surface_items_total: int
+    attack_surface_items_scanned: int
+    skipped_json: str
+    workspace_id: str = "local"
+
+
+class BuildCoverageLedgerOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    ledger_json: str
+    artifact_ref_json: str
+
+
 class RenderReportInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -88,6 +108,7 @@ class RenderReportInput(BaseModel):
     attack_surface_json: str | None
     final_findings_json: str | None
     report_path: str | None = None
+    coverage_json: str | None = None
 
 
 class RenderReportOutput(BaseModel):

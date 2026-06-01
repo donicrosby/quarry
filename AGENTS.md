@@ -7,7 +7,7 @@
 uv run ruff check .          # lint
 uv run ruff format --check . # format check
 uv run pyright               # strict type checking
-uv run pytest -x -q          # tests (183)
+uv run pytest -x -q          # tests (200)
 
 # Single test file
 uv run pytest tests/unit/test_client.py -v
@@ -30,7 +30,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_worker` | Standalone Temporal worker entrypoint |
 | `quarry_server` | FastAPI HTTP API + in-process Temporal worker (via lifespan) |
 | `quarry_client` | httpx client SDK for CLI/TUI to talk to server |
-| `quarry_cli` | Typer CLI (`quarry scan run/diff/resume/cancel/list/status`) |
+| `quarry_cli` | Typer CLI (`quarry scan run/diff/resume/cancel/list/status`, `quarry benchmark local`) |
 | `quarry_tui` | Textual TUI consuming the HTTP API |
 | `quarry_persistence` | SQLite via SQLAlchemy (server + activities only) |
 | `quarry_plugins` | Vulnerability scanners (secrets scanner) |
@@ -48,6 +48,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - **`activity.heartbeat()`** wrapped in `suppress(RuntimeError)` for direct-call compat.
 - Task queue: `quarry-control`.
 - All DB writes from workflows go through `persist-scan-state` activity.
+- **Use the default sandboxed workflow runner everywhere** (server and tests). The `temporal_worker` test fixture is sandboxed on purpose so determinism violations (e.g. `datetime.now()` from a helper called inside a workflow) fail in tests, not just in production. Pass `workflow.now()` / `workflow.uuid4()` into model constructors rather than relying on wall-clock defaults.
 
 ### Type safety
 - **Zero `# pyright: ignore`** policy. Zero `# type: ignore` (except justified test-only with documented reason).
@@ -86,7 +87,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 ## Workflows
 
-- `RunScanWorkflow` — full repo scan (SNAPSHOT → ATTACK_SURFACE → SECRETS_SCAN → VALIDATION → REPORT). Supports resume and cancellation.
+- `RunScanWorkflow` — full repo scan (SNAPSHOT → ATTACK_SURFACE → SECRETS_SCAN → VALIDATION → COVERAGE → REPORT). Supports resume and cancellation. The COVERAGE stage runs the `build-coverage-ledger` activity, persists a coverage-ledger artifact, and feeds the report's `## Coverage` section (scanned vs skipped, honest gaps).
 - `RunDiffScanWorkflow` — commit-to-commit diff scan (GIT_DIFF → MAP_REGIONS → SCAN_REGIONS → VALIDATE → REPORT). Only scans changed regions.
 
 ## Server Endpoints

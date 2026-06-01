@@ -43,6 +43,21 @@ def compute_fingerprint(
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
+def compute_root_cause_key(
+    *,
+    vuln_class: VulnerabilityClass,
+    file_path: str,
+    sink: str = "",
+) -> str:
+    """Compute a stable, human-readable dedup key for a finding's root cause.
+
+    Unlike the fingerprint, this is a readable normalized key (not hashed) used
+    to group findings that share the same root cause across scans. It excludes
+    scan id, timestamps, line numbers, and absolute paths.
+    """
+    return f"{vuln_class.value}:{_normalize_path(file_path)}:{sink}"
+
+
 def _normalize_path(file_path: str) -> str:
     """Normalize a file path to repo-relative, forward-slash form."""
     return file_path.replace("\\", "/").strip("/")

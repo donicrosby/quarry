@@ -1,6 +1,7 @@
 """Command-line interface for Quarry."""
 
 import asyncio
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -8,8 +9,9 @@ from typing import Annotated, Any, NoReturn
 import httpx
 import typer
 
+from quarry.benchmark import compare, load_ground_truth
 from quarry.config import QuarrySettings
-from quarry.schemas import ScanSummary
+from quarry.schemas import FinalFinding, ScanSummary
 from quarry_activities.target import start_local_target
 from quarry_client.client import QuarryClient
 
@@ -252,5 +254,48 @@ def report_callback(ctx: typer.Context) -> None:
 
 
 @benchmark_app.command("local")
-def benchmark_local() -> None:
-    typer.echo("Local benchmark is not implemented yet.")
+def benchmark_local(
+    repo: Annotated[
+        str, typer.Option("--repo", help="Path to repository")
+    ] = "examples/vulnerable-fastapi",
+    ground_truth: Annotated[
+        str, typer.Option("--ground-truth", help="Path to ground truth JSON")
+    ] = "examples/vulnerable-fastapi/ground_truth.json",
+    target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
+) -> None:
+    """Scan the demo app via the server and compare findings to ground truth."""
+    settings = QuarrySettings()
+    try:
+        lines = asyncio.run(_benchmark_local_command(settings, repo, ground_truth, target))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    except FileNotFoundError:
+        typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+        raise typer.Exit(1) from None
+    _echo_lines(lines)
+
+
+async def _benchmark_local_command(
+    settings: QuarrySettings,
+    repo: str,
+    ground_truth: str,
+    target: str | None,
+) -> list[str]:
+    truth = load_ground_truth(ground_truth)
+    async with QuarryClient(base_url=settings.server_url) as client:
+        started = time.monotonic()
+        result = await client.start_scan(repo_path=repo, target_url=target)
+        scan_id = result["scan_id"]
+        while True:
+            status = await client.get_scan_status(scan_id)
+            if _is_terminal_status(status):
+                break
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        runtime_seconds = time.monotonic() - started
+        findings = await client.get_findings(scan_id)
+
+    final_findings = [
+        finding for finding in findings["final_findings"] if isinstance(finding, FinalFinding)
+    ]
+    benchmark = compare(final_findings, truth, runtime_seconds=runtime_seconds)
+    return [f"scan_id={scan_id}", *benchmark.summary_lines()]

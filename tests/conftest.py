@@ -4,14 +4,13 @@ from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest_asyncio
-from pydantic import BaseModel, ConfigDict
-from temporalio import workflow
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+from temporalio.worker import Worker
 
 from quarry_activities.attack_surface import extract_fastapi_routes, extract_fastapi_routes_for_repo
+from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
@@ -23,19 +22,10 @@ from quarry_activities.validation import (
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_workflows.diff_scan import RunDiffScanWorkflow
 from quarry_workflows.run_scan import RunScanWorkflow
+from tests.ping_workflow import PingInput, PingWorkflow
 
-
-class PingInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    message: str
-
-
-@workflow.defn
-class PingWorkflow:
-    @workflow.run
-    async def run(self, inp: PingInput) -> str:
-        return inp.message
+# Re-exported so existing imports (`from tests.conftest import PingWorkflow`) keep working.
+__all__ = ["PingInput", "PingWorkflow"]
 
 
 @pytest_asyncio.fixture
@@ -64,7 +54,11 @@ async def temporal_client(
 async def temporal_worker(
     temporal_client: Client,
 ) -> AsyncGenerator[Worker]:
-    """Yield a running Worker with RunScanWorkflow and all activities registered."""
+    """Yield a running Worker with RunScanWorkflow and all activities registered.
+
+    Uses Temporal's default sandboxed workflow runner so tests exercise the same
+    determinism restrictions as the production server worker.
+    """
     worker = Worker(
         temporal_client,
         task_queue="quarry-control",
@@ -79,10 +73,10 @@ async def temporal_worker(
             scan_repo_for_secrets,
             validate_secret_candidate,
             promote_to_final_finding_metadata,
+            build_coverage_ledger_activity,
             render_markdown_report_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),
-        workflow_runner=UnsandboxedWorkflowRunner(),
     )
     async with worker:
         yield worker

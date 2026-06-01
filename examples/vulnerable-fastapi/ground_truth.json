@@ -1,0 +1,34 @@
+[
+  {
+    "id": "gt-secret-admin-api-key",
+    "vuln_class": "secrets",
+    "file_path": "app.py",
+    "route": null,
+    "severity": "high",
+    "expected_fingerprint_hint": "secrets:app.py:ADMIN_API_KEY"
+  },
+  {
+    "id": "gt-idor-read-user",
+    "vuln_class": "idor",
+    "file_path": "app.py",
+    "route": "/users/{user_id}",
+    "severity": "high",
+    "expected_fingerprint_hint": "idor:app.py:read_user"
+  },
+  {
+    "id": "gt-command-injection-ping",
+    "vuln_class": "command_injection",
+    "file_path": "app.py",
+    "route": "/debug/ping",
+    "severity": "critical",
+    "expected_fingerprint_hint": "command_injection:app.py:ping"
+  },
+  {
+    "id": "gt-ssrf-fetch-local",
+    "vuln_class": "ssrf",
+    "file_path": "app.py",
+    "route": "/fetch-local",
+    "severity": "medium",
+    "expected_fingerprint_hint": "ssrf:app.py:fetch_local"
+  }
+]

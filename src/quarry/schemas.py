@@ -63,6 +63,13 @@ class VulnerabilityClass(StrEnum):
     FILE_UPLOAD = "file_upload"
 
 
+class TriageLabel(StrEnum):
+    TP = "tp"
+    FP = "fp"
+    DUP = "dup"
+    OOS = "oos"
+
+
 class ArtifactKind(StrEnum):
     REPO_MANIFEST = "repo_manifest"
     CODE_SNIPPET = "code_snippet"
@@ -76,6 +83,7 @@ class ArtifactKind(StrEnum):
     MODEL_RESPONSE = "model_response"
     REPORT = "report"
     INTEGRATION_PAYLOAD = "integration_payload"
+    COVERAGE_LEDGER = "coverage_ledger"
 
 
 class RedactionStatus(StrEnum):
@@ -94,6 +102,18 @@ def _empty_artifact_refs() -> list[ArtifactRef]:
 
 
 def _empty_strings() -> list[str]:
+    return []
+
+
+def _empty_panel_entries() -> list[ModelPanelEntry]:
+    return []
+
+
+def _empty_vuln_classes() -> list[VulnerabilityClass]:
+    return []
+
+
+def _empty_coverage_gaps() -> list[CoverageGap]:
     return []
 
 
@@ -142,6 +162,8 @@ class RepositorySnapshot(BaseModel):
     file_count: int
     total_size_bytes: int
     detected_frameworks: list[str] = Field(default_factory=_empty_strings)
+    entry_points: list[str] = Field(default_factory=_empty_strings)
+    repo_type: str | None = None
     ignored_paths: list[str] = Field(default_factory=_empty_strings)
     created_at: datetime
 
@@ -207,6 +229,15 @@ class TargetAuthorization(BaseModel):
     created_at: datetime
 
 
+class ModelPanelEntry(BaseModel):
+    id: str
+    scan_id: str
+    role: str
+    provider: str
+    model: str
+    rate_limit_rpm: int = 30
+
+
 class ScanProfile(BaseModel):
     id: str
     name: str
@@ -218,6 +249,7 @@ class ScanProfile(BaseModel):
     integrations_enabled: bool = False
     dry_run_integrations: bool = True
     max_runtime_seconds: int = 1800
+    plugins_active: list[str] = Field(default_factory=_empty_strings)
 
 
 class Scan(BaseModel):
@@ -227,6 +259,11 @@ class Scan(BaseModel):
     requested_by: str
     profile: ScanProfile
     status: ScanStatus
+    parent_scan_id: str | None = None
+    budget_cap_usd: float | None = None
+    panel_snapshot: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
+    attack_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
+    plugins_active: list[str] = Field(default_factory=_empty_strings)
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -252,12 +289,23 @@ class CandidateFinding(BaseModel):
     vuln_class: VulnerabilityClass
     title: str
     hypothesis: str
+    reasoning: str | None = None
     affected_component: str | None = None
     attack_surface_item_id: str | None = None
     source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     confidence: Confidence = Confidence.LOW
+    severity: Severity = Severity.MEDIUM
+    severity_adjusted: Severity | None = None
     status: FindingStatus = FindingStatus.CANDIDATE
+    root_cause_key: str | None = None
+    cross_vendor_disagreement: bool = False
+    trigger_input: str | None = None
+    scrubber_hits: int = 0
+    triage_label: TriageLabel | None = None
+    triage_notes: str | None = None
+    triaged_at: datetime | None = None
+    duplicate_of: str | None = None
     created_by: str
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -270,6 +318,7 @@ class FinalFinding(BaseModel):
     fingerprint: str
     vuln_class: VulnerabilityClass
     severity: Severity
+    severity_adjusted: Severity | None = None
     title: str
     summary: str
     affected_component: str | None = None
@@ -277,6 +326,8 @@ class FinalFinding(BaseModel):
     source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
     validation_result_id: str
     proof_artifact_ids: list[str] = Field(default_factory=_empty_strings)
+    trace_id: str | None = None
+    triage_label: TriageLabel | None = None
     remediation: str | None = None
     created_at: datetime
 
@@ -300,6 +351,103 @@ class WorkflowEvent(BaseModel):
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class AgentTask(BaseModel):
+    id: str
+    scan_id: str
+    role: str
+    task_name: str
+    vuln_class: VulnerabilityClass | None = None
+    scope: str | None = None
+    source: Literal["recon", "gapfill", "feedback"] = "recon"
+    gapfill_pass: int = 0
+    input_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    output_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    status: str
+    created_at: datetime
+    completed_at: datetime | None = None
+    error: str | None = None
+
+
+class ValidationResult(BaseModel):
+    id: str
+    candidate_finding_id: str
+    scan_id: str
+    verdict: Literal["validated", "rejected", "needs_proof", "inconclusive"]
+    reasons: list[str] = Field(default_factory=_empty_strings)
+    checks_run: list[str] = Field(default_factory=_empty_strings)
+    evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    model_invocation_id: str | None = None
+    cross_vendor: bool = False
+    created_at: datetime
+
+
+class ProofArtifact(BaseModel):
+    id: str
+    scan_id: str
+    candidate_finding_id: str
+    final_finding_id: str | None = None
+    proof_type: str
+    description: str
+    evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    safe_payload: str | None = None
+    redaction_status: RedactionStatus
+    created_at: datetime
+
+
+class GapfillTask(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    vuln_class: VulnerabilityClass
+    scope: str
+    reason: str
+    nudge_prompt_hint: str | None = None
+    gapfill_pass: int = 1
+    parent_task_id: str | None = None
+    status: str = "pending"
+    created_at: datetime
+
+
+class CoverageGap(BaseModel):
+    id: str
+    scan_id: str
+    attack_surface_item_id: str | None = None
+    vuln_class: VulnerabilityClass | None = None
+    reason: str
+    recommended_next_task: str | None = None
+    severity_hint: str | None = None
+
+
+class CoverageLedger(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    attack_surface_items_total: int
+    attack_surface_items_scanned: int
+    vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
+    vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
+    skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
+    created_at: datetime
+
+
+class GroundTruthFinding(BaseModel):
+    id: str
+    vuln_class: VulnerabilityClass
+    file_path: str
+    route: str | None = None
+    severity: Severity
+    expected_fingerprint_hint: str | None = None
+
+
+class BenchmarkCase(BaseModel):
+    id: str
+    name: str
+    repo_path: str
+    target_url: str | None = None
+    ground_truth_ref: ArtifactRef
+    scan_profile_id: str
 
 
 class DiffLabel(StrEnum):
