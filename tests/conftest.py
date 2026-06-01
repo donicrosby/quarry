@@ -1,9 +1,18 @@
 """Temporal test environment fixtures."""
 
+import os
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest_asyncio
+
+# Make git fixture commits independent of any global ``commit.gpgsign`` setting.
+# With signing on, every commit in a temp repo invokes the GPG agent, which times
+# out under load and makes the git-subprocess tests flaky (exit 128). Injecting
+# config via GIT_CONFIG_* applies to every git subprocess the tests spawn.
+os.environ["GIT_CONFIG_COUNT"] = "1"
+os.environ["GIT_CONFIG_KEY_0"] = "commit.gpgsign"
+os.environ["GIT_CONFIG_VALUE_0"] = "false"
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
