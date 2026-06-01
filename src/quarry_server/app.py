@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 
 from quarry.config import QuarrySettings
 
@@ -14,7 +15,11 @@ from quarry.config import QuarrySettings
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Manage Temporal client lifecycle."""
     settings = QuarrySettings()
-    client = await Client.connect(settings.temporal_address)
+    client = await Client.connect(
+        settings.temporal_address,
+        data_converter=pydantic_data_converter,
+    )
+    app.state.settings = settings
     app.state.temporal_client = client
     yield
 
@@ -29,6 +34,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     from quarry_server.routers import health
+    from quarry_server.routers.scans import router as scans_router
 
     app.include_router(health.router)
+    app.include_router(scans_router)
     return app
