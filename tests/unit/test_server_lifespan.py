@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from quarry.config import QuarrySettings
+from quarry_activities.diff import git_diff_commits
 from quarry_server.app import create_app, lifespan
 
 
@@ -73,7 +74,8 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert worker.client is client
             assert worker.task_queue == QuarrySettings().task_queue
             assert len(worker.workflows) == 1
-            assert len(worker.activities) == 8
+            assert len(worker.activities) == 9
+            assert git_diff_commits in worker.activities
 
         assert worker.cancelled is True
         assert client.closed is True

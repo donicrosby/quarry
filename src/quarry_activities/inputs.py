@@ -30,6 +30,14 @@ class ExtractRoutesForRepoInput(BaseModel):
     scan_id: str
 
 
+class GitDiffInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repo_path: str
+    base_commit: str
+    head_commit: str
+
+
 class ScanSecretsInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
