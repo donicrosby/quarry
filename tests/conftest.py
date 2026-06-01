@@ -1,19 +1,30 @@
 """Temporal test environment fixtures."""
 
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest_asyncio
+from pydantic import BaseModel, ConfigDict
 from temporalio import workflow
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from quarry_activities.attack_surface import extract_fastapi_routes, extract_fastapi_routes_for_repo
+from quarry_activities.repo import create_repository_snapshot, persist_scan_state
+from quarry_activities.reporting import render_markdown_report_activity
+from quarry_activities.validation import (
+    promote_to_final_finding_metadata,
+    validate_secret_candidate,
+)
+from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_workflows.run_scan import RunScanWorkflow
 
 
-@dataclass(frozen=True)
-class PingInput:
+class PingInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     message: str
 
 
@@ -28,9 +39,13 @@ class PingWorkflow:
 async def temporal_env() -> AsyncGenerator[WorkflowEnvironment]:
     """Yield a WorkflowEnvironment, with ARM fallback."""
     try:
-        env = await WorkflowEnvironment.start_time_skipping()
+        env = await WorkflowEnvironment.start_time_skipping(
+            data_converter=pydantic_data_converter,
+        )
     except Exception:
-        env = await WorkflowEnvironment.start_local()
+        env = await WorkflowEnvironment.start_local(
+            data_converter=pydantic_data_converter,
+        )
     yield env
     await env.shutdown()
 
@@ -47,19 +62,23 @@ async def temporal_client(
 async def temporal_worker(
     temporal_client: Client,
 ) -> AsyncGenerator[Worker]:
-    """Yield a running Worker with RunScanWorkflow registered.
-
-    Activities are empty for now because they are not yet decorated
-    with @activity.defn (Wave 2 will add those decorators). The
-    current RunScanWorkflow implementation calls functions directly
-    rather than via workflow.execute_activity, so the worker does
-    not need them registered to execute the workflow end-to-end.
-    """
+    """Yield a running Worker with RunScanWorkflow and all activities registered."""
     worker = Worker(
         temporal_client,
         task_queue="quarry-control",
         workflows=[RunScanWorkflow, PingWorkflow],
-        activities=[],
+        activities=[
+            create_repository_snapshot,
+            persist_scan_state,
+            extract_fastapi_routes,
+            extract_fastapi_routes_for_repo,
+            scan_repo_for_secrets,
+            validate_secret_candidate,
+            promote_to_final_finding_metadata,
+            render_markdown_report_activity,
+        ],
+        activity_executor=ThreadPoolExecutor(max_workers=10),
+        workflow_runner=UnsandboxedWorkflowRunner(),
     )
     async with worker:
         yield worker

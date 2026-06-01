@@ -47,6 +47,28 @@ def worker() -> None:
     main()
 
 
+@app.command()
+def server(
+    host: Annotated[str | None, typer.Option("--host", help="Host to bind")] = None,
+    port: Annotated[int | None, typer.Option("--port", help="Port to bind")] = None,
+    no_worker: Annotated[
+        bool, typer.Option("--no-worker", help="Run server without Temporal worker")
+    ] = False,
+) -> None:
+    """Start the Quarry API server."""
+    import uvicorn
+
+    from quarry.config import QuarrySettings
+
+    settings = QuarrySettings()
+    uvicorn.run(
+        "quarry_server.app:create_app",
+        factory=True,
+        host=host or settings.server_host,
+        port=port or settings.server_port,
+    )
+
+
 @app.command("tui")
 def tui(db: Annotated[Path, typer.Option("--db")] = Path(".quarry/quarry.db")) -> None:
     from quarry_tui.app import QuarryTuiApp

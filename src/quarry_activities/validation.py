@@ -9,11 +9,14 @@ Validation checks:
 This is intentionally simple and deterministic. No LLM review, no entropy analysis.
 """
 
+import json
 import re
+from dataclasses import dataclass
 
 from temporalio import activity
 
 from quarry.schemas import CandidateFinding
+from quarry_activities.inputs import PromoteFindingInput, ValidateCandidateInput
 
 SECRET_NAME_INDICATORS = re.compile(
     r"(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|AUTH_KEY)",
@@ -46,19 +49,13 @@ PLACEHOLDER_VALUES = frozenset(
 )
 
 
+@dataclass(frozen=True)
 class SecretValidationResult:
     """Result of validating a candidate secret finding."""
 
-    def __init__(
-        self,
-        *,
-        verdict: str,
-        reasons: list[str],
-        checks_run: list[str],
-    ) -> None:
-        self.verdict = verdict
-        self.reasons = reasons
-        self.checks_run = checks_run
+    verdict: str
+    reasons: list[str]
+    checks_run: list[str]
 
     @property
     def is_valid(self) -> bool:
@@ -67,10 +64,30 @@ class SecretValidationResult:
 
 @activity.defn(name="validate-secret-candidate")
 def validate_secret_candidate(
-    finding: CandidateFinding,
+    finding: ValidateCandidateInput | dict[str, str | list[str] | None] | CandidateFinding,
     allowlist: frozenset[str] | None = None,
 ) -> SecretValidationResult:
     """Validate a candidate secret finding deterministically."""
+    if isinstance(finding, dict):
+        finding_json = finding.get("finding_json")
+        if not isinstance(finding_json, str):
+            msg = "finding_json must be a string"
+            raise TypeError(msg)
+        allowlist_value = finding.get("allowlist")
+        if allowlist_value is not None and not isinstance(allowlist_value, list):
+            msg = "allowlist must be a list of strings or None"
+            raise TypeError(msg)
+        finding = ValidateCandidateInput(finding_json=finding_json, allowlist=allowlist_value)
+    if isinstance(finding, ValidateCandidateInput):
+        allowlist = frozenset(finding.allowlist) if finding.allowlist is not None else None
+        finding = CandidateFinding.model_validate_json(finding.finding_json)
+    return _validate_secret_candidate_impl(finding, allowlist)
+
+
+def _validate_secret_candidate_impl(
+    finding: CandidateFinding,
+    allowlist: frozenset[str] | None = None,
+) -> SecretValidationResult:
     checks_run: list[str] = []
     reasons: list[str] = []
 
@@ -124,10 +141,18 @@ def validate_secret_candidate(
 
 @activity.defn(name="promote-to-final-finding")
 def promote_to_final_finding_metadata(
-    finding: CandidateFinding,
-    result: SecretValidationResult,
+    finding: PromoteFindingInput | dict[str, str] | CandidateFinding,
+    result: SecretValidationResult | None = None,
 ) -> dict[str, str | bool]:
     """Extract metadata for promoting a validated candidate to a final finding."""
+    if isinstance(finding, dict):
+        finding = PromoteFindingInput(**finding)
+    if isinstance(finding, PromoteFindingInput):
+        result = SecretValidationResult(**json.loads(finding.validation_json))
+        CandidateFinding.model_validate_json(finding.finding_json)
+    if result is None:
+        msg = "result is required for direct promotion metadata calls"
+        raise TypeError(msg)
     return {
         "validation_verdict": result.verdict,
         "validation_reasons": "; ".join(result.reasons),

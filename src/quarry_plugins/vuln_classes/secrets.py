@@ -23,6 +23,7 @@ from quarry.schemas import (
     VulnerabilityClass,
     utc_now,
 )
+from quarry_activities.inputs import ScanSecretsInput
 
 SECRET_NAME_PATTERN = re.compile(
     r"^\s*([A-Z_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|AUTH_KEY)[A-Z_]*)\s*=\s*[\"'](.+?)[\"']\s*$",
@@ -88,8 +89,16 @@ def scan_file_for_secrets(file_path: Path, repo_root: Path) -> list[SecretMatch]
 
 
 @activity.defn(name="scan-repo-for-secrets")
-def scan_repo_for_secrets(repo_root: Path) -> list[SecretMatch]:
+def scan_repo_for_secrets(repo_root: ScanSecretsInput | dict[str, str] | Path) -> list[SecretMatch]:
     """Scan all source files in a repository for hardcoded secrets."""
+    if isinstance(repo_root, dict):
+        repo_root = ScanSecretsInput(**repo_root)
+    if isinstance(repo_root, ScanSecretsInput):
+        repo_root = Path(repo_root.repo_root)
+    return _scan_repo_for_secrets_impl(repo_root)
+
+
+def _scan_repo_for_secrets_impl(repo_root: Path) -> list[SecretMatch]:
     all_matches: list[SecretMatch] = []
     files = sorted(repo_root.rglob("*"))
     for i, path in enumerate(files):

@@ -1,13 +1,23 @@
+import json
+from hashlib import sha256
+from pathlib import Path
+from uuid import uuid4
+
 from jinja2 import Template
 from temporalio import activity
 
 from quarry.schemas import (
+    ArtifactKind,
+    ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
+    RedactionStatus,
     RepositorySnapshot,
     Scan,
+    utc_now,
 )
+from quarry_activities.inputs import RenderReportInput, RenderReportOutput
 
 REPORT_TEMPLATE = Template(
     """# Quarry Scan Report
@@ -80,7 +90,76 @@ No candidate findings recorded.
 
 
 @activity.defn(name="render-markdown-report")
+def render_markdown_report_activity(
+    input: RenderReportInput | dict[str, str | None],
+) -> RenderReportOutput:
+    if isinstance(input, dict):
+        scan_json = input["scan_json"]
+        findings_json = input["findings_json"]
+        if not isinstance(scan_json, str) or not isinstance(findings_json, str):
+            msg = "scan_json and findings_json must be strings"
+            raise TypeError(msg)
+        input = RenderReportInput(
+            scan_json=scan_json,
+            findings_json=findings_json,
+            snapshot_json=input.get("snapshot_json"),
+            attack_surface_json=input.get("attack_surface_json"),
+            final_findings_json=input.get("final_findings_json"),
+            report_path=input.get("report_path"),
+        )
+    return _render_markdown_report_from_input(input)
+
+
 def render_markdown_report(
+    scan: Scan,
+    findings: list[CandidateFinding],
+    snapshot: RepositorySnapshot | None = None,
+    attack_surface: list[AttackSurfaceItem] | None = None,
+    final_findings: list[FinalFinding] | None = None,
+) -> str:
+    return _render_markdown_report_impl(scan, findings, snapshot, attack_surface, final_findings)
+
+
+def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReportOutput:
+    scan = Scan.model_validate_json(input.scan_json)
+    findings = _candidate_findings_from_json(input.findings_json)
+    snapshot = (
+        RepositorySnapshot.model_validate_json(input.snapshot_json)
+        if input.snapshot_json is not None
+        else None
+    )
+    attack_surface = (
+        _attack_surface_from_json(input.attack_surface_json)
+        if input.attack_surface_json is not None
+        else None
+    )
+    final_findings = (
+        _final_findings_from_json(input.final_findings_json)
+        if input.final_findings_json is not None
+        else None
+    )
+    report_text = _render_markdown_report_impl(
+        scan,
+        findings,
+        snapshot,
+        attack_surface,
+        final_findings,
+    )
+    if input.report_path is None:
+        msg = "report_path is required for Temporal report rendering"
+        raise TypeError(msg)
+    report_path = Path(input.report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(report_text, encoding="utf-8")
+    report_ref = _report_artifact_ref(report_path)
+    return RenderReportOutput(
+        report_text=report_text,
+        report_path=str(report_path),
+        report_ref_json=report_ref.model_dump_json(),
+    )
+
+
+def _render_markdown_report_impl(
     scan: Scan,
     findings: list[CandidateFinding],
     snapshot: RepositorySnapshot | None = None,
@@ -100,4 +179,31 @@ def render_markdown_report(
         snapshot=snapshot,
         attack_surface=attack_surface or [],
         final_findings=final_findings or [],
+    )
+
+
+def _candidate_findings_from_json(payload: str) -> list[CandidateFinding]:
+    return [CandidateFinding.model_validate(item) for item in json.loads(payload)]
+
+
+def _attack_surface_from_json(payload: str) -> list[AttackSurfaceItem]:
+    return [AttackSurfaceItem.model_validate(item) for item in json.loads(payload)]
+
+
+def _final_findings_from_json(payload: str) -> list[FinalFinding]:
+    return [FinalFinding.model_validate(item) for item in json.loads(payload)]
+
+
+def _report_artifact_ref(report_path: Path) -> ArtifactRef:
+    data = report_path.read_bytes()
+    return ArtifactRef(
+        id=str(uuid4()),
+        uri=f"file://{report_path}",
+        kind=ArtifactKind.REPORT,
+        content_type="text/markdown",
+        sha256=sha256(data).hexdigest(),
+        size_bytes=len(data),
+        redaction_status=RedactionStatus.NOT_REQUIRED,
+        created_at=utc_now(),
+        metadata={"path": str(report_path)},
     )

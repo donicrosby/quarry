@@ -249,6 +249,10 @@ class QuarryRepository:
             record = _get_scan_record(session, report.scan_id)
             record.report_path = str(report_path)
 
+    def scan_exists(self, scan_id: str) -> bool:
+        with session_scope(self.engine) as session:
+            return session.get(ScanRecord, scan_id) is not None
+
     def load_scan(self, scan_id: str) -> Scan:
         with session_scope(self.engine) as session:
             return Scan.model_validate_json(_get_scan_record(session, scan_id).scan_json)

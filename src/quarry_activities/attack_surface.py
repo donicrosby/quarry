@@ -2,17 +2,47 @@
 
 import ast
 from pathlib import Path
+from uuid import uuid4
 
 from temporalio import activity
 
 from quarry.schemas import AttackSurfaceItem, SourceRef
+from quarry_activities.inputs import ExtractRoutesForRepoInput, ExtractRoutesInput
 
 HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options", "trace"})
 
 
 @activity.defn(name="extract-fastapi-routes")
-def extract_fastapi_routes(file_path: Path) -> list[AttackSurfaceItem]:
+def extract_fastapi_routes(
+    file_path: ExtractRoutesInput | dict[str, str] | Path,
+) -> list[AttackSurfaceItem]:
     """Parse a Python file and extract FastAPI route definitions."""
+    if isinstance(file_path, dict):
+        file_path = ExtractRoutesInput(**file_path)
+    if isinstance(file_path, ExtractRoutesInput):
+        file_path = Path(file_path.file_path)
+    return _extract_fastapi_routes_impl(file_path)
+
+
+@activity.defn(name="extract-fastapi-routes-for-repo")
+def extract_fastapi_routes_for_repo(
+    input: ExtractRoutesForRepoInput | dict[str, str],
+) -> list[AttackSurfaceItem]:
+    """Parse every Python file in a repository and extract route definitions."""
+    if isinstance(input, dict):
+        input = ExtractRoutesForRepoInput(**input)
+    repo_path = Path(input.repo_path)
+    attack_surface_items: list[AttackSurfaceItem] = []
+    for py_file in sorted(repo_path.rglob("*.py")):
+        extracted = _extract_fastapi_routes_impl(py_file)
+        for item in extracted:
+            attack_surface_items.append(
+                item.model_copy(update={"id": str(uuid4()), "scan_id": input.scan_id})
+            )
+    return attack_surface_items
+
+
+def _extract_fastapi_routes_impl(file_path: Path) -> list[AttackSurfaceItem]:
     source = file_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     routes: list[AttackSurfaceItem] = []
