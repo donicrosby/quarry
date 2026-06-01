@@ -17,4 +17,5 @@ class QuarrySettings(BaseSettings):
     task_queue: str = "quarry-control"
     server_host: str = "127.0.0.1"
     server_port: int = 8000
+    server_no_worker: bool = False
     db_path: str = ".quarry/quarry.db"

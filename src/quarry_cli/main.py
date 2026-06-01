@@ -55,12 +55,15 @@ def server(
         bool, typer.Option("--no-worker", help="Run server without Temporal worker")
     ] = False,
 ) -> None:
-    """Start the Quarry API server."""
+    """Start the Quarry API server with Temporal worker."""
+    import os
+
     import uvicorn
 
     from quarry.config import QuarrySettings
 
     settings = QuarrySettings()
+    os.environ["QUARRY_SERVER_NO_WORKER"] = "1" if no_worker else "0"
     uvicorn.run(
         "quarry_server.app:create_app",
         factory=True,
