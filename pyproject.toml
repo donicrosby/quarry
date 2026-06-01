@@ -40,6 +40,7 @@ module-name = [
   "quarry_activities",
   "quarry_artifacts",
   "quarry_cli",
+  "quarry_models",
   "quarry_persistence",
   "quarry_plugins",
   "quarry_tui",
@@ -50,6 +51,7 @@ module-name = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = ["tests/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -62,6 +64,7 @@ asyncio_mode = "auto"
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
+exclude = ["**/__pycache__", "tests/fixtures"]
 extraPaths = ["src"]
 venv = ".venv"
 venvPath = "."
