@@ -1,7 +1,10 @@
 """Local target launcher helpers."""
 
+import os
+import signal
 import subprocess
 import time
+from contextlib import suppress
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -40,18 +43,40 @@ def start_local_target(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # Own process group so teardown can kill the whole tree (uv run -> uvicorn),
+        # not just the immediate child.
+        start_new_session=True,
     )
     try:
         wait_for_health(f"http://{host}:{port}{health_path}", timeout_seconds=timeout_seconds)
     except Exception:
-        process.terminate()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=2)
+        terminate_local_target(process)
         raise
     return process
+
+
+def terminate_local_target(process: subprocess.Popen[str]) -> None:
+    """Terminate a launched target and its whole process group, then close pipes."""
+    try:
+        if process.poll() is None:
+            _signal_process_group(process, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _signal_process_group(process, signal.SIGKILL)
+                with suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=2)
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _signal_process_group(process: subprocess.Popen[str], sig: int) -> None:
+    try:
+        os.killpg(os.getpgid(process.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        with suppress(ProcessLookupError, PermissionError):
+            process.send_signal(sig)
 
 
 def wait_for_health(url: str, *, timeout_seconds: float = 10.0) -> None:
