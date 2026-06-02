@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import Any
 
 import httpx
@@ -11,6 +12,11 @@ from quarry_artifacts.local import LocalArtifactStore
 
 # Maximum response body size to store (10KB)
 MAX_RESPONSE_BODY_SIZE = 10 * 1024
+
+
+def _key_digest(*parts: str) -> str:
+    """Short stable digest so artifacts for different requests don't collide."""
+    return sha256(" ".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
 def _redact_headers(headers: httpx.Headers) -> dict[str, str | list[str]]:
@@ -63,7 +69,8 @@ def capture_request_artifact(
         ArtifactRef for the stored request artifact
     """
     if artifact_key is None:
-        artifact_key = f"http/requests/{request.method}_{request.url.host}.json"
+        digest = _key_digest(request.method, str(request.url))
+        artifact_key = f"http/requests/{request.method}_{request.url.host}_{digest}.json"
 
     # Build request data with redacted headers
     request_data: dict[str, Any] = {
@@ -117,7 +124,9 @@ def capture_response_artifact(
         ArtifactRef for the stored response artifact
     """
     if artifact_key is None:
-        artifact_key = f"http/responses/{response.status_code}_{response.request.url.host}.json"
+        digest = _key_digest(str(response.status_code), str(response.request.url))
+        host = response.request.url.host
+        artifact_key = f"http/responses/{response.status_code}_{host}_{digest}.json"
 
     # Truncate body if needed
     body_bytes = response.content

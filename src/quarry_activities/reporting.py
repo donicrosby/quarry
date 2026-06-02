@@ -100,6 +100,9 @@ Full coverage: no items were skipped.
 
 {{ proof.description }}
 
+{% if proof.safe_payload -%}
+- Safe payload: `{{ proof.safe_payload }}`
+{% endif -%}
 {% for ref in proof.evidence_refs -%}
 {% set redaction = ref.redaction_status.value -%}
 - `{{ ref.kind.value }}`: {{ ref.uri }} (redaction: `{{ redaction }}`)
