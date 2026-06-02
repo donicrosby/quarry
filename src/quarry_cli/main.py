@@ -245,6 +245,9 @@ def target_start(
     except KeyboardInterrupt:
         process.terminate()
         process.wait(timeout=5)
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 @report_app.callback(invoke_without_command=True)

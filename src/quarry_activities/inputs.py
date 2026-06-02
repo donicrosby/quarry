@@ -118,6 +118,7 @@ class RenderReportInput(BaseModel):
     final_findings_json: str | None
     report_path: str | None = None
     coverage_json: str | None = None
+    proof_artifacts_json: str | None = None
 
 
 class RenderReportOutput(BaseModel):
