@@ -7,7 +7,7 @@ Temporal boundary. Activities convert strings back to richer domain objects or
 
 from pydantic import BaseModel, ConfigDict
 
-from quarry.schemas import ChangedFile
+from quarry.schemas import AttackSurfaceItem, ChangedFile
 
 
 class CreateSnapshotInput(BaseModel):
@@ -51,6 +51,15 @@ class ScanSecretsInput(BaseModel):
 
     repo_root: str
     file_paths: tuple[str, ...] | None = None
+
+
+class IdorScanInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repo_root: str
+    scan_id: str
+    attack_surface_items: tuple[AttackSurfaceItem, ...]
+    workspace_id: str = "local"
 
 
 class RunDiffScanInput(BaseModel):
@@ -136,4 +145,15 @@ class ValidateIDORInput(BaseModel):
     user_a_password: str | None = None
     user_b_username: str | None = None
     user_b_password: str | None = None
+    artifact_store_path: str | None = None
+
+
+class IdorValidationInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    candidate_finding_id: str
+    scan_id: str
+    target_url: str | None = None
+    allowed_hosts: tuple[str, ...] = ()
+    auth_credentials: dict[str, str] | None = None
     artifact_store_path: str | None = None

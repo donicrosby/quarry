@@ -7,24 +7,20 @@ parameters that lack proper authorization checks.
 RED PHASE: These tests are expected to FAIL until the IDOR scanner is implemented.
 """
 
-from pathlib import Path
-
 import pytest
 
 from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.schemas import (
     AttackSurfaceItem,
-    CandidateFinding,
     Confidence,
-    SourceRef,
     VulnerabilityClass,
 )
 
 # Import will fail until scanner is implemented - that's expected for RED phase
 from quarry_plugins.vuln_classes.idor import (
     IdrMatch,
-    scan_handler_for_idor,
     idor_match_to_candidate_finding,
+    scan_handler_for_idor,
 )
 
 

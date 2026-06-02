@@ -22,7 +22,7 @@ def _redact_headers(headers: httpx.Headers) -> dict[str, str | list[str]]:
     redacted: dict[str, str | list[str]] = {}
     for key, value in headers.multi_items():
         if key.lower() == "authorization":
-            redacted[key] = "REDACTED"
+            redacted["Authorization"] = "REDACTED"
         elif key in redacted:
             # Handle multi-value headers
             existing = redacted[key]
