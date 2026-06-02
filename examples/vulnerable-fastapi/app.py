@@ -1,8 +1,11 @@
 """Seeded vulnerable FastAPI target for local scanner development."""
 
+import base64
 import subprocess
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 app = FastAPI(title="Quarry Vulnerable FastAPI Target")
 
@@ -12,6 +15,26 @@ USERS = {
     "1": {"id": "1", "name": "Ada", "email": "ada@example.test"},
     "2": {"id": "2", "name": "Grace", "email": "grace@example.test"},
 }
+
+BASIC_AUTH_USERS = {
+    "user-a": "pass-a",
+    "user-b": "pass-b",
+}
+
+security = HTTPBasic()
+
+
+async def get_optional_credentials(request: Request) -> HTTPBasicCredentials | None:
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Basic "):
+        return None
+    try:
+        encoded = auth_header[6:]
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        username, password = decoded.split(":", 1)
+        return HTTPBasicCredentials(username=username, password=password)
+    except Exception:
+        return None
 
 
 @app.get("/health")
@@ -25,7 +48,20 @@ def config() -> dict[str, str]:
 
 
 @app.get("/users/{user_id}")
-def read_user(user_id: str) -> dict[str, str]:
+def read_user(
+    user_id: str,
+    credentials: Annotated[HTTPBasicCredentials | None, Depends(get_optional_credentials)] = None,
+) -> dict[str, str]:
+    # Optional Basic auth: if credentials provided, validate them
+    if credentials is not None:
+        stored_password = BASIC_AUTH_USERS.get(credentials.username)
+        if stored_password is None or credentials.password != stored_password:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+
     user = USERS.get(user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Unknown user")

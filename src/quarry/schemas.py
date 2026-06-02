@@ -489,6 +489,18 @@ class DiffLabel(StrEnum):
     UNCHANGED = "unchanged"
 
 
+class ReachabilityVerdict(StrEnum):
+    REACHABLE = "reachable"
+    NOT_REACHABLE = "not_reachable"
+    INDETERMINATE = "indeterminate"
+
+
+class RepoRole(StrEnum):
+    PRIMARY = "primary"
+    DEPENDENCY = "dependency"
+    SIBLING = "sibling"
+
+
 class ChangedFile(BaseModel):
     path: str
     status: str
@@ -512,6 +524,66 @@ def _empty_changed_files() -> list[ChangedFile]:
 
 def _empty_impacted_regions() -> list[ImpactedCodeRegion]:
     return []
+
+
+def _empty_entry_points() -> list[EntryPoint]:
+    return []
+
+
+def _empty_call_edges() -> list[CallEdge]:
+    return []
+
+
+def _empty_run_repos() -> list[RunRepo]:
+    return []
+
+
+class EntryPoint(BaseModel):
+    repo: str
+    file: str
+    function: str
+    kind: Literal["http_handler", "cli_arg", "library_export", "unknown"]
+
+
+class CallEdge(BaseModel):
+    caller_repo: str
+    caller_file: str
+    caller_function: str
+    callee_repo: str
+    callee_file: str
+    callee_function: str
+
+
+class RunRepo(BaseModel):
+    id: str
+    scan_id: str
+    name: str
+    url: str
+    sha: str
+    role: RepoRole
+    clone_depth: int = 1
+    clone_filter: str | None = None
+    subtree_scope: str | None = None
+    vendor_allowlist: list[str] = Field(default_factory=_empty_strings)
+
+
+class Trace(BaseModel):
+    id: str
+    scan_id: str
+    finding_id: str
+    reachable: ReachabilityVerdict
+    entry_points: list[EntryPoint] = Field(default_factory=_empty_entry_points)
+    cross_repo: bool = False
+    trace_notes: str | None = None
+    model_invocation_id: str | None = None
+
+
+class CallGraph(BaseModel):
+    scan_id: str
+    repos: list[RunRepo] = Field(default_factory=_empty_run_repos)
+    entry_points: list[EntryPoint] = Field(default_factory=_empty_entry_points)
+    edges: list[CallEdge] = Field(default_factory=_empty_call_edges)
+    index_kind: str = "static"
 
 
 class GitDiff(BaseModel):
