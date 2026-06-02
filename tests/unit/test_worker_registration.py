@@ -2,12 +2,14 @@
 
 from quarry_activities.attack_surface import extract_fastapi_routes
 from quarry_activities.coverage import build_coverage_ledger_activity
+from quarry_activities.dynamic_validation import validate_idor_candidate_activity
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import (
     promote_to_final_finding_metadata,
     validate_secret_candidate,
 )
+from quarry_plugins.vuln_classes.idor import scan_attack_surface_for_idor
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_worker.main import run_worker
 
@@ -21,12 +23,14 @@ class TestWorkerImports:
             create_repository_snapshot,
             extract_fastapi_routes,
             scan_repo_for_secrets,
+            scan_attack_surface_for_idor,
             validate_secret_candidate,
+            validate_idor_candidate_activity,
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
             render_markdown_report,
         ]
-        assert len(activities) == 7
+        assert len(activities) == 9
         for act in activities:
             assert callable(act)
 
@@ -37,7 +41,9 @@ class TestActivityDecorators:
             create_repository_snapshot,
             extract_fastapi_routes,
             scan_repo_for_secrets,
+            scan_attack_surface_for_idor,
             validate_secret_candidate,
+            validate_idor_candidate_activity,
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
             render_markdown_report,
@@ -83,7 +89,9 @@ class TestWorkerConfiguration:
             "create_repository_snapshot",
             "extract_fastapi_routes",
             "scan_repo_for_secrets",
+            "scan_attack_surface_for_idor",
             "validate_secret_candidate",
+            "validate_idor_candidate_activity",
             "promote_to_final_finding_metadata",
             "build_coverage_ledger_activity",
             "render_markdown_report",

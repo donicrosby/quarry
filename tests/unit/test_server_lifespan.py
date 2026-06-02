@@ -12,7 +12,9 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from quarry.config import QuarrySettings
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.diff import git_diff_commits
+from quarry_activities.dynamic_validation import validate_idor_candidate_activity
 from quarry_activities.mapper import map_impacted_regions
+from quarry_plugins.vuln_classes.idor import scan_attack_surface_for_idor
 from quarry_server.app import create_app, lifespan
 from quarry_workflows import RunDiffScanWorkflow
 
@@ -74,9 +76,11 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert worker.task_queue == QuarrySettings().task_queue
             assert len(worker.workflows) == 2
             assert RunDiffScanWorkflow in worker.workflows
-            assert len(worker.activities) == 11
+            assert len(worker.activities) == 13
             assert git_diff_commits in worker.activities
             assert map_impacted_regions in worker.activities
+            assert scan_attack_surface_for_idor in worker.activities
+            assert validate_idor_candidate_activity in worker.activities
             assert build_coverage_ledger_activity in worker.activities
 
         assert worker.cancelled is True

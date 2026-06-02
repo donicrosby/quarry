@@ -610,9 +610,10 @@ class DiffScanResult(BaseModel):
     final_finding_count: int = 0
 
 
-def local_scan_profile() -> ScanProfile:
+def local_scan_profile(target_url: str | None = None) -> ScanProfile:
     return ScanProfile(
         id="local-fast",
         name="Local Fast",
-        vuln_classes=[VulnerabilityClass.SECRETS],
+        vuln_classes=[VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR],
+        dynamic_validation_enabled=target_url is not None,
     )

@@ -37,7 +37,7 @@ def test_scan_serializes_and_deserializes() -> None:
     loaded = Scan.model_validate_json(scan.model_dump_json())
 
     assert loaded.id == "scan-1"
-    assert loaded.profile.vuln_classes == [VulnerabilityClass.SECRETS]
+    assert loaded.profile.vuln_classes == [VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR]
     assert loaded.status is ScanStatus.CREATED
     # Defaulted week-1 alignment fields.
     assert loaded.parent_scan_id is None
