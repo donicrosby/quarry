@@ -125,6 +125,11 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=2)
+    finally:
+        # Close the piped stdout (text=True opens a TextIOWrapper) so the FD does
+        # not leak as an unclosed-file ResourceWarning.
+        if process.stdout is not None:
+            process.stdout.close()
 
 
 async def _wait_for_status(db_path: Path, scan_id: str, status: ScanStatus) -> None:
