@@ -83,3 +83,26 @@ def test_load_ground_truth_reads_demo_file() -> None:
     assert VulnerabilityClass.SECRETS in classes
     assert VulnerabilityClass.IDOR in classes
     assert VulnerabilityClass.COMMAND_INJECTION in classes
+
+
+def test_idor_found() -> None:
+    """Verify IDOR vulnerability is detected when scanner finds it."""
+    idor_finding = FinalFinding(
+        id="idor-1",
+        scan_id="scan-1",
+        workspace_id="local",
+        fingerprint="idor-fp",
+        vuln_class=VulnerabilityClass.IDOR,
+        severity=Severity.HIGH,
+        title="Potential IDOR via user_id",
+        summary="Route /users/{user_id} lacks auth check",
+        affected_component="app.py",
+        source_refs=[SourceRef(file_path="app.py", start_line=50)],
+        validation_result_id="v-idor",
+        created_at=utc_now(),
+    )
+    truth = load_ground_truth(GROUND_TRUTH_PATH)
+    result = compare([idor_finding], truth, runtime_seconds=1.0)
+
+    assert "idor:app.py" in result.matched
+    assert result.expected >= 4  # secrets, idor, command_injection, ssrf
