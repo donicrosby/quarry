@@ -13,6 +13,7 @@ from quarry.schemas import (
     CandidateFinding,
     CoverageLedger,
     FinalFinding,
+    ProofArtifact,
     RedactionStatus,
     RepositorySnapshot,
     Scan,
@@ -93,6 +94,17 @@ Full coverage: no items were skipped.
 
 {{ finding.summary }}
 
+{% set finding_proofs = proofs_by_finding.get(finding.id, []) -%}
+{% for proof in finding_proofs -%}
+#### Proof: {{ proof.proof_type }}
+
+{{ proof.description }}
+
+{% for ref in proof.evidence_refs -%}
+{% set redaction = ref.redaction_status.value -%}
+- `{{ ref.kind.value }}`: {{ ref.uri }} (redaction: `{{ redaction }}`)
+{% endfor %}
+{% endfor %}
 {% endfor %}
 {% endif -%}
 
@@ -132,6 +144,7 @@ def render_markdown_report_activity(
             final_findings_json=input.get("final_findings_json"),
             report_path=input.get("report_path"),
             coverage_json=input.get("coverage_json"),
+            proof_artifacts_json=input.get("proof_artifacts_json"),
         )
     return _render_markdown_report_from_input(input)
 
@@ -143,9 +156,10 @@ def render_markdown_report(
     attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
+    proof_artifacts: list[ProofArtifact] | None = None,
 ) -> str:
     return _render_markdown_report_impl(
-        scan, findings, snapshot, attack_surface, final_findings, coverage
+        scan, findings, snapshot, attack_surface, final_findings, coverage, proof_artifacts
     )
 
 
@@ -172,6 +186,11 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         if input.coverage_json is not None
         else None
     )
+    proof_artifacts = (
+        _proof_artifacts_from_json(input.proof_artifacts_json)
+        if input.proof_artifacts_json is not None
+        else None
+    )
     report_text = _render_markdown_report_impl(
         scan,
         findings,
@@ -179,6 +198,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         attack_surface,
         final_findings,
         coverage,
+        proof_artifacts,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -200,6 +220,7 @@ def _render_markdown_report_impl(
     attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
+    proof_artifacts: list[ProofArtifact] | None = None,
 ) -> str:
     summary = (
         f"Quarry produced {len(final_findings or [])} validated finding(s) "
@@ -213,7 +234,16 @@ def _render_markdown_report_impl(
         attack_surface=attack_surface or [],
         final_findings=final_findings or [],
         coverage=coverage,
+        proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
     )
+
+
+def _proofs_by_finding(proof_artifacts: list[ProofArtifact]) -> dict[str, list[ProofArtifact]]:
+    by_finding: dict[str, list[ProofArtifact]] = {}
+    for proof in proof_artifacts:
+        key = proof.final_finding_id or proof.candidate_finding_id
+        by_finding.setdefault(key, []).append(proof)
+    return by_finding
 
 
 def _candidate_findings_from_json(payload: str) -> list[CandidateFinding]:
@@ -226,6 +256,10 @@ def _attack_surface_from_json(payload: str) -> list[AttackSurfaceItem]:
 
 def _final_findings_from_json(payload: str) -> list[FinalFinding]:
     return [FinalFinding.model_validate(item) for item in json.loads(payload)]
+
+
+def _proof_artifacts_from_json(payload: str) -> list[ProofArtifact]:
+    return [ProofArtifact.model_validate(item) for item in json.loads(payload)]
 
 
 def _report_artifact_ref(report_path: Path) -> ArtifactRef:

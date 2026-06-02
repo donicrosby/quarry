@@ -21,6 +21,7 @@ from quarry.schemas import (
     CandidateFinding,
     CoverageGap,
     FinalFinding,
+    ProofArtifact,
     RedactionStatus,
     Report,
     RepositorySnapshot,
@@ -303,6 +304,7 @@ class RunScanWorkflow:
                     )
             await _persist_scan_stage(scan_input.db_path, scan.id, "SECRETS_SCAN")
 
+        idor_proof_artifacts: list[ProofArtifact] = []
         idor_scan_completed = _stage_completed(completed_stage, "IDOR_SCAN")
         if idor_scan_completed:
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
@@ -315,6 +317,7 @@ class RunScanWorkflow:
                 attack_surface_items,
                 candidate_findings,
                 final_findings,
+                idor_proof_artifacts,
                 artifact_root,
             )
             await _persist_scan_stage(scan_input.db_path, scan.id, "IDOR_SCAN")
@@ -344,6 +347,9 @@ class RunScanWorkflow:
                 final_findings_json=_model_list_json(final_findings),
                 report_path=report_path,
                 coverage_json=coverage_ledger_json,
+                proof_artifacts_json=(
+                    _model_list_json(idor_proof_artifacts) if idor_proof_artifacts else None
+                ),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=ACTIVITY_RETRY_POLICY,
@@ -415,6 +421,7 @@ class RunScanWorkflow:
         attack_surface_items: list[AttackSurfaceItem],
         candidate_findings: list[CandidateFinding],
         final_findings: list[FinalFinding],
+        proof_artifacts: list[ProofArtifact],
         artifact_root: str,
     ) -> None:
         idor_candidate_payload = await workflow.execute_activity(
@@ -462,6 +469,22 @@ class RunScanWorkflow:
             )
             validation = _idor_validation_result_from_activity(validation_payload)
             if validation.verdict == "validated":
+                proof: ProofArtifact | None = None
+                if validation.evidence_refs:
+                    proof = ProofArtifact(
+                        id=str(workflow.uuid4()),
+                        scan_id=scan.id,
+                        candidate_finding_id=candidate.id,
+                        final_finding_id=candidate.id,
+                        proof_type="dynamic_idor_two_user",
+                        description=(
+                            "User A retrieved User B's resource by manipulating the object "
+                            "identifier; captured HTTP request and response demonstrate the access."
+                        ),
+                        evidence_refs=validation.evidence_refs,
+                        redaction_status=validation.evidence_refs[0].redaction_status,
+                        created_at=workflow.now(),
+                    )
                 final = FinalFinding(
                     id=candidate.id,
                     scan_id=scan.id,
@@ -475,6 +498,7 @@ class RunScanWorkflow:
                     attack_surface_item_id=candidate.attack_surface_item_id,
                     source_refs=candidate.source_refs,
                     validation_result_id=validation.id,
+                    proof_artifact_ids=[proof.id] if proof is not None else [],
                     remediation=(
                         "Add object-level authorization checks before returning "
                         "user-controlled resources."
@@ -487,6 +511,8 @@ class RunScanWorkflow:
                     {"finding": _model_json_dict(final)},
                 )
                 final_findings.append(final)
+                if proof is not None:
+                    proof_artifacts.append(proof)
                 await _append_workflow_event(
                     scan_input.db_path,
                     scan.id,
@@ -882,7 +908,10 @@ def _join_path(root: str, *parts: str) -> str:
 
 
 def _model_list_json(
-    items: list[CandidateFinding] | list[AttackSurfaceItem] | list[FinalFinding],
+    items: list[CandidateFinding]
+    | list[AttackSurfaceItem]
+    | list[FinalFinding]
+    | list[ProofArtifact],
 ) -> str:
     return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 
