@@ -15,8 +15,10 @@ from quarry.schemas import (
     IntegrationRun,
     Report,
     Scan,
+    ScanManifest,
     ScanStatus,
     Target,
+    ToolInvocation,
     WorkflowEvent,
 )
 from quarry_persistence.db import Base, create_sqlite_engine, session_scope
@@ -123,6 +125,23 @@ class IntegrationRunRecord(Base):
     sink: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     run_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ScanManifestRecord(Base):
+    __tablename__ = "scan_manifests"
+
+    # One manifest per scan; scan_id is the key so resume re-writes are idempotent.
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), primary_key=True)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ToolInvocationRecord(Base):
+    __tablename__ = "tool_invocations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    invocation_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 @dataclass(frozen=True)
@@ -336,6 +355,42 @@ class QuarryRepository:
                 select(IntegrationRunRecord).where(IntegrationRunRecord.scan_id == scan_id)
             ).all()
             return [IntegrationRun.model_validate_json(record.run_json) for record in records]
+
+    def save_scan_manifest(self, manifest: ScanManifest) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ScanManifestRecord(
+                    scan_id=manifest.scan_id,
+                    manifest_json=manifest.model_dump_json(),
+                )
+            )
+
+    def load_scan_manifest(self, scan_id: str) -> ScanManifest | None:
+        with session_scope(self.engine) as session:
+            record = session.get(ScanManifestRecord, scan_id)
+            if record is None:
+                return None
+            return ScanManifest.model_validate_json(record.manifest_json)
+
+    def save_tool_invocation(self, invocation: ToolInvocation) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ToolInvocationRecord(
+                    id=invocation.id,
+                    scan_id=invocation.scan_id,
+                    tool_name=invocation.tool_name,
+                    invocation_json=invocation.model_dump_json(),
+                )
+            )
+
+    def load_tool_invocations(self, scan_id: str) -> list[ToolInvocation]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(ToolInvocationRecord).where(ToolInvocationRecord.scan_id == scan_id)
+            ).all()
+            return [
+                ToolInvocation.model_validate_json(record.invocation_json) for record in records
+            ]
 
     def list_scan_summaries(self) -> list[ScanSummary]:
         with session_scope(self.engine) as session:
