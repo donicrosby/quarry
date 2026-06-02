@@ -113,6 +113,16 @@ class QuarryClient:
         payload = _json_object(response)
         return {"scan_id": str(payload["scan_id"]), "status": str(payload["status"])}
 
+    async def replay_scan(self, scan_id: str) -> dict[str, str]:
+        response = await self._client.post(f"/scans/{scan_id}/replay")
+        response.raise_for_status()
+        payload = _json_object(response)
+        return {
+            "scan_id": str(payload["scan_id"]),
+            "report_path": str(payload["report_path"]),
+            "mode": str(payload["mode"]),
+        }
+
     async def get_findings(self, scan_id: str) -> FindingsResponse:
         response = await self._client.get(f"/scans/{scan_id}/findings")
         response.raise_for_status()
