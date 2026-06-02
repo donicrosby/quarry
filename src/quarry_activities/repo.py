@@ -17,6 +17,7 @@ from quarry.schemas import (
     FileManifest,
     FileManifestEntry,
     FinalFinding,
+    IntegrationRun,
     Report,
     RepositorySnapshot,
     Scan,
@@ -183,6 +184,13 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 finding.model_dump(mode="json")
                 for finding in repository.load_final_findings(payload["scan_id"])
             ]
+        case "load_integration_runs":
+            return [
+                run.model_dump(mode="json")
+                for run in repository.load_integration_runs(payload["scan_id"])
+            ]
+        case "save_integration_run":
+            repository.save_integration_run(IntegrationRun.model_validate(payload["run"]))
         case "append_event":
             repository.append_event(WorkflowEvent.model_validate(payload["event"]))
         case "save_artifact_ref":

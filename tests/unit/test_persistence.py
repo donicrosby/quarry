@@ -4,6 +4,8 @@ from pathlib import Path
 from quarry.schemas import (
     CandidateFinding,
     FinalFinding,
+    IntegrationRun,
+    IntegrationStatus,
     Scan,
     ScanStatus,
     Severity,
@@ -130,3 +132,33 @@ def test_resaving_same_finding_is_idempotent(tmp_path: Path) -> None:
 
     assert len(repository.load_candidate_findings("scan-1")) == 1
     assert len(repository.load_final_findings("scan-1")) == 1
+
+
+def _integration_run(scan_id: str) -> IntegrationRun:
+    return IntegrationRun(
+        id=f"run-{scan_id}",
+        scan_id=scan_id,
+        integration_config_id="local-jira_dry_run",
+        integration_event_id="f-1",
+        idempotency_key=f"{scan_id}:jira_dry_run:fp-1",
+        status=IntegrationStatus.DRY_RUN,
+        dry_run=True,
+        sink="jira_dry_run",
+        finding_fingerprint="fp-1",
+        created_at=datetime.now(UTC),
+    )
+
+
+def test_integration_runs_persist_and_load_by_scan(tmp_path: Path) -> None:
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    now = datetime.now(UTC)
+    _make_scan(repository, "scan-1", now)
+    _make_scan(repository, "scan-2", now)
+
+    repository.save_integration_run(_integration_run("scan-1"))
+    repository.save_integration_run(_integration_run("scan-2"))
+    # Re-delivering the same scan's run is idempotent (merge by idempotency_key).
+    repository.save_integration_run(_integration_run("scan-1"))
+
+    assert len(repository.load_integration_runs("scan-1")) == 1
+    assert len(repository.load_integration_runs("scan-2")) == 1
