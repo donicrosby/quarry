@@ -15,8 +15,10 @@ from quarry.schemas import (
     IntegrationRun,
     Report,
     Scan,
+    ScanManifest,
     ScanStatus,
     Target,
+    ToolInvocation,
     WorkflowEvent,
 )
 from quarry_persistence.db import Base, create_sqlite_engine, session_scope
@@ -33,6 +35,7 @@ class ScanRecord(Base):
     profile_id: Mapped[str] = mapped_column(String, nullable=False)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     report_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     started_at: Mapped[str | None] = mapped_column(String, nullable=True)
     completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -125,6 +128,23 @@ class IntegrationRunRecord(Base):
     run_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ScanManifestRecord(Base):
+    __tablename__ = "scan_manifests"
+
+    # One manifest per scan; scan_id is the key so resume re-writes are idempotent.
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), primary_key=True)
+    manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ToolInvocationRecord(Base):
+    __tablename__ = "tool_invocations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    invocation_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 @dataclass(frozen=True)
 class ScanSummary:
     scan_id: str
@@ -135,6 +155,7 @@ class ScanSummary:
     report_path: str | None
     created_at: str
     completed_at: str | None
+    error: str | None = None
 
 
 class QuarryRepository:
@@ -177,6 +198,7 @@ class QuarryRepository:
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
         report_path: Path | str | None = None,
+        error: str | None = None,
     ) -> None:
         with session_scope(self.engine) as session:
             record = _get_scan_record(session, scan_id)
@@ -186,11 +208,14 @@ class QuarryRepository:
             record.completed_at = _encode_optional_datetime(completed_at) or record.completed_at
             if report_path is not None:
                 record.report_path = str(report_path)
+            if error is not None:
+                record.error = error
             record.scan_json = scan.model_copy(
                 update={
                     "status": status,
                     "started_at": started_at or scan.started_at,
                     "completed_at": completed_at or scan.completed_at,
+                    "error": error or scan.error,
                 }
             ).model_dump_json()
 
@@ -337,6 +362,42 @@ class QuarryRepository:
             ).all()
             return [IntegrationRun.model_validate_json(record.run_json) for record in records]
 
+    def save_scan_manifest(self, manifest: ScanManifest) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ScanManifestRecord(
+                    scan_id=manifest.scan_id,
+                    manifest_json=manifest.model_dump_json(),
+                )
+            )
+
+    def load_scan_manifest(self, scan_id: str) -> ScanManifest | None:
+        with session_scope(self.engine) as session:
+            record = session.get(ScanManifestRecord, scan_id)
+            if record is None:
+                return None
+            return ScanManifest.model_validate_json(record.manifest_json)
+
+    def save_tool_invocation(self, invocation: ToolInvocation) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ToolInvocationRecord(
+                    id=invocation.id,
+                    scan_id=invocation.scan_id,
+                    tool_name=invocation.tool_name,
+                    invocation_json=invocation.model_dump_json(),
+                )
+            )
+
+    def load_tool_invocations(self, scan_id: str) -> list[ToolInvocation]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(ToolInvocationRecord).where(ToolInvocationRecord.scan_id == scan_id)
+            ).all()
+            return [
+                ToolInvocation.model_validate_json(record.invocation_json) for record in records
+            ]
+
     def list_scan_summaries(self) -> list[ScanSummary]:
         with session_scope(self.engine) as session:
             records = session.scalars(
@@ -352,6 +413,7 @@ class QuarryRepository:
                     report_path=record.report_path,
                     created_at=record.created_at,
                     completed_at=record.completed_at,
+                    error=record.error,
                 )
                 for record in records
             ]

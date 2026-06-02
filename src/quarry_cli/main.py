@@ -68,6 +68,23 @@ def scan_resume(scan_id: Annotated[str, typer.Argument(help="Scan ID to resume")
     _echo_key_values(result)
 
 
+@scan_app.command("rerun")
+def scan_rerun(
+    scan_id: Annotated[str, typer.Argument(help="Scan ID to rerun")],
+    mode: Annotated[str, typer.Option(help="Rerun mode. Only 'replay' is supported.")] = "replay",
+) -> None:
+    """Re-render a scan's report from stored state (no scan or model calls)."""
+    if mode != "replay":
+        typer.echo(f"Unsupported rerun mode: {mode!r} (only 'replay' is supported)", err=True)
+        raise typer.Exit(code=2)
+    settings = QuarrySettings()
+    try:
+        result = asyncio.run(_replay_scan_command(settings, scan_id))
+    except httpx.ConnectError:
+        _exit_server_not_reachable(settings)
+    _echo_key_values(result)
+
+
 @scan_app.command("list")
 def list_scans() -> None:
     settings = QuarrySettings()
@@ -141,6 +158,11 @@ async def _cancel_scan_command(settings: QuarrySettings, scan_id: str) -> dict[s
 async def _resume_scan_command(settings: QuarrySettings, scan_id: str) -> dict[str, str]:
     async with QuarryClient(base_url=settings.server_url) as client:
         return await client.resume_scan(scan_id)
+
+
+async def _replay_scan_command(settings: QuarrySettings, scan_id: str) -> dict[str, str]:
+    async with QuarryClient(base_url=settings.server_url) as client:
+        return await client.replay_scan(scan_id)
 
 
 async def _list_scans_command(settings: QuarrySettings) -> list[ScanSummary]:

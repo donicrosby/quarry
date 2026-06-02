@@ -3,10 +3,12 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
@@ -19,12 +21,19 @@ from quarry.schemas import (
     Scan,
     ScanStatus,
 )
-from quarry_activities.inputs import RunDiffScanInput
+from quarry_activities.inputs import RenderReportInput, RunDiffScanInput
+from quarry_activities.reporting import render_markdown_report_activity
 from quarry_persistence import QuarryRepository, ScanSummary
 from quarry_server.schemas import DiffScanRequest, ScanResponse, StartScanRequest
 from quarry_workflows.run_scan import RunScanInput
 
 router = APIRouter(prefix="/scans", tags=["scans"])
+
+
+class ReplayResponse(BaseModel):
+    scan_id: str
+    report_path: str
+    mode: str
 
 
 @router.post("", status_code=201)
@@ -159,6 +168,41 @@ async def cancel_scan(scan_id: str, request: Request) -> dict[str, str]:
     return {"scan_id": scan_id, "status": "CANCELLING"}
 
 
+@router.post("/{scan_id}/replay", status_code=200)
+async def replay_scan(scan_id: str, request: Request) -> ReplayResponse:
+    """Re-render a scan's report from persisted state.
+
+    Replay reuses the render activity over the findings, attack surface, and
+    manifest already stored for the scan. It runs no scan stages and makes no
+    model or tool calls — it only regenerates the markdown report.
+    """
+    repository = _repository_from_request(request)
+    scan = _load_existing_scan(repository, scan_id)
+
+    candidate_findings = repository.load_candidate_findings(scan_id)
+    final_findings = repository.load_final_findings(scan_id)
+    attack_surface = repository.load_attack_surface_items(scan_id)
+    manifest = repository.load_scan_manifest(scan_id)
+
+    output_dir = _metadata_str(scan, "output_dir", default=".quarry") or ".quarry"
+    report_path = str(Path(output_dir) / "reports" / f"{scan_id}.md")
+    reporting_scan = scan.model_copy(update={"status": ScanStatus.COMPLETED})
+
+    render_input = RenderReportInput(
+        scan_json=reporting_scan.model_dump_json(),
+        findings_json=_model_list_json(candidate_findings),
+        snapshot_json=None,
+        attack_surface_json=_model_list_json(attack_surface),
+        final_findings_json=_model_list_json(final_findings),
+        report_path=report_path,
+        coverage_json=None,
+        proof_artifacts_json=None,
+        manifest_json=manifest.model_dump_json() if manifest is not None else None,
+    )
+    rendered = await asyncio.to_thread(render_markdown_report_activity, render_input)
+    return ReplayResponse(scan_id=scan_id, report_path=rendered.report_path, mode="replay")
+
+
 @router.get("/{scan_id}/findings")
 async def get_findings(
     scan_id: str,
@@ -187,6 +231,12 @@ async def get_integrations(scan_id: str, request: Request) -> list[IntegrationRu
     repository = _repository_from_request(request)
     _load_existing_scan(repository, scan_id)
     return repository.load_integration_runs(scan_id)
+
+
+def _model_list_json(
+    items: list[CandidateFinding] | list[AttackSurfaceItem] | list[FinalFinding],
+) -> str:
+    return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 
 
 def _repository_from_request(request: Request) -> QuarryRepository:

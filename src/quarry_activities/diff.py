@@ -8,8 +8,9 @@ from pathlib import Path
 
 from temporalio import activity
 
-from quarry.schemas import ChangedFile, GitDiff
+from quarry.schemas import ChangedFile, GitDiff, utc_now
 from quarry_activities.inputs import GitDiffInput
+from quarry_activities.provenance import build_git_tool_invocation
 
 DIFF_HEADER_PREFIX = "diff --git "
 HUNK_HEADER_PREFIX = "@@ "
@@ -29,22 +30,35 @@ def git_diff_commits(input: GitDiffInput | dict[str, str]) -> dict[str, object]:
     _validate_commit(repo_path, input.base_commit)
     _validate_commit(repo_path, input.head_commit)
 
+    git_args = ["git", "diff", "--find-renames", input.base_commit, input.head_commit, "--"]
+    started_at = utc_now()
     result = subprocess.run(
-        ["git", "diff", "--find-renames", input.base_commit, input.head_commit, "--"],
+        git_args,
         cwd=repo_path,
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
     )
+    completed_at = utc_now()
+    invocation = build_git_tool_invocation(
+        scan_id=input.scan_id,
+        workspace_id=input.workspace_id,
+        args=git_args,
+        exit_code=result.returncode,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
     if result.returncode != 0:
         msg = result.stderr.strip() or "git diff failed"
         raise RuntimeError(msg)
 
     _heartbeat("parsing diff")
-    return _parse_diff_output(result.stdout, input.base_commit, input.head_commit).model_dump(
-        mode="json"
-    )
+    git_diff = _parse_diff_output(result.stdout, input.base_commit, input.head_commit)
+    return {
+        "git_diff": git_diff.model_dump(mode="json"),
+        "tool_invocation": invocation.model_dump(mode="json"),
+    }
 
 
 def _validate_commit(repo_path: Path, commit: str) -> None:

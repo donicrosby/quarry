@@ -162,3 +162,51 @@ def test_integration_runs_persist_and_load_by_scan(tmp_path: Path) -> None:
 
     assert len(repository.load_integration_runs("scan-1")) == 1
     assert len(repository.load_integration_runs("scan-2")) == 1
+
+
+def test_scan_manifest_persists_and_loads(tmp_path: Path) -> None:
+    from quarry.schemas import ScanManifest
+
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    now = datetime.now(UTC)
+    _make_scan(repository, "scan-1", now)
+
+    manifest = ScanManifest(
+        id="manifest-1",
+        scan_id="scan-1",
+        workspace_id="local",
+        quarry_version="0.1.0",
+        profile_id="local-fast",
+        repo_commit_sha="abc123",
+        created_at=now,
+    )
+    repository.save_scan_manifest(manifest)
+    repository.save_scan_manifest(manifest)  # idempotent
+
+    loaded = repository.load_scan_manifest("scan-1")
+    assert loaded is not None
+    assert loaded.quarry_version == "0.1.0"
+    assert repository.load_scan_manifest("missing") is None
+
+
+def test_tool_invocations_persist_and_load(tmp_path: Path) -> None:
+    from quarry.schemas import ToolInvocation
+
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    now = datetime.now(UTC)
+    _make_scan(repository, "scan-1", now)
+
+    repository.save_tool_invocation(
+        ToolInvocation(
+            id="tool-1",
+            scan_id="scan-1",
+            workspace_id="local",
+            tool_name="git",
+            args_hash="d" * 64,
+            exit_code=0,
+            started_at=now,
+        )
+    )
+    invocations = repository.load_tool_invocations("scan-1")
+    assert len(invocations) == 1
+    assert invocations[0].tool_name == "git"

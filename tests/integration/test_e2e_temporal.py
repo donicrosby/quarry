@@ -33,6 +33,7 @@ from quarry.schemas import (
 )
 from quarry_activities.attack_surface import extract_fastapi_routes_for_repo
 from quarry_activities.inputs import ScanSecretsInput
+from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.target import start_local_target, terminate_local_target
@@ -451,6 +452,7 @@ async def test_e2e_cancel_sets_cancelled_status(
             slow_scan_repo_for_secrets,
             validate_secret_candidate,
             render_markdown_report_activity,
+            build_scan_manifest_activity,
         ],
         activity_executor=activity_executor,
         workflow_runner=UnsandboxedWorkflowRunner(),
@@ -523,6 +525,56 @@ async def test_e2e_resume_continues_from_checkpoint(
     assert scan.status is ScanStatus.COMPLETED
     assert scan.metadata["current_stage"] == "COMPLETED"
     assert _event_count(db_path, "scan.resumed") == 1
+
+
+async def test_e2e_resume_does_not_duplicate_findings(
+    temporal_client: Client,
+    temporal_worker: Worker,
+    tmp_path: Path,
+) -> None:
+    """Resuming a finished scan re-renders without duplicating findings or integrations."""
+    repo_path = tmp_path / "repo"
+    _create_repo_with_secrets(repo_path)
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
+    scan_id = "e2e-resume-no-dup"
+
+    base_input = RunScanInput(
+        repo_path=str(repo_path),
+        scan_id=scan_id,
+        db_path=str(db_path),
+        output_dir=str(output_dir),
+    )
+    first = await (
+        await temporal_client.start_workflow(
+            RunScanWorkflow.run,
+            base_input,
+            id=scan_id,
+            task_queue="quarry-control",
+        )
+    ).result()
+
+    repository = QuarryRepository(db_path)
+    candidates_before = len(repository.load_candidate_findings(scan_id))
+    finals_before = len(repository.load_final_findings(scan_id))
+    integrations_before = len(repository.load_integration_runs(scan_id))
+    assert finals_before >= 1
+
+    # Resume the already-completed scan: every stage is checkpointed, so it
+    # reloads state and re-renders without re-running detectors or re-delivering.
+    second = await (
+        await temporal_client.start_workflow(
+            RunScanWorkflow.run,
+            base_input.model_copy(update={"resume": True}),
+            id=f"{scan_id}-resume",
+            task_queue="quarry-control",
+        )
+    ).result()
+
+    assert second.scan_id == first.scan_id
+    assert len(repository.load_candidate_findings(scan_id)) == candidates_before
+    assert len(repository.load_final_findings(scan_id)) == finals_before
+    assert len(repository.load_integration_runs(scan_id)) == integrations_before
 
 
 # ── concurrent scans ───────────────────────────────────────────────────

@@ -127,7 +127,7 @@ def _run_diff(repo_path: Path, base_commit: str, head_commit: str) -> GitDiff:
             head_commit=head_commit,
         )
     )
-    return GitDiff.model_validate(result)
+    return GitDiff.model_validate(result["git_diff"])
 
 
 def _init_repo(tmp_path: Path) -> Path:

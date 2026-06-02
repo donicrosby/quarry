@@ -38,6 +38,8 @@ class GitDiffInput(BaseModel):
     repo_path: str
     base_commit: str
     head_commit: str
+    scan_id: str = ""
+    workspace_id: str = "local"
 
 
 class MapRegionsInput(BaseModel):
@@ -128,6 +130,7 @@ class RenderReportInput(BaseModel):
     report_path: str | None = None
     coverage_json: str | None = None
     proof_artifacts_json: str | None = None
+    manifest_json: str | None = None
 
 
 class DeliverIntegrationsInput(BaseModel):
@@ -139,6 +142,16 @@ class DeliverIntegrationsInput(BaseModel):
     workspace_id: str = "local"
     dry_run: bool = True
     existing_keys: tuple[str, ...] = ()
+
+
+class BuildScanManifestInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    profile_id: str
+    repo_path: str
+    workspace_id: str = "local"
+    plugins_active: tuple[str, ...] = ()
 
 
 class RenderReportOutput(BaseModel):

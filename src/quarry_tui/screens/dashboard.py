@@ -20,7 +20,7 @@ class Dashboard(Static):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable[str](id="scan-table")
-        table.add_columns("Scan ID", "Status", "Events", "Report", "Repository")
+        table.add_columns("Scan ID", "Status", "Events", "Report", "Repository", "Error")
         yield table
 
     async def on_mount(self) -> None:
@@ -34,11 +34,12 @@ class Dashboard(Static):
                     str(scan.event_count),
                     scan.report_path or "",
                     scan.repo_path,
+                    scan.error or "",
                 )
             if not scans:
-                table.add_row("", "no scans", "0", "", "")
+                table.add_row("", "no scans", "0", "", "", "")
         except Exception as exc:
-            table.add_row("error", str(exc), "0", "", "")
+            table.add_row("error", str(exc), "0", "", "", "")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         table = self.query_one(DataTable[str])
