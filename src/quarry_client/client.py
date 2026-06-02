@@ -6,7 +6,14 @@ from typing import Any, Self, cast
 
 import httpx
 
-from quarry.schemas import AttackSurfaceItem, CandidateFinding, FinalFinding, Scan, ScanSummary
+from quarry.schemas import (
+    AttackSurfaceItem,
+    CandidateFinding,
+    FinalFinding,
+    IntegrationRun,
+    Scan,
+    ScanSummary,
+)
 
 FindingsResponse = dict[str, list[CandidateFinding] | list[FinalFinding]]
 
@@ -123,6 +130,11 @@ class QuarryClient:
         response = await self._client.get(f"/scans/{scan_id}/attack-surface")
         response.raise_for_status()
         return [AttackSurfaceItem.model_validate(item) for item in _json_list(response)]
+
+    async def get_integrations(self, scan_id: str) -> list[IntegrationRun]:
+        response = await self._client.get(f"/scans/{scan_id}/integrations")
+        response.raise_for_status()
+        return [IntegrationRun.model_validate(item) for item in _json_list(response)]
 
 
 def _json_object(response: httpx.Response) -> dict[str, Any]:

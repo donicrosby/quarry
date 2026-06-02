@@ -13,6 +13,8 @@ from quarry.schemas import (
     AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
+    IntegrationRun,
+    IntegrationStatus,
     Scan,
     ScanStatus,
     Severity,
@@ -52,6 +54,7 @@ def seed_scan_database(
     status: ScanStatus = ScanStatus.COMPLETED,
     include_findings: bool = False,
     include_attack_surface: bool = False,
+    include_integrations: bool = False,
 ) -> None:
     repository = QuarryRepository(db_path)
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -115,6 +118,22 @@ def seed_scan_database(
             ]
         )
 
+    if include_integrations:
+        repository.save_integration_run(
+            IntegrationRun(
+                id="run-1",
+                scan_id=scan.id,
+                integration_config_id="local-jira_dry_run",
+                integration_event_id="final-1",
+                idempotency_key="scan-1:jira_dry_run:fingerprint-1",
+                status=IntegrationStatus.DRY_RUN,
+                dry_run=True,
+                sink="jira_dry_run",
+                finding_fingerprint="fingerprint-1",
+                created_at=now,
+            )
+        )
+
 
 class TestQuarryTuiApp:
     def test_init_with_default_api_url(self) -> None:
@@ -146,6 +165,15 @@ class TestFindingsScreenWithClient:
         findings = await tui_context.client.get_findings("scan-1")
         assert len(findings["final_findings"]) == 1
         assert len(findings["candidate_findings"]) == 1
+
+
+class TestIntegrationsScreenWithClient:
+    async def test_get_integrations_returns_runs(self, tui_context: TuiTestContext) -> None:
+        seed_scan_database(tui_context.db_path, include_integrations=True)
+        runs = await tui_context.client.get_integrations("scan-1")
+        assert len(runs) == 1
+        assert runs[0].sink == "jira_dry_run"
+        assert runs[0].status is IntegrationStatus.DRY_RUN
 
 
 class TestTuiApiParameter:
