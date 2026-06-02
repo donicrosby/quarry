@@ -28,6 +28,7 @@ from quarry.schemas import (
     Report,
     RepositorySnapshot,
     Scan,
+    ScanManifest,
     ScanStatus,
     Severity,
     Target,
@@ -42,6 +43,7 @@ from quarry_activities.coverage import build_coverage_ledger, write_coverage_art
 from quarry_activities.inputs import (
     BuildCoverageLedgerInput,
     BuildCoverageLedgerOutput,
+    BuildScanManifestInput,
     CommandInjectionScanInput,
     CreateSnapshotInput,
     DeliverIntegrationsInput,
@@ -182,6 +184,8 @@ class RunScanWorkflow:
             {"repo_path": scan_input.repo_path},
         )
 
+        scan_manifest = await self._record_manifest(scan_input, scan)
+
         snapshot: RepositorySnapshot | None = None
         if not _stage_completed(completed_stage, "SNAPSHOT"):
             self._current_stage = "SNAPSHOT"
@@ -193,6 +197,8 @@ class RunScanWorkflow:
                     artifact_root=artifact_root,
                 ),
                 start_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(seconds=30),
+                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                 retry_policy=ACTIVITY_RETRY_POLICY,
             )
             snapshot = _repository_snapshot_from_activity(snapshot_payload)
@@ -376,6 +382,7 @@ class RunScanWorkflow:
                 proof_artifacts_json=(
                     _model_list_json(proof_artifacts) if proof_artifacts else None
                 ),
+                manifest_json=scan_manifest.model_dump_json(),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=ACTIVITY_RETRY_POLICY,
@@ -674,6 +681,27 @@ class RunScanWorkflow:
                     "finding.rejected",
                     {"finding_id": candidate.id},
                 )
+
+    async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
+        payload = await workflow.execute_activity(
+            "build-scan-manifest",
+            BuildScanManifestInput(
+                scan_id=scan.id,
+                workspace_id="local",
+                profile_id=scan.profile.id,
+                repo_path=scan_input.repo_path,
+                plugins_active=tuple(scan.profile.plugins_active),
+            ),
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=ACTIVITY_RETRY_POLICY,
+        )
+        manifest = _scan_manifest_from_activity(payload)
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_scan_manifest",
+            {"manifest": _model_json_dict(manifest)},
+        )
+        return manifest
 
     async def _record_coverage(
         self,
@@ -1192,6 +1220,15 @@ def _idor_validation_result_from_activity(payload: object) -> ValidationResult:
     if isinstance(payload, dict):
         return ValidationResult.model_validate(cast(dict[str, Any], payload))
     msg = f"Unexpected IDOR validation payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _scan_manifest_from_activity(payload: object) -> ScanManifest:
+    if isinstance(payload, ScanManifest):
+        return payload
+    if isinstance(payload, dict):
+        return ScanManifest.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected manifest payload: {type(payload).__name__}"
     raise TypeError(msg)
 
 

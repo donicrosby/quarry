@@ -17,6 +17,7 @@ from quarry.schemas import (
     RedactionStatus,
     RepositorySnapshot,
     Scan,
+    ScanManifest,
     utc_now,
 )
 from quarry_activities.inputs import RenderReportInput, RenderReportOutput
@@ -126,6 +127,24 @@ Full coverage: no items were skipped.
 {% else -%}
 No candidate findings recorded.
 {% endfor %}
+{% if manifest -%}
+
+## Provenance
+
+- Manifest: `{{ manifest.id }}`
+- Quarry version: `{{ manifest.quarry_version }}`
+- Profile: `{{ manifest.profile_id }}`
+- Repo commit: `{{ manifest.repo_commit_sha or "unknown" }}`
+
+{% if final_findings -%}
+| Finding | Validation | Proof artifacts |
+|---------|------------|-----------------|
+{% for finding in final_findings -%}
+{% set proofs = finding.proof_artifact_ids | join(", ") or "-" -%}
+| `{{ finding.fingerprint[:16] }}` | `{{ finding.validation_result_id }}` | {{ proofs }} |
+{% endfor %}
+{% endif -%}
+{% endif -%}
 """
 )
 
@@ -148,6 +167,7 @@ def render_markdown_report_activity(
             report_path=input.get("report_path"),
             coverage_json=input.get("coverage_json"),
             proof_artifacts_json=input.get("proof_artifacts_json"),
+            manifest_json=input.get("manifest_json"),
         )
     return _render_markdown_report_from_input(input)
 
@@ -160,9 +180,17 @@ def render_markdown_report(
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
+    manifest: ScanManifest | None = None,
 ) -> str:
     return _render_markdown_report_impl(
-        scan, findings, snapshot, attack_surface, final_findings, coverage, proof_artifacts
+        scan,
+        findings,
+        snapshot,
+        attack_surface,
+        final_findings,
+        coverage,
+        proof_artifacts,
+        manifest,
     )
 
 
@@ -194,6 +222,11 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         if input.proof_artifacts_json is not None
         else None
     )
+    manifest = (
+        ScanManifest.model_validate_json(input.manifest_json)
+        if input.manifest_json is not None
+        else None
+    )
     report_text = _render_markdown_report_impl(
         scan,
         findings,
@@ -202,6 +235,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         final_findings,
         coverage,
         proof_artifacts,
+        manifest,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -224,6 +258,7 @@ def _render_markdown_report_impl(
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
+    manifest: ScanManifest | None = None,
 ) -> str:
     summary = (
         f"Quarry produced {len(final_findings or [])} validated finding(s) "
@@ -238,6 +273,7 @@ def _render_markdown_report_impl(
         final_findings=final_findings or [],
         coverage=coverage,
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
+        manifest=manifest,
     )
 
 

@@ -18,6 +18,7 @@ from quarry.config import QuarrySettings
 from quarry.schemas import ScanStatus
 from quarry_activities.attack_surface import extract_fastapi_routes_for_repo
 from quarry_activities.inputs import ScanSecretsInput
+from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.validation import validate_secret_candidate
@@ -54,6 +55,7 @@ async def test_cancel_mid_scan_sets_cancelled_status(
             slow_scan_repo_for_secrets,
             validate_secret_candidate,
             render_markdown_report_activity,
+            build_scan_manifest_activity,
         ],
         activity_executor=activity_executor,
         workflow_runner=UnsandboxedWorkflowRunner(),

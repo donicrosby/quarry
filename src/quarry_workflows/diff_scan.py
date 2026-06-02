@@ -125,11 +125,20 @@ class RunDiffScanWorkflow:
                 repo_path=input.repo_path,
                 base_commit=input.base_commit,
                 head_commit=input.head_commit,
+                scan_id=scan.id,
+                workspace_id="local",
             ),
             start_to_close_timeout=timedelta(seconds=120),
             retry_policy=ACTIVITY_RETRY_POLICY,
         )
         git_diff = _git_diff_from_activity(diff_payload)
+        tool_invocation = _tool_invocation_from_activity(diff_payload)
+        if tool_invocation is not None:
+            await _persist_scan_state(
+                input.db_path,
+                "save_tool_invocation",
+                {"invocation": tool_invocation},
+            )
         await _append_workflow_event(
             input.db_path,
             scan.id,
@@ -406,9 +415,20 @@ def _git_diff_from_activity(payload: object) -> GitDiff:
     if isinstance(payload, GitDiff):
         return payload
     if isinstance(payload, dict):
-        return GitDiff.model_validate(cast(dict[str, Any], payload))
+        values = cast(dict[str, Any], payload)
+        git_diff = values.get("git_diff", values)
+        return GitDiff.model_validate(git_diff)
     msg = f"Unexpected git diff payload: {type(payload).__name__}"
     raise TypeError(msg)
+
+
+def _tool_invocation_from_activity(payload: object) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    invocation = cast(dict[str, Any], payload).get("tool_invocation")
+    if isinstance(invocation, dict):
+        return cast(dict[str, Any], invocation)
+    return None
 
 
 def _regions_from_activity(payload: object) -> list[ImpactedCodeRegion]:

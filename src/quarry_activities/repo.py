@@ -1,6 +1,7 @@
 """Repository snapshot activity helpers."""
 
 import json
+from contextlib import suppress
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import cast
 from uuid import uuid4
 
 from temporalio import activity
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from quarry.schemas import (
     ArtifactKind,
@@ -21,8 +23,10 @@ from quarry.schemas import (
     Report,
     RepositorySnapshot,
     Scan,
+    ScanManifest,
     ScanStatus,
     Target,
+    ToolInvocation,
     WorkflowEvent,
     utc_now,
 )
@@ -117,12 +121,20 @@ def build_file_manifest(repo_path: Path) -> FileManifest:
     for i, path in enumerate(sorted(repo_path.rglob("*"))):
         if i > 0 and i % 100 == 0:
             activity.heartbeat(f"Processed {i} files")
+        if _activity_cancel_requested():
+            raise TemporalCancelledError("Repository snapshot cancelled")
         if path.is_file() and not _is_ignored(path, repo_path):
             entries.append(_manifest_entry(path, repo_path))
     return FileManifest(
         entries=entries,
         total_size_bytes=sum(entry.size_bytes for entry in entries),
     )
+
+
+def _activity_cancel_requested() -> bool:
+    with suppress(RuntimeError):
+        return activity.is_cancelled()
+    return False
 
 
 def detect_frameworks(repo_path: Path) -> list[str]:
@@ -191,6 +203,15 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
             ]
         case "save_integration_run":
             repository.save_integration_run(IntegrationRun.model_validate(payload["run"]))
+        case "save_scan_manifest":
+            repository.save_scan_manifest(ScanManifest.model_validate(payload["manifest"]))
+        case "save_tool_invocation":
+            repository.save_tool_invocation(ToolInvocation.model_validate(payload["invocation"]))
+        case "load_tool_invocations":
+            return [
+                invocation.model_dump(mode="json")
+                for invocation in repository.load_tool_invocations(payload["scan_id"])
+            ]
         case "append_event":
             repository.append_event(WorkflowEvent.model_validate(payload["event"]))
         case "save_artifact_ref":
