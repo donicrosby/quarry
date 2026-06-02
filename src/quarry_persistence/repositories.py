@@ -35,6 +35,7 @@ class ScanRecord(Base):
     profile_id: Mapped[str] = mapped_column(String, nullable=False)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     report_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     started_at: Mapped[str | None] = mapped_column(String, nullable=True)
     completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -154,6 +155,7 @@ class ScanSummary:
     report_path: str | None
     created_at: str
     completed_at: str | None
+    error: str | None = None
 
 
 class QuarryRepository:
@@ -196,6 +198,7 @@ class QuarryRepository:
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
         report_path: Path | str | None = None,
+        error: str | None = None,
     ) -> None:
         with session_scope(self.engine) as session:
             record = _get_scan_record(session, scan_id)
@@ -205,11 +208,14 @@ class QuarryRepository:
             record.completed_at = _encode_optional_datetime(completed_at) or record.completed_at
             if report_path is not None:
                 record.report_path = str(report_path)
+            if error is not None:
+                record.error = error
             record.scan_json = scan.model_copy(
                 update={
                     "status": status,
                     "started_at": started_at or scan.started_at,
                     "completed_at": completed_at or scan.completed_at,
+                    "error": error or scan.error,
                 }
             ).model_dump_json()
 
@@ -407,6 +413,7 @@ class QuarryRepository:
                     report_path=record.report_path,
                     created_at=record.created_at,
                     completed_at=record.completed_at,
+                    error=record.error,
                 )
                 for record in records
             ]

@@ -288,6 +288,7 @@ class ScanSummary(BaseModel):
     report_path: str | None = None
     created_at: str
     completed_at: str | None = None
+    error: str | None = None
 
 
 class CandidateFinding(BaseModel):

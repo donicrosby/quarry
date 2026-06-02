@@ -183,6 +183,7 @@ async def test_list_scans_returns_scan_summaries(scan_api: ScanApiTestContext) -
             "report_path": None,
             "created_at": "2026-01-01T00:00:00+00:00",
             "completed_at": None,
+            "error": None,
         }
     ]
 

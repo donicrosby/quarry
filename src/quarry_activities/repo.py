@@ -169,6 +169,7 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 started_at=_optional_datetime(payload.get("started_at")),
                 completed_at=_optional_datetime(payload.get("completed_at")),
                 report_path=payload.get("report_path"),
+                error=payload.get("error"),
             )
         case "update_scan_metadata":
             metadata = payload["metadata"]

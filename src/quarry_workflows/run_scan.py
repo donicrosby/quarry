@@ -120,6 +120,7 @@ class RunScanWorkflow:
             raise
         except BaseException as exc:
             if not is_cancelled_exception(exc):
+                await self._persist_failed_scan(scan_input.db_path, scan_id, _describe_failure(exc))
                 raise
             await self._persist_cancelled_scan(scan_input.db_path, scan_id)
             raise
@@ -817,6 +818,43 @@ class RunScanWorkflow:
                 cancellation_type=workflow.ActivityCancellationType.ABANDON,
             )
         )
+
+    async def _persist_failed_scan(self, db_path: str, scan_id: str, error: str) -> None:
+        self._current_stage = "FAILED"
+        await asyncio.shield(
+            _persist_scan_state(
+                db_path,
+                "update_scan_status",
+                {
+                    "scan_id": scan_id,
+                    "status": ScanStatus.FAILED.value,
+                    "started_at": None,
+                    "completed_at": workflow.now().isoformat(),
+                    "report_path": None,
+                    "error": error,
+                },
+                cancellation_type=workflow.ActivityCancellationType.ABANDON,
+            )
+        )
+
+
+def _describe_failure(exc: BaseException) -> str:
+    """Flatten an exception chain into a single human-readable error string.
+
+    Temporal wraps activity failures in ``ActivityError`` whose own message is a
+    generic "Activity task failed"; the useful detail is on the cause. Walk the
+    chain so the persisted error names the actual root cause.
+    """
+    parts: list[str] = []
+    current: BaseException | None = exc
+    depth = 0
+    while current is not None and depth < 6:
+        text = str(current).strip()
+        if text and text not in parts:
+            parts.append(text)
+        current = current.__cause__
+        depth += 1
+    return ": ".join(parts) if parts else type(exc).__name__
 
 
 def run_scan(scan_input: RunScanInput) -> RunScanResult:
