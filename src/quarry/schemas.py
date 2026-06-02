@@ -568,6 +568,56 @@ class ExternalFindingReference(BaseModel):
     created_at: datetime
 
 
+class ScanManifest(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    quarry_version: str
+    profile_id: str
+    panel_snapshot: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
+    plugins_active: list[str] = Field(default_factory=_empty_strings)
+    repo_commit_sha: str | None = None
+    prompt_bundle_hash: str | None = None
+    policy_bundle_hash: str | None = None
+    created_at: datetime
+
+
+class ToolInvocation(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    tool_name: str
+    tool_version: str | None = None
+    args_hash: str
+    allowed: bool = True
+    denied_reason: str | None = None
+    exit_code: int | None = None
+    stdout_ref: ArtifactRef | None = None
+    stderr_ref: ArtifactRef | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
+class FindingProvenance(BaseModel):
+    finding_fingerprint: str
+    scan_id: str
+    manifest_id: str
+    validation_result_id: str | None = None
+    proof_artifact_ids: list[str] = Field(default_factory=_empty_strings)
+    model_invocation_ids: list[str] = Field(default_factory=_empty_strings)
+    tool_invocation_ids: list[str] = Field(default_factory=_empty_strings)
+    source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
+
+
+class ReportProvenance(BaseModel):
+    report_id: str
+    scan_id: str
+    manifest_id: str
+    finding_fingerprints: list[str] = Field(default_factory=_empty_strings)
+    inputs_hash: str
+    generated_at: datetime
+
+
 class DiffLabel(StrEnum):
     INTRODUCED_BY_DIFF = "introduced_by_diff"
     TOUCHED_BY_DIFF = "touched_by_diff"
