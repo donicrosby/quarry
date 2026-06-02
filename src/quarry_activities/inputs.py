@@ -62,6 +62,15 @@ class IdorScanInput(BaseModel):
     workspace_id: str = "local"
 
 
+class CommandInjectionScanInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repo_root: str
+    scan_id: str
+    attack_surface_items: tuple[AttackSurfaceItem, ...]
+    workspace_id: str = "local"
+
+
 class RunDiffScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -157,4 +166,13 @@ class IdorValidationInput(BaseModel):
     target_url: str | None = None
     allowed_hosts: tuple[str, ...] = ()
     auth_credentials: dict[str, str] | None = None
+    artifact_store_path: str | None = None
+
+
+class ValidateCommandInjectionInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    finding_json: str
+    target_url: str | None = None
+    allowed_hosts: tuple[str, ...] = ()
     artifact_store_path: str | None = None

@@ -1,6 +1,7 @@
 """Command-line interface for Quarry."""
 
 import asyncio
+import signal
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,7 +13,7 @@ import typer
 from quarry.benchmark import compare, load_ground_truth
 from quarry.config import QuarrySettings
 from quarry.schemas import FinalFinding, ScanSummary
-from quarry_activities.target import start_local_target
+from quarry_activities.target import start_local_target, terminate_local_target
 from quarry_client.client import QuarryClient
 
 app = typer.Typer(help="Quarry local vulnerability research harness.")
@@ -240,14 +241,19 @@ def target_start(
         raise typer.BadParameter(str(error)) from error
     typer.echo(f"target=http://{host}:{port}")
     typer.echo("health=ok")
+
+    def _raise_interrupt(*_args: object) -> None:
+        raise KeyboardInterrupt
+
+    # Treat SIGTERM like Ctrl-C so the target's whole process group is torn down
+    # instead of being orphaned when the launcher is killed.
+    signal.signal(signal.SIGTERM, _raise_interrupt)
     try:
         process.wait()
     except KeyboardInterrupt:
-        process.terminate()
-        process.wait(timeout=5)
+        pass
     finally:
-        if process.stdout is not None:
-            process.stdout.close()
+        terminate_local_target(process)
 
 
 @report_app.callback(invoke_without_command=True)

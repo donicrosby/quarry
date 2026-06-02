@@ -380,6 +380,7 @@ class ValidationResult(BaseModel):
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     model_invocation_id: str | None = None
     cross_vendor: bool = False
+    safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
 

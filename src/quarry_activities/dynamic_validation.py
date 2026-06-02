@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import secrets
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urljoin, urlparse
@@ -9,7 +10,11 @@ import httpx
 from temporalio import activity
 
 from quarry.schemas import ArtifactRef, CandidateFinding, ValidationResult, utc_now
-from quarry_activities.inputs import IdorValidationInput, ValidateIDORInput
+from quarry_activities.inputs import (
+    IdorValidationInput,
+    ValidateCommandInjectionInput,
+    ValidateIDORInput,
+)
 from quarry_artifacts.http_utils import (
     capture_request_artifact,
     capture_response_artifact,
@@ -341,3 +346,182 @@ def _direct_test_http_client() -> httpx.Client | None:
 
 def _looks_like_sync_http_client(candidate: object) -> bool:
     return hasattr(candidate, "get")
+
+
+# --- Command injection (safe echo-marker dynamic proof) ---------------------
+
+
+class CommandInjectionContext:
+    def __init__(
+        self,
+        *,
+        finding_id: str,
+        scan_id: str,
+        target_url: str | None,
+        route: str,
+        param: str,
+        allowed_hosts: tuple[str, ...],
+        artifact_store_path: str | None,
+    ) -> None:
+        self.finding_id = finding_id
+        self.scan_id = scan_id
+        self.target_url = target_url
+        self.route = route
+        self.param = param
+        self.allowed_hosts = allowed_hosts
+        self.artifact_store_path = artifact_store_path
+
+
+@activity.defn(name="validate-command-injection-candidate")
+def validate_command_injection_candidate_activity(
+    input_data: ValidateCommandInjectionInput,
+) -> ValidationResult:
+    return validate_command_injection_candidate(input_data)
+
+
+def validate_command_injection_candidate(
+    input_data: ValidateCommandInjectionInput | dict[str, Any],
+    artifact_store: ArtifactStore | None = None,
+    http_client: httpx.Client | None = None,
+) -> ValidationResult:
+    context = _cmdi_context(input_data)
+    if context.target_url is None:
+        return _cmdi_result(
+            context,
+            verdict="inconclusive",
+            reasons=["No target_url for dynamic command-injection proof"],
+            checks_run=["target_url_check"],
+        )
+
+    marker = f"QUARRY_PROOF_{secrets.token_hex(8)}"
+    payload = f"127.0.0.1; echo {marker}"
+    store = artifact_store or _command_injection_artifact_store(context)
+    injected_client = http_client or _direct_test_http_client()
+    if injected_client is not None:
+        return _cmdi_probe(context, injected_client, store, marker, payload)
+    with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as client:
+        return _cmdi_probe(context, client, store, marker, payload)
+
+
+def _cmdi_probe(
+    context: CommandInjectionContext,
+    client: httpx.Client,
+    artifact_store: ArtifactStore | None,
+    marker: str,
+    payload: str,
+) -> ValidationResult:
+    checks_run = ["target_url_check", "shell_marker_echo"]
+    url, params = _cmdi_request_url(context, payload)
+    try:
+        response = client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        return _cmdi_result(
+            context,
+            verdict="inconclusive",
+            reasons=[f"Target unreachable or connection failed: {exc}"],
+            checks_run=checks_run,
+            safe_payload=payload,
+        )
+
+    if not _is_real_status_code(response.status_code):
+        return _cmdi_result(
+            context,
+            verdict="inconclusive",
+            reasons=["Target unreachable or returned an invalid HTTP response"],
+            checks_run=checks_run,
+            safe_payload=payload,
+        )
+
+    evidence_refs = _capture_http_evidence(response, artifact_store)
+    if marker in _response_text(response):
+        return _cmdi_result(
+            context,
+            verdict="validated",
+            reasons=["Injected echo marker returned in response; shell command executed"],
+            checks_run=checks_run,
+            evidence_refs=evidence_refs,
+            safe_payload=payload,
+        )
+    return _cmdi_result(
+        context,
+        verdict="rejected",
+        reasons=["Injected marker not reflected; command injection not proven"],
+        checks_run=checks_run,
+        evidence_refs=evidence_refs,
+        safe_payload=payload,
+    )
+
+
+def _cmdi_request_url(
+    context: CommandInjectionContext,
+    payload: str,
+) -> tuple[str, dict[str, str] | None]:
+    target_url = context.target_url
+    if target_url is None:
+        msg = "target_url is required"
+        raise ValueError(msg)
+
+    placeholder = "{" + context.param + "}"
+    params: dict[str, str] | None
+    if placeholder in context.route:
+        path = context.route.replace(placeholder, payload)
+        params = None
+    else:
+        path = context.route
+        params = {context.param: payload}
+
+    url = urljoin(target_url.rstrip("/") + "/", path.lstrip("/"))
+    if context.allowed_hosts:
+        host = urlparse(url).hostname
+        if host not in context.allowed_hosts:
+            msg = f"URL host '{host}' not in allowed_hosts: {context.allowed_hosts}"
+            raise ValueError(msg)
+    return url, params
+
+
+def _cmdi_context(
+    input_data: ValidateCommandInjectionInput | dict[str, Any],
+) -> CommandInjectionContext:
+    if isinstance(input_data, dict):
+        input_data = ValidateCommandInjectionInput(**input_data)
+    finding = CandidateFinding.model_validate_json(input_data.finding_json)
+    return CommandInjectionContext(
+        finding_id=finding.id,
+        scan_id=finding.scan_id,
+        target_url=input_data.target_url,
+        route=str(finding.metadata.get("route", "/")),
+        param=str(finding.metadata.get("param", "")),
+        allowed_hosts=input_data.allowed_hosts,
+        artifact_store_path=input_data.artifact_store_path,
+    )
+
+
+def _command_injection_artifact_store(
+    context: CommandInjectionContext,
+) -> LocalArtifactStore | None:
+    if context.artifact_store_path is None:
+        return None
+    return LocalArtifactStore(Path(context.artifact_store_path))
+
+
+def _cmdi_result(
+    context: CommandInjectionContext,
+    *,
+    verdict: Literal["validated", "rejected", "needs_proof", "inconclusive"],
+    reasons: list[str],
+    checks_run: list[str],
+    evidence_refs: list[ArtifactRef] | None = None,
+    safe_payload: str | None = None,
+) -> ValidationResult:
+    return ValidationResult(
+        id=f"{context.finding_id}-validation",
+        candidate_finding_id=context.finding_id,
+        scan_id=context.scan_id,
+        verdict=verdict,
+        reasons=reasons,
+        checks_run=checks_run,
+        evidence_refs=evidence_refs or [],
+        cross_vendor=False,
+        safe_payload=safe_payload,
+        created_at=utc_now(),
+    )
