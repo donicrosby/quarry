@@ -253,12 +253,12 @@ class TestIDORValidation:
         mock_http_client.get.return_value = idor_response
 
         # Mock artifact store to capture what was stored
-        captured_request_data: dict[str, object] | None = None
+        captured_request_data: object | None = None
 
         def capture_put_json(key: str, data: object, **kwargs: object) -> ArtifactRef:
             nonlocal captured_request_data
             if "requests" in key:
-                captured_request_data = data  # type: ignore[assignment]
+                captured_request_data = data
             return ArtifactRef(
                 id=f"artifact-{key}",
                 uri=f"file:///tmp/{key}",
@@ -277,10 +277,11 @@ class TestIDORValidation:
 
         # Assertions - verify redaction happened
         assert captured_request_data is not None
-        if hasattr(captured_request_data, "headers"):
-            headers = captured_request_data.headers
+        request_data = captured_request_data
+        if hasattr(request_data, "headers"):
+            headers = request_data.headers
         else:
-            headers = captured_request_data.get("headers", {})  # type: ignore[union-attr]
+            headers = request_data.get("headers", {})
 
         # Authorization should be REDACTED, not the actual credentials
         auth_header = headers.get("Authorization")

@@ -421,5 +421,10 @@ class TestIdorMatchDataclass:
         )
 
         # Attempting to modify should raise an error
-        with pytest.raises((AttributeError, TypeError)):
-            match.line_number = 10  # type: ignore[misc]
+        from dataclasses import FrozenInstanceError
+
+        def _try_set_attr(obj: object, attr: str, value: object) -> None:
+            setattr(obj, attr, value)
+
+        with pytest.raises((AttributeError, TypeError, FrozenInstanceError)):
+            _try_set_attr(match, "line_number", 10)
