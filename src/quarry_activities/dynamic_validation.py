@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from temporalio import activity
@@ -166,7 +166,15 @@ def _user_resource_url(context: IdorValidationContext, user_id: str) -> str:
     path = context.route.replace("{user_id}", user_id).replace("{id}", user_id)
     if not path.startswith("/"):
         path = f"/{path}"
-    return urljoin(target_url.rstrip("/") + "/", path.lstrip("/"))
+    url = urljoin(target_url.rstrip("/") + "/", path.lstrip("/"))
+
+    if context.allowed_hosts:
+        parsed = urlparse(url)
+        if parsed.hostname not in context.allowed_hosts:
+            msg = f"URL host '{parsed.hostname}' not in allowed_hosts: {context.allowed_hosts}"
+            raise ValueError(msg)
+
+    return url
 
 
 def _response_contains_user_b_data(
