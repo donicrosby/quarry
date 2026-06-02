@@ -15,6 +15,7 @@ from quarry_activities.dynamic_validation import (
     validate_command_injection_candidate_activity,
     validate_idor_candidate_activity,
 )
+from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
@@ -55,6 +56,7 @@ async def run_worker() -> None:
             validate_command_injection_candidate_activity,
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
+            deliver_integrations_activity,
             render_markdown_report_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),

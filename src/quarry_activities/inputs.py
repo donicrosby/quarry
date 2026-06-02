@@ -130,6 +130,17 @@ class RenderReportInput(BaseModel):
     proof_artifacts_json: str | None = None
 
 
+class DeliverIntegrationsInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    final_findings_json: str
+    artifact_root: str
+    workspace_id: str = "local"
+    dry_run: bool = True
+    existing_keys: tuple[str, ...] = ()
+
+
 class RenderReportOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
