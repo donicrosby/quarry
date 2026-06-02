@@ -63,8 +63,12 @@ class ArtifactRefRecord(Base):
 class CandidateFindingRecord(Base):
     __tablename__ = "candidate_findings"
 
+    # Finding ids are deterministic fingerprints (stable across scans by design),
+    # so the primary key is scoped per scan to allow re-scanning the same repo.
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    scan_id: Mapped[str] = mapped_column(
+        String, ForeignKey("scans.id"), primary_key=True, nullable=False
+    )
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     vuln_class: Mapped[str] = mapped_column(String, nullable=False)
@@ -95,8 +99,11 @@ class ReportRecord(Base):
 class FinalFindingRecord(Base):
     __tablename__ = "final_findings"
 
+    # Fingerprint-derived ids are stable across scans, so scope the key per scan.
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    scan_id: Mapped[str] = mapped_column(
+        String, ForeignKey("scans.id"), primary_key=True, nullable=False
+    )
     workspace_id: Mapped[str] = mapped_column(String, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     vuln_class: Mapped[str] = mapped_column(String, nullable=False)
@@ -212,7 +219,8 @@ class QuarryRepository:
 
     def save_candidate_finding(self, finding: CandidateFinding) -> None:
         with session_scope(self.engine) as session:
-            session.add(
+            # merge (upsert by (scan_id, id)) so re-running a stage on resume is idempotent.
+            session.merge(
                 CandidateFindingRecord(
                     id=finding.id,
                     scan_id=finding.scan_id,
@@ -275,7 +283,8 @@ class QuarryRepository:
 
     def save_final_finding(self, finding: FinalFinding) -> None:
         with session_scope(self.engine) as session:
-            session.add(
+            # merge (upsert by (scan_id, id)) so re-running a stage on resume is idempotent.
+            session.merge(
                 FinalFindingRecord(
                     id=finding.id,
                     scan_id=finding.scan_id,
