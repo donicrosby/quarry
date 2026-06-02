@@ -450,6 +450,38 @@ class BenchmarkCase(BaseModel):
     scan_profile_id: str
 
 
+class ModelInvocation(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    task_name: str
+    role: str
+    provider: str
+    model: str
+    prompt_version: str
+    prompt_hash: str
+    temperature: float = 0.0
+    prompt_ref: ArtifactRef | None = None
+    response_ref: ArtifactRef | None = None
+    token_input: int | None = None
+    token_output: int | None = None
+    cached_tokens: int | None = None
+    estimated_cost: float | None = None
+    scrubber_hits: int = 0
+    redaction_status: RedactionStatus = RedactionStatus.UNKNOWN
+    created_at: datetime
+
+
+class BudgetPolicy(BaseModel):
+    id: str
+    workspace_id: str
+    max_cost_per_scan: float | None = None
+    max_tokens_per_scan: int | None = None
+    max_model_calls_per_stage: int | None = None
+    max_concurrent_scans: int = 1
+    max_runtime_seconds: int = 1800
+
+
 class DiffLabel(StrEnum):
     INTRODUCED_BY_DIFF = "introduced_by_diff"
     TOUCHED_BY_DIFF = "touched_by_diff"

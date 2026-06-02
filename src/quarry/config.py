@@ -19,3 +19,10 @@ class QuarrySettings(BaseSettings):
     server_port: int = 8000
     server_no_worker: bool = False
     db_path: str = ".quarry/quarry.db"
+
+    # Model layer. Field names avoid a leading ``model_`` (pydantic's protected
+    # namespace). Empty defaults fall back to the role-based panel.
+    default_provider: str = ""
+    default_model: str = ""
+    prompt_retention: str = "metadata_only"
+    redaction_enabled: bool = True

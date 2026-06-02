@@ -7,7 +7,7 @@
 uv run ruff check .          # lint
 uv run ruff format --check . # format check
 uv run pyright               # strict type checking
-uv run pytest -x -q          # tests (200)
+uv run pytest -x -q          # tests (240)
 
 # Single test file
 uv run pytest tests/unit/test_client.py -v
@@ -34,6 +34,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_tui` | Textual TUI consuming the HTTP API |
 | `quarry_persistence` | SQLite via SQLAlchemy (server + activities only) |
 | `quarry_plugins` | Vulnerability scanners (secrets scanner) |
+| `quarry_models` | Model layer: redaction scrubber, safe prompt construction, model-output guard, `ModelClient` (Mock + LiteLLM) |
 
 **Data flow**: CLI/TUI → `QuarryClient` (httpx) → FastAPI server → Temporal workflow → activities → SQLite/filesystem
 
@@ -63,6 +64,12 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 ### No time references
 - Never include week numbers, day numbers, or date references in code or commit messages.
+
+### Model layer (`quarry_models`)
+- **All target-controlled content is untrusted.** It only enters a prompt through `redaction.scrub` (the single chokepoint) and must be wrapped in `<target_content>` tags via `prompting.build_prompt` — never as instructions.
+- **Model access goes through the sync `ModelClient` protocol** (`complete_structured`); `litellm_client.py` is the only place LiteLLM/provider SDKs are imported. `MockModelClient` backs all tests — no API keys, no network.
+- **Model output is never trusted**: `validation.parse_and_validate_output` parses into a typed schema and rejects unauthorized actions per role (deny-by-default) and any leaked secrets.
+- `temperature=0.0` default; prompt retention defaults to `metadata_only`.
 
 ## Testing
 
