@@ -125,3 +125,15 @@ class PersistScanStateInput(BaseModel):
     db_path: str
     operation: str
     payload_json: str
+
+
+class ValidateIDORInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    finding_json: str
+    target_url: str | None = None
+    user_a_username: str | None = None
+    user_a_password: str | None = None
+    user_b_username: str | None = None
+    user_b_password: str | None = None
+    artifact_store_path: str | None = None
