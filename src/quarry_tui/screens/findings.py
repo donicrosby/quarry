@@ -2,6 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import DataTable, Header
 
@@ -10,12 +11,23 @@ from quarry_client.client import QuarryClient
 
 
 class FindingsScreen(Screen[None]):
-    BINDINGS = [Binding("escape,q", "app.pop_screen", "Back", key_display="esc/q")]
+    BINDINGS = [
+        Binding("escape,q", "app.pop_screen", "Back", key_display="esc/q"),
+        Binding("i", "show_integrations", "Integrations", key_display="i"),
+    ]
+
+    class ShowIntegrations(Message):
+        def __init__(self, scan_id: str) -> None:
+            super().__init__()
+            self.scan_id = scan_id
 
     def __init__(self, client: QuarryClient, scan_id: str) -> None:
         super().__init__()
         self.client = client
         self.scan_id = scan_id
+
+    def action_show_integrations(self) -> None:
+        self.post_message(self.ShowIntegrations(self.scan_id))
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

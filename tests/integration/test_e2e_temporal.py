@@ -202,6 +202,39 @@ async def test_e2e_full_scan_completes_with_findings(
     assert any("ADMIN_API_KEY" in c.title for c in candidates)
 
 
+async def test_integrations_emit_runs_events_and_payloads(
+    temporal_client: Client,
+    temporal_worker: Worker,
+    tmp_path: Path,
+) -> None:
+    """A completed scan delivers dry-run integrations with payload artifacts."""
+    repo_path = tmp_path / "repo"
+    _create_repo_with_secrets(repo_path)
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
+
+    handle = await temporal_client.start_workflow(
+        RunScanWorkflow.run,
+        RunScanInput(repo_path=str(repo_path), db_path=str(db_path), output_dir=str(output_dir)),
+        id="e2e-integrations",
+        task_queue="quarry-control",
+    )
+    result = await handle.result()
+
+    repository = QuarryRepository(db_path)
+    finals = repository.load_final_findings(result.scan_id)
+    assert len(finals) == 1
+    runs = repository.load_integration_runs(result.scan_id)
+
+    # file + jira_dry_run + slack_dry_run, one per final finding — no duplicates.
+    sinks = sorted(run.sink for run in runs)
+    assert sinks == ["file", "jira_dry_run", "slack_dry_run"]
+    assert _event_count(db_path, "integration.delivered") == 3
+
+    payloads = list((output_dir / "artifacts" / "integrations").rglob("*.json"))
+    assert len(payloads) == 3
+
+
 @pytest.mark.skipif(
     not VULNERABLE_FASTAPI_REPO.exists(),
     reason="vulnerable-fastapi example not available",

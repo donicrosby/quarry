@@ -11,7 +11,14 @@ from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
 from quarry.config import QuarrySettings
-from quarry.schemas import AttackSurfaceItem, CandidateFinding, FinalFinding, Scan, ScanStatus
+from quarry.schemas import (
+    AttackSurfaceItem,
+    CandidateFinding,
+    FinalFinding,
+    IntegrationRun,
+    Scan,
+    ScanStatus,
+)
 from quarry_activities.inputs import RunDiffScanInput
 from quarry_persistence import QuarryRepository, ScanSummary
 from quarry_server.schemas import DiffScanRequest, ScanResponse, StartScanRequest
@@ -172,6 +179,14 @@ async def get_attack_surface(scan_id: str, request: Request) -> list[AttackSurfa
     repository = _repository_from_request(request)
     _load_existing_scan(repository, scan_id)
     return repository.load_attack_surface_items(scan_id)
+
+
+@router.get("/{scan_id}/integrations")
+async def get_integrations(scan_id: str, request: Request) -> list[IntegrationRun]:
+    """Load integration runs (dry-run sink deliveries) for one scan."""
+    repository = _repository_from_request(request)
+    _load_existing_scan(repository, scan_id)
+    return repository.load_integration_runs(scan_id)
 
 
 def _repository_from_request(request: Request) -> QuarryRepository:

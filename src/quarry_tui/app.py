@@ -6,6 +6,7 @@ from quarry_client.client import QuarryClient
 from quarry_tui.screens.attack_surface import AttackSurfaceScreen
 from quarry_tui.screens.dashboard import Dashboard
 from quarry_tui.screens.findings import FindingsScreen
+from quarry_tui.screens.integrations import IntegrationsScreen
 
 
 class QuarryTuiApp(App[None]):
@@ -24,3 +25,6 @@ class QuarryTuiApp(App[None]):
 
     def on_attack_surface_show_findings(self, event: AttackSurfaceScreen.ShowFindings) -> None:
         self.push_screen(FindingsScreen(self.client, event.scan_id))
+
+    def on_findings_screen_show_integrations(self, event: FindingsScreen.ShowIntegrations) -> None:
+        self.push_screen(IntegrationsScreen(self.client, event.scan_id))

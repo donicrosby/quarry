@@ -21,6 +21,8 @@ from quarry.schemas import (
     CandidateFinding,
     CoverageGap,
     FinalFinding,
+    IntegrationRun,
+    IntegrationStatus,
     ProofArtifact,
     RedactionStatus,
     Report,
@@ -42,6 +44,7 @@ from quarry_activities.inputs import (
     BuildCoverageLedgerOutput,
     CommandInjectionScanInput,
     CreateSnapshotInput,
+    DeliverIntegrationsInput,
     ExtractRoutesForRepoInput,
     IdorScanInput,
     PersistScanStateInput,
@@ -71,7 +74,8 @@ COMPLETED_STAGE_ORDER = {
     "IDOR_SCAN": 4,
     "CMDI_SCAN": 5,
     "REPORT": 6,
-    "COMPLETED": 7,
+    "INTEGRATING": 7,
+    "COMPLETED": 8,
 }
 
 
@@ -409,6 +413,13 @@ class RunScanWorkflow:
         )
         await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
 
+        if scan.profile.integrations_enabled and not _stage_completed(
+            completed_stage, "INTEGRATING"
+        ):
+            self._current_stage = "INTEGRATING"
+            await self._deliver_integrations(scan_input, scan, final_findings, artifact_root)
+            await _persist_scan_stage(scan_input.db_path, scan.id, "INTEGRATING")
+
         self._current_stage = "COMPLETED"
         await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
         completed_at = workflow.now()
@@ -718,6 +729,50 @@ class RunScanWorkflow:
         )
         return output.ledger_json
 
+    async def _deliver_integrations(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        final_findings: list[FinalFinding],
+        artifact_root: str,
+    ) -> None:
+        if not final_findings:
+            return
+        existing = await _load_integration_runs(scan_input.db_path, scan.id)
+        existing_keys = tuple(run.idempotency_key for run in existing)
+        payload = await workflow.execute_activity(
+            "deliver-integrations",
+            DeliverIntegrationsInput(
+                scan_id=scan.id,
+                workspace_id="local",
+                final_findings_json=_model_list_json(final_findings),
+                artifact_root=artifact_root,
+                dry_run=scan.profile.dry_run_integrations,
+                existing_keys=existing_keys,
+            ),
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=ACTIVITY_RETRY_POLICY,
+        )
+        for run in _integration_runs_from_activity(payload):
+            if run.status is IntegrationStatus.SKIPPED:
+                continue
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_integration_run",
+                {"run": _model_json_dict(run)},
+            )
+            event_type = (
+                "integration.failed"
+                if run.status is IntegrationStatus.FAILED
+                else "integration.delivered"
+            )
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                event_type,
+                {"sink": run.sink, "finding_id": run.integration_event_id},
+            )
+
     async def _persist_cancelled_scan(self, db_path: str, scan_id: str) -> None:
         self._current_stage = "CANCELLED"
         await asyncio.shield(
@@ -1022,6 +1077,25 @@ async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]
         msg = f"Unexpected final findings payload: {type(payload).__name__}"
         raise TypeError(msg)
     return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
+
+
+async def _load_integration_runs(db_path: str, scan_id: str) -> list[IntegrationRun]:
+    payload = await _persist_scan_state(db_path, "load_integration_runs", {"scan_id": scan_id})
+    if not isinstance(payload, list):
+        msg = f"Unexpected integration runs payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    return [IntegrationRun.model_validate(item) for item in cast(list[object], payload)]
+
+
+def _integration_runs_from_activity(payload: object) -> list[IntegrationRun]:
+    if not isinstance(payload, list):
+        msg = f"Unexpected integration runs payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    items = cast(list[object], payload)
+    return [
+        item if isinstance(item, IntegrationRun) else IntegrationRun.model_validate(item)
+        for item in items
+    ]
 
 
 def _persisted_stage(scan: Scan | None) -> str | None:

@@ -93,6 +93,14 @@ class RedactionStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class IntegrationStatus(StrEnum):
+    PENDING = "pending"
+    DRY_RUN = "dry_run"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
 def _empty_source_refs() -> list[SourceRef]:
     return []
 
@@ -483,6 +491,83 @@ class BudgetPolicy(BaseModel):
     max_runtime_seconds: int = 1800
 
 
+class IntegrationConfig(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    integration_type: str
+    enabled: bool = False
+    dry_run: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_ref: str | None = None
+    created_at: datetime
+
+
+class IntegrationEvent(BaseModel):
+    id: str
+    scan_id: str
+    workspace_id: str
+    event_type: str
+    finding_id: str | None = None
+    payload_ref: ArtifactRef | None = None
+    created_at: datetime
+
+
+class IntegrationRun(BaseModel):
+    id: str
+    scan_id: str
+    integration_config_id: str
+    integration_event_id: str
+    idempotency_key: str
+    status: IntegrationStatus
+    dry_run: bool
+    sink: str
+    finding_fingerprint: str | None = None
+    external_ref_id: str | None = None
+    output_ref: ArtifactRef | None = None
+    error: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class NotificationMessage(BaseModel):
+    title: str
+    body: str
+    severity: Severity | None = None
+    scan_id: str
+    finding_fingerprint: str | None = None
+    links: list[str] = Field(default_factory=_empty_strings)
+
+
+class TicketCreationRequest(BaseModel):
+    idempotency_key: str
+    title: str
+    body: str
+    severity: Severity
+    labels: list[str] = Field(default_factory=_empty_strings)
+    finding_fingerprint: str
+    report_ref: ArtifactRef | None = None
+
+
+class TicketCreationResult(BaseModel):
+    idempotency_key: str
+    dry_run: bool
+    created: bool
+    external_id: str | None = None
+    url: str | None = None
+    payload_ref: ArtifactRef | None = None
+
+
+class ExternalFindingReference(BaseModel):
+    id: str
+    workspace_id: str
+    finding_fingerprint: str
+    system: str
+    external_id: str
+    url: str | None = None
+    created_at: datetime
+
+
 class DiffLabel(StrEnum):
     INTRODUCED_BY_DIFF = "introduced_by_diff"
     TOUCHED_BY_DIFF = "touched_by_diff"
@@ -617,4 +702,5 @@ def local_scan_profile(target_url: str | None = None) -> ScanProfile:
         name="Local Fast",
         vuln_classes=[VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR],
         dynamic_validation_enabled=target_url is not None,
+        integrations_enabled=True,  # dry-run by default (dry_run_integrations=True)
     )

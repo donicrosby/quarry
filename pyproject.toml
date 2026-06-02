@@ -41,6 +41,7 @@ module-name = [
   "quarry_activities",
   "quarry_artifacts",
   "quarry_cli",
+  "quarry_integrations",
   "quarry_models",
   "quarry_persistence",
   "quarry_plugins",

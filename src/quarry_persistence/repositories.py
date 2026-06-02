@@ -12,6 +12,7 @@ from quarry.schemas import (
     AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
+    IntegrationRun,
     Report,
     Scan,
     ScanStatus,
@@ -110,6 +111,18 @@ class FinalFindingRecord(Base):
     severity: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     finding_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class IntegrationRunRecord(Base):
+    __tablename__ = "integration_runs"
+
+    # idempotency_key is scan-scoped (scan_id:sink:fingerprint) and unique, so it
+    # is the primary key: re-delivering the same finding upserts the same row.
+    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    sink: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    run_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 @dataclass(frozen=True)
@@ -303,6 +316,26 @@ class QuarryRepository:
                 select(FinalFindingRecord).where(FinalFindingRecord.scan_id == scan_id)
             ).all()
             return [FinalFinding.model_validate_json(record.finding_json) for record in records]
+
+    def save_integration_run(self, run: IntegrationRun) -> None:
+        with session_scope(self.engine) as session:
+            # merge (upsert by idempotency_key) so resumed/repeat delivery is idempotent.
+            session.merge(
+                IntegrationRunRecord(
+                    idempotency_key=run.idempotency_key,
+                    scan_id=run.scan_id,
+                    sink=run.sink,
+                    status=run.status.value,
+                    run_json=run.model_dump_json(),
+                )
+            )
+
+    def load_integration_runs(self, scan_id: str) -> list[IntegrationRun]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(IntegrationRunRecord).where(IntegrationRunRecord.scan_id == scan_id)
+            ).all()
+            return [IntegrationRun.model_validate_json(record.run_json) for record in records]
 
     def list_scan_summaries(self) -> list[ScanSummary]:
         with session_scope(self.engine) as session:
