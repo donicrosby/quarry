@@ -183,5 +183,11 @@ uv run quarry scan run --repo examples/vulnerable-fastapi --focus bogus
   calls are wired but require API keys and a live provider.
 - **Target auto-launch deferred** — the target must be started manually with `task target`.
 - **Recon uses MockModelClient** — `recon_subsystem_activity` runs `run_agent_loop` backed by `MockModelClient`; real provider wiring is a later milestone. The `ArchitectureDoc` produced by the current implementation is the result of heuristic analysis in the orchestrator, not real multi-turn reasoning.
-- **`--focus` does not yet filter the scan profile server-side** — the flag is parsed and validated in the CLI but the focus list is not yet passed through to `ScanProfile.vuln_classes` in the server API.
-- **`ArchitectureDoc` not yet persisted** — the recon synthesis writes a result but it is not stored in the SQLite DB via `persist-scan-state`. DB integration is a follow-on.
+- **`--focus` filters scan stages** — `vuln_classes` is now threaded end-to-end from
+  the CLI flag through the server API into `ScanProfile`. Each scan stage (SECRETS,
+  IDOR, CMDI) is gated on membership in `scan.profile.vuln_classes`. The default
+  profile includes all three classes.
+- **`ArchitectureDoc` is persisted** — `ReconWorkflow` saves the result to the
+  `architecture_docs` SQLite table via the `save_architecture_doc` operation on the
+  `persist-scan-state` activity. `QuarryRepository.load_architecture_doc(scan_id)`
+  retrieves it.
