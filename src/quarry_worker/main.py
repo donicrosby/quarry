@@ -2,6 +2,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -62,6 +63,7 @@ async def run_worker() -> None:
             render_markdown_report_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),
+        graceful_shutdown_timeout=timedelta(seconds=30),
     )
     await worker.run()
 

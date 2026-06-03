@@ -61,6 +61,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = ["error::ResourceWarning"]
 
 [tool.pyright]
 pythonVersion = "3.12"

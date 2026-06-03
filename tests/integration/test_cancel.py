@@ -4,6 +4,7 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from datetime import timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -58,6 +59,7 @@ async def test_cancel_mid_scan_sets_cancelled_status(
             build_scan_manifest_activity,
         ],
         activity_executor=activity_executor,
+        graceful_shutdown_timeout=timedelta(seconds=5),
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
     try:

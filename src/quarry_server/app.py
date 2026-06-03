@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from datetime import timedelta
 from typing import Protocol, cast
 
 from fastapi import FastAPI
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 render_markdown_report_activity,
             ],
             activity_executor=activity_executor,
+            graceful_shutdown_timeout=timedelta(seconds=30),
         )
         worker_task = asyncio.create_task(worker.run())
 

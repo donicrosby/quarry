@@ -1,9 +1,13 @@
 """Temporal test environment fixtures."""
 
+import gc
 import os
-from collections.abc import AsyncGenerator
+import warnings
+from collections.abc import AsyncGenerator, Generator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
+import pytest
 import pytest_asyncio
 
 # Make git fixture commits independent of any global ``commit.gpgsign`` setting.
@@ -78,6 +82,7 @@ async def temporal_worker(
     Uses Temporal's default sandboxed workflow runner so tests exercise the same
     determinism restrictions as the production server worker.
     """
+    executor = ThreadPoolExecutor(max_workers=10)
     worker = Worker(
         temporal_client,
         task_queue="quarry-control",
@@ -101,7 +106,24 @@ async def temporal_worker(
             build_scan_manifest_activity,
             render_markdown_report_activity,
         ],
-        activity_executor=ThreadPoolExecutor(max_workers=10),
+        activity_executor=executor,
+        graceful_shutdown_timeout=timedelta(seconds=5),
     )
-    async with worker:
-        yield worker
+    try:
+        async with worker:
+            yield worker
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.fixture(autouse=True)
+def _assert_no_resource_warnings() -> Generator[None, None, None]:  # pyright: ignore[reportUnusedFunction]
+    gc.collect()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        yield
+        gc.collect()
+    leaks = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    if leaks:
+        msgs = "\n  ".join(str(w.message) for w in leaks)
+        pytest.fail(f"ResourceWarning(s) — unclosed resources in this test:\n  {msgs}")

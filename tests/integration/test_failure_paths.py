@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,7 @@ async def test_failed_scan_sets_failed_status_and_preserves_artifacts(
             build_scan_manifest_activity,
         ],
         activity_executor=activity_executor,
+        graceful_shutdown_timeout=timedelta(seconds=5),
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
 
