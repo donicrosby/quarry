@@ -43,9 +43,9 @@ tasks:
       - uv run pre-commit install --hook-type commit-msg
 
   target:
-    desc: Start the local vulnerable FastAPI target.
+    desc: Start the local vulnerable FastAPI target on port 9000.
     cmds:
-      - uv run quarry target start examples/vulnerable-fastapi
+      - uv run quarry target start examples/vulnerable-fastapi --port 9000
 
   worker:
     desc: Start the Quarry worker.
@@ -63,9 +63,9 @@ tasks:
       - uv run quarry report --help
 
   demo:
-    desc: Run the local demo scan.
+    desc: Run the local demo scan (checks prerequisites first).
     cmds:
-      - uv run quarry scan run --repo examples/vulnerable-fastapi --target http://localhost:8000
+      - bash scripts/demo.sh
 
   benchmark-local:
     desc: Run the local vulnerable-app benchmark.
