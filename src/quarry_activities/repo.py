@@ -222,6 +222,13 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 invocation.model_dump(mode="json")
                 for invocation in repository.load_tool_invocations(payload["scan_id"])
             ]
+        case "save_agent_task":
+            # No-op for now — tasks are re-derived from ArchitectureDoc on resume.
+            pass
+        case "load_agent_tasks":
+            # Agent tasks are re-derived from the ArchitectureDoc on resume.
+            # Return empty list; the workflow will re-run emit-agent-tasks if needed.
+            return []
         case "append_event":
             repository.append_event(WorkflowEvent.model_validate(payload["event"]))
         case "save_artifact_ref":

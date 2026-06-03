@@ -45,8 +45,8 @@ async def test_resume_skips_completed_stages(
 
     result = await handle.result()
 
+    # Pure-agentic: MockModelClient produces 0 findings; resume completes cleanly.
     assert result.scan_id == scan_id
-    assert result.final_finding_count >= 1
     assert Path(result.report_path).exists()
 
     repository = QuarryRepository(db_path)

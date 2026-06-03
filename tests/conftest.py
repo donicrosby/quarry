@@ -22,13 +22,15 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from quarry_activities.attack_surface import extract_fastapi_routes, extract_fastapi_routes_for_repo
 from quarry_activities.coverage import build_coverage_ledger_activity
+from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.dynamic_validation import (
     validate_command_injection_candidate_activity,
     validate_idor_candidate_activity,
 )
+from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.hunt import hunt_activity
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
@@ -41,11 +43,6 @@ from quarry_activities.validation import (
     promote_to_final_finding_metadata,
     validate_secret_candidate,
 )
-from quarry_plugins.vuln_classes.command_injection import (
-    scan_attack_surface_for_command_injection,
-)
-from quarry_plugins.vuln_classes.idor import scan_attack_surface_for_idor
-from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_workflows.diff_scan import RunDiffScanWorkflow
 from quarry_workflows.recon import ReconWorkflow
 from quarry_workflows.run_scan import RunScanWorkflow
@@ -94,13 +91,9 @@ async def temporal_worker(
         activities=[
             create_repository_snapshot,
             persist_scan_state,
-            extract_fastapi_routes,
-            extract_fastapi_routes_for_repo,
             git_diff_commits,
-            map_impacted_regions,
             scan_repo_for_secrets,
-            scan_attack_surface_for_idor,
-            scan_attack_surface_for_command_injection,
+            map_impacted_regions,
             validate_secret_candidate,
             validate_idor_candidate_activity,
             validate_command_injection_candidate_activity,
@@ -112,6 +105,8 @@ async def temporal_worker(
             recon_orchestrator_activity,
             recon_subsystem_activity,
             recon_synthesis_activity,
+            emit_agent_tasks,
+            hunt_activity,
         ],
         activity_executor=executor,
         graceful_shutdown_timeout=timedelta(seconds=5),

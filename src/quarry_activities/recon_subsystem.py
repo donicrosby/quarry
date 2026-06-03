@@ -14,9 +14,10 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity
 
-from quarry.schemas import EntryPoint, Subsystem, SubsystemAssignment
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig, resolve_panel
+from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec
 from quarry_tools.builtins import BUILTIN_REGISTRY
 from quarry_tools.runner import ToolRunner
@@ -42,7 +43,7 @@ _SYSTEM_PROMPT = (
 
 @activity.defn(name="recon-subsystem")
 def recon_subsystem_activity(
-    assignment: SubsystemAssignment,
+    assignment: SubsystemAssignment | dict,  # type: ignore[type-arg]
     repo_root: Path | str,
     scan_id: str,
     budget_spec: BudgetSpec | None = None,
@@ -50,6 +51,9 @@ def recon_subsystem_activity(
     """Run the recon agent loop for one subsystem and return a Subsystem."""
     with suppress(RuntimeError):
         activity.heartbeat()
+
+    if isinstance(assignment, dict):
+        assignment = SubsystemAssignment.model_validate(assignment)
 
     root = Path(repo_root)
     if budget_spec is None:
@@ -62,15 +66,23 @@ def recon_subsystem_activity(
         budget_spec=budget_spec,
     )
 
-    # For now use MockModelClient; real model wiring is a later milestone.
-    client = MockModelClient(
-        default=_SubsystemAnalysis(
-            entry_points=[],
-            responsibility=assignment.responsibility,
-            notes="",
-            tool_calls=[],  # empty → final answer on first turn
+    # Select client from the resolved panel 'recon' role.
+    # Default panel uses Provider.MOCK, so existing tests/CI are unaffected.
+    recon_role: RoleConfig = DEFAULT_PANEL["recon"]
+    provider = recon_role.provider
+
+    if provider == Provider.MOCK:
+        client = build_model_client(
+            Provider.MOCK,
+            default=_SubsystemAnalysis(
+                entry_points=[],
+                responsibility=assignment.responsibility,
+                notes="",
+                tool_calls=[],  # empty → final answer on first turn
+            ),
         )
-    )
+    else:
+        client = build_model_client(provider)
 
     initial_message = (
         f"Analyse subsystem '{assignment.name}' at paths {assignment.root_paths}. "

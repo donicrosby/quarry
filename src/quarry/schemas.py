@@ -53,6 +53,13 @@ class Confidence(StrEnum):
     HIGH = "high"
 
 
+class Provider(StrEnum):
+    """Model provider identifiers.  Add new vendors as new members."""
+
+    MOCK = "mock"
+    LITELLM = "litellm"
+
+
 class VulnerabilityClass(StrEnum):
     SECRETS = "secrets"
     IDOR = "idor"
@@ -384,6 +391,7 @@ class AgentTask(BaseModel):
     scan_id: str
     role: str
     task_name: str
+    task_prompt: str = ""
     vuln_class: VulnerabilityClass | None = None
     scope: str | None = None
     source: Literal["recon", "gapfill", "feedback"] = "recon"

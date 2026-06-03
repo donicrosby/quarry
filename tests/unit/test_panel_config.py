@@ -84,20 +84,21 @@ def test_resolve_panel_none_returns_default(tmp_path: Path) -> None:
 
 
 def test_resolve_panel_named_fills_missing_from_default(tmp_path: Path) -> None:
+    from quarry.schemas import Provider
     toml_path = tmp_path / "quarry.toml"
-    # Define a panel that only specifies the "hunt" role
+    # Define a panel that only specifies the "hunt" role using a valid Provider value.
     toml_path.write_text(
         "[panels.custom.roles.hunt]\n"
-        'provider = "anthropic"\n'
-        'model = "claude-3-haiku-20240307"\n'
+        'provider = "litellm"\n'
+        'model = "claude-opus-4-8"\n'
         "rpm = 5\n",
         encoding="utf-8",
     )
     cfg = load_quarry_config(path=toml_path)
     panel = resolve_panel(cfg, panel_name="custom")
     # "hunt" should come from the custom panel
-    assert panel["hunt"].provider == "anthropic"
-    assert panel["hunt"].model == "claude-3-haiku-20240307"
+    assert panel["hunt"].provider == Provider.LITELLM
+    assert panel["hunt"].model == "claude-opus-4-8"
     # "recon" should fall back to DEFAULT_PANEL (not absent)
     assert "recon" in panel
 
@@ -151,3 +152,25 @@ def test_resolve_focus_empty_resolved_set_raises() -> None:
     """An empty default arg with all classes excluded must raise."""
     with pytest.raises(ValueError):
         resolve_focus(cli_focus=[], config_focus=[], default=[])
+
+
+# ---------------------------------------------------------------------------
+# ScanDefaultsConfig — hunt config keys
+# ---------------------------------------------------------------------------
+
+
+def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
+    cfg = load_quarry_config(path=tmp_path / "nonexistent.toml")
+    assert cfg.scan_defaults.hunt_max_iterations == 12
+    assert cfg.scan_defaults.hunt_max_concurrent == 8
+
+
+def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\nhunt_max_iterations = 6\nhunt_max_concurrent = 3\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.hunt_max_iterations == 6
+    assert cfg.scan_defaults.hunt_max_concurrent == 3
