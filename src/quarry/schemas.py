@@ -234,6 +234,7 @@ class TargetAuthorization(BaseModel):
     allowed_repo_paths: list[str]
     expires_at: datetime | None = None
     notes: str | None = None
+    do_not_test: list[str] = Field(default_factory=_empty_strings)
     created_at: datetime
 
 
@@ -244,6 +245,21 @@ class ModelPanelEntry(BaseModel):
     provider: str
     model: str
     rate_limit_rpm: int = 30
+
+
+class ScopeExclusion(BaseModel):
+    """Identifies a scope element that must not be tested."""
+
+    model_config = {"frozen": True}
+
+    kind: str  # e.g. "route", "vuln_class", "note"
+    value: str
+    reason: str
+    block_dynamic: bool = False
+
+
+def _empty_scope_exclusions() -> list[ScopeExclusion]:
+    return []
 
 
 class ScanProfile(BaseModel):
@@ -258,6 +274,7 @@ class ScanProfile(BaseModel):
     dry_run_integrations: bool = True
     max_runtime_seconds: int = 1800
     plugins_active: list[str] = Field(default_factory=_empty_strings)
+    scope_exclusions: list[ScopeExclusion] = Field(default_factory=_empty_scope_exclusions)
 
 
 class Scan(BaseModel):
@@ -679,7 +696,15 @@ class EntryPoint(BaseModel):
     repo: str
     file: str
     function: str
-    kind: Literal["http_handler", "cli_arg", "library_export", "unknown"]
+    kind: Literal[
+        "http_handler",
+        "cli_arg",
+        "library_export",
+        "fuzz_harness",
+        "main",
+        "message_handler",
+        "unknown",
+    ]
 
 
 class CallEdge(BaseModel):
@@ -747,11 +772,127 @@ class DiffScanResult(BaseModel):
     final_finding_count: int = 0
 
 
-def local_scan_profile(target_url: str | None = None) -> ScanProfile:
+# ---------------------------------------------------------------------------
+# Agentic harness schemas (Week 11 — Milestone 2)
+# ---------------------------------------------------------------------------
+
+
+class TrustBoundary(BaseModel):
+    """A boundary in the target system that crosses a trust domain."""
+
+    name: str
+    description: str
+    crosses: list[str] = Field(default_factory=_empty_strings)
+    auth_model: str
+
+
+class BuildCommand(BaseModel):
+    """A command needed to build, test, run, fuzz, or install the target."""
+
+    purpose: Literal["build", "test", "run", "fuzz", "install"]
+    command: str
+    working_dir: str
+
+
+def _empty_trust_boundaries() -> list[TrustBoundary]:
+    return []
+
+
+def _empty_build_commands() -> list[BuildCommand]:
+    return []
+
+
+class SubsystemAssignment(BaseModel):
+    """Assignment returned by the recon orchestrator activity."""
+
+    model_config = {"frozen": True}
+
+    name: str
+    root_paths: list[str]
+    languages: list[str]
+    responsibility: str
+
+
+class Subsystem(BaseModel):
+    """A coherent sub-section of the target repository."""
+
+    name: str
+    root_paths: list[str]
+    languages: list[str]
+    responsibility: str
+    entry_points: list[EntryPoint] = Field(default_factory=_empty_entry_points)
+    notes: str = ""
+
+
+def _empty_subsystems() -> list[Subsystem]:
+    return []
+
+
+class ArchitectureDoc(BaseModel):
+    """Language-agnostic structural analysis produced by the recon agent."""
+
+    repo_languages: list[str]
+    primary_language: str
+    repo_type: str  # "web_service" | "cli" | "fuzzing" | "mixed"
+    subsystems: list[Subsystem] = Field(default_factory=_empty_subsystems)
+    entry_points: list[EntryPoint] = Field(default_factory=_empty_entry_points)
+    trust_boundaries: list[TrustBoundary] = Field(default_factory=_empty_trust_boundaries)
+    build_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
+    attack_surface_summary: str = ""
+    transcript_refs: list[str] = Field(default_factory=_empty_strings)
+
+
+class AgentStep(BaseModel):
+    """One iteration recorded inside an agent loop."""
+
+    agent_kind: Literal[
+        "orchestrator",
+        "subsystem",
+        "synthesis",
+        "hunt",
+        "validate",
+        "prove",
+        "trace",
+        "gapfill",
+    ]
+    iteration: int
+    tool_calls: list[str] = Field(default_factory=_empty_strings)
+    model_invocation_id: str
+    estimated_cost: float = 0.0
+
+
+def _empty_agent_steps() -> list[AgentStep]:
+    return []
+
+
+class AgentLoopResult(BaseModel):
+    """Result returned by run_agent_loop."""
+
+    final_answer: Any | None = None
+    steps: list[AgentStep] = Field(default_factory=_empty_agent_steps)
+    iterations_used: int
+    total_cost: float = 0.0
+    stop_reason: Literal[
+        "final_answer",
+        "max_iterations",
+        "budget_exceeded",
+        "guard_triggered",
+    ]
+
+
+def local_scan_profile(
+    target_url: str | None = None,
+    vuln_classes: list[VulnerabilityClass] | None = None,
+) -> ScanProfile:
     return ScanProfile(
         id="local-fast",
         name="Local Fast",
-        vuln_classes=[VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR],
+        vuln_classes=vuln_classes
+        or [
+            VulnerabilityClass.SECRETS,
+            VulnerabilityClass.IDOR,
+            VulnerabilityClass.COMMAND_INJECTION,
+        ],
         dynamic_validation_enabled=target_url is not None,
         integrations_enabled=True,  # dry-run by default (dry_run_integrations=True)
     )

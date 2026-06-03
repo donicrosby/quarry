@@ -110,6 +110,64 @@ Expected: report re-written to the same path. The re-rendered report includes
 `## Final findings` and `## Provenance` but **omits** `## Repository snapshot` and
 `## Coverage` (those artifacts are not reloaded in replay mode — known gap).
 
+## Verify recon workflow (Week 11 addition)
+
+Run `ReconWorkflow` directly against the Node target:
+
+```bash
+# Temporal + server must be running (see Prerequisites above)
+uv run quarry scan run --repo examples/vulnerable-express
+```
+
+Or trigger the workflow via the Temporal CLI if the server is up:
+
+```bash
+# Check ArchitectureDoc for the JS target
+python3 -c "
+import asyncio
+from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
+from quarry_workflows.recon import ReconWorkflow
+async def main():
+    client = await Client.connect('localhost:7233', data_converter=pydantic_data_converter)
+    result = await client.execute_workflow(
+        ReconWorkflow.run,
+        args=['examples/vulnerable-express', 'demo-recon'],
+        id='demo-recon-001',
+        task_queue='quarry-control',
+    )
+    print(result.model_dump_json(indent=2))
+asyncio.run(main())
+"
+```
+
+Expected `ArchitectureDoc` output:
+
+- `primary_language: "javascript"`
+- `repo_type: "web_service"` (or `"mixed"`)
+- At least one subsystem
+- Non-empty `attack_surface_summary`
+
+Run again against `examples/vulnerable-fastapi`:
+
+```bash
+python3 -c "
+# ... same as above but args=['examples/vulnerable-fastapi', 'demo-recon-py']
+"
+```
+
+Expected: `primary_language: "python"` without changing any harness code.
+
+Verify `--focus` limits the scan:
+
+```bash
+uv run quarry scan run --repo examples/vulnerable-fastapi --focus ssrf,xss
+# Expected: command succeeds, exits fast with focus set to ssrf + xss
+
+uv run quarry scan run --repo examples/vulnerable-fastapi --focus bogus
+# Expected: immediate exit with error listing valid class names
+```
+
 ## Known gaps (honest)
 
 - **Replay omits snapshot and coverage sections** — `RepositorySnapshot` and
@@ -124,3 +182,12 @@ Expected: report re-written to the same path. The re-rendered report includes
 - **Live model calls deferred** — `MockModelClient` is used throughout; real LiteLLM
   calls are wired but require API keys and a live provider.
 - **Target auto-launch deferred** — the target must be started manually with `task target`.
+- **Recon uses MockModelClient** — `recon_subsystem_activity` runs `run_agent_loop` backed by `MockModelClient`; real provider wiring is a later milestone. The `ArchitectureDoc` produced by the current implementation is the result of heuristic analysis in the orchestrator, not real multi-turn reasoning.
+- **`--focus` filters scan stages** — `vuln_classes` is now threaded end-to-end from
+  the CLI flag through the server API into `ScanProfile`. Each scan stage (SECRETS,
+  IDOR, CMDI) is gated on membership in `scan.profile.vuln_classes`. The default
+  profile includes all three classes.
+- **`ArchitectureDoc` is persisted** — `ReconWorkflow` saves the result to the
+  `architecture_docs` SQLite table via the `save_architecture_doc` operation on the
+  `persist-scan-state` activity. `QuarryRepository.load_architecture_doc(scan_id)`
+  retrieves it.

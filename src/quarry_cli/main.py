@@ -12,7 +12,8 @@ import typer
 
 from quarry.benchmark import compare, load_ground_truth
 from quarry.config import QuarrySettings
-from quarry.schemas import FinalFinding, ScanSummary
+from quarry.panel_config import resolve_focus
+from quarry.schemas import FinalFinding, ScanSummary, VulnerabilityClass
 from quarry_activities.target import start_local_target, terminate_local_target
 from quarry_client.client import QuarryClient
 
@@ -34,14 +35,31 @@ app.add_typer(benchmark_app, name="benchmark")
 def run_scan(
     repo: Annotated[str, typer.Option("--repo", help="Path to repository")],
     target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
+    focus: Annotated[
+        str | None,
+        typer.Option(
+            "--focus",
+            help="Comma-separated vulnerability classes to scan (e.g. ssrf,xss). "
+            "Omit to scan all classes.",
+        ),
+    ] = None,
     async_mode: Annotated[
         bool,
         typer.Option("--async", help="Return immediately"),
     ] = False,
 ) -> None:
+    focus_classes: list[VulnerabilityClass] | None = None
+    if focus is not None:
+        tokens = [t.strip() for t in focus.split(",") if t.strip()]
+        try:
+            focus_classes = resolve_focus(cli_focus=tokens, config_focus=[])
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
     settings = QuarrySettings()
     try:
-        lines = asyncio.run(_run_scan_command(settings, repo, target, async_mode))
+        lines = asyncio.run(_run_scan_command(settings, repo, target, async_mode, focus_classes))
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
     _echo_lines(lines)
@@ -133,9 +151,12 @@ async def _run_scan_command(
     repo: str,
     target: str | None,
     async_mode: bool,
+    focus_classes: list[VulnerabilityClass] | None = None,
 ) -> list[str]:
     async with QuarryClient(base_url=settings.server_url) as client:
-        result = await client.start_scan(repo_path=repo, target_url=target)
+        result = await client.start_scan(
+            repo_path=repo, target_url=target, vuln_classes=focus_classes
+        )
         scan_id = result["scan_id"]
         if async_mode:
             return [scan_id]

@@ -12,6 +12,7 @@ from temporalio import activity
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from quarry.schemas import (
+    ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
     AttackSurfaceItem,
@@ -206,6 +207,14 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
             repository.save_integration_run(IntegrationRun.model_validate(payload["run"]))
         case "save_scan_manifest":
             repository.save_scan_manifest(ScanManifest.model_validate(payload["manifest"]))
+        case "save_architecture_doc":
+            repository.save_architecture_doc(
+                payload["scan_id"],
+                ArchitectureDoc.model_validate(payload["doc"]),
+            )
+        case "load_architecture_doc":
+            record = repository.load_architecture_doc(payload["scan_id"])
+            return record.model_dump(mode="json") if record else None
         case "save_tool_invocation":
             repository.save_tool_invocation(ToolInvocation.model_validate(payload["invocation"]))
         case "load_tool_invocations":

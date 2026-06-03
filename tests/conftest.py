@@ -32,6 +32,9 @@ from quarry_activities.dynamic_validation import (
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
+from quarry_activities.recon_orchestrator import recon_orchestrator_activity
+from quarry_activities.recon_subsystem import recon_subsystem_activity
+from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.validation import (
@@ -44,6 +47,7 @@ from quarry_plugins.vuln_classes.command_injection import (
 from quarry_plugins.vuln_classes.idor import scan_attack_surface_for_idor
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_workflows.diff_scan import RunDiffScanWorkflow
+from quarry_workflows.recon import ReconWorkflow
 from quarry_workflows.run_scan import RunScanWorkflow
 from tests.ping_workflow import PingInput, PingWorkflow
 
@@ -86,7 +90,7 @@ async def temporal_worker(
     worker = Worker(
         temporal_client,
         task_queue="quarry-control",
-        workflows=[RunScanWorkflow, RunDiffScanWorkflow, PingWorkflow],
+        workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow, PingWorkflow],
         activities=[
             create_repository_snapshot,
             persist_scan_state,
@@ -105,6 +109,9 @@ async def temporal_worker(
             deliver_integrations_activity,
             build_scan_manifest_activity,
             render_markdown_report_activity,
+            recon_orchestrator_activity,
+            recon_subsystem_activity,
+            recon_synthesis_activity,
         ],
         activity_executor=executor,
         graceful_shutdown_timeout=timedelta(seconds=5),

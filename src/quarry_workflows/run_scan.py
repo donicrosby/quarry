@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import CancelledError as TemporalCancelledError
@@ -81,6 +81,10 @@ COMPLETED_STAGE_ORDER = {
 }
 
 
+def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -90,6 +94,7 @@ class RunScanInput(BaseModel):
     output_dir: str = ".quarry"
     target_url: str | None = None
     resume: bool = False
+    vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
 
 
 class RunScanResult(BaseModel):
@@ -148,7 +153,10 @@ class RunScanWorkflow:
                 workspace_id="local",
                 target_id=target.id,
                 requested_by="local-user",
-                profile=local_scan_profile(target_url=scan_input.target_url),
+                profile=local_scan_profile(
+                    target_url=scan_input.target_url,
+                    vuln_classes=scan_input.vuln_classes or None,
+                ),
                 status=ScanStatus.CREATED,
                 created_at=created_at,
                 metadata={
@@ -243,7 +251,7 @@ class RunScanWorkflow:
         if _stage_completed(completed_stage, "SECRETS_SCAN"):
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        else:
+        elif VulnerabilityClass.SECRETS in scan.profile.vuln_classes:
             self._current_stage = "SECRETS_SCAN"
             secret_match_payload = await workflow.execute_activity(
                 "scan-repo-for-secrets",
@@ -323,7 +331,7 @@ class RunScanWorkflow:
         if idor_scan_completed:
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        else:
+        elif VulnerabilityClass.IDOR in scan.profile.vuln_classes:
             self._current_stage = "IDOR_SCAN"
             await self._run_idor_scan(
                 scan_input,
@@ -341,7 +349,7 @@ class RunScanWorkflow:
         if cmdi_scan_completed:
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        else:
+        elif VulnerabilityClass.COMMAND_INJECTION in scan.profile.vuln_classes:
             self._current_stage = "CMDI_SCAN"
             await self._run_command_injection_scan(
                 scan_input,

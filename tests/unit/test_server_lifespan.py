@@ -77,9 +77,9 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert app.state.temporal_client is client
             assert worker.client is client
             assert worker.task_queue == QuarrySettings().task_queue
-            assert len(worker.workflows) == 2
+            assert len(worker.workflows) == 3
             assert RunDiffScanWorkflow in worker.workflows
-            assert len(worker.activities) == 17
+            assert len(worker.activities) == 20
             assert git_diff_commits in worker.activities
             assert map_impacted_regions in worker.activities
             assert scan_attack_surface_for_idor in worker.activities

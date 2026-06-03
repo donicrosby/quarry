@@ -1,0 +1,15 @@
+{
+  "name": "vulnerable-express",
+  "version": "1.0.0",
+  "description": "A minimal Node/Express application for development and testing.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

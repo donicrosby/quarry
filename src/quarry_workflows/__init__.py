@@ -2,6 +2,7 @@
 
 from quarry_activities.inputs import RunDiffScanInput
 from quarry_workflows.diff_scan import RunDiffScanResult, RunDiffScanWorkflow
+from quarry_workflows.recon import ReconWorkflow
 from quarry_workflows.run_scan import (
     RunScanInput,
     RunScanResult,
@@ -11,6 +12,7 @@ from quarry_workflows.run_scan import (
 )
 
 __all__ = [
+    "ReconWorkflow",
     "RunDiffScanInput",
     "RunDiffScanResult",
     "RunDiffScanWorkflow",
