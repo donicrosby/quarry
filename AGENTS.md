@@ -7,7 +7,7 @@
 uv run ruff check .          # lint
 uv run ruff format --check . # format check
 uv run pyright               # strict type checking
-uv run pytest -x -q          # tests (240)
+uv run pytest -x -q          # tests (325)
 
 # Single test file
 uv run pytest tests/unit/test_client.py -v
@@ -30,11 +30,13 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_worker` | Standalone Temporal worker entrypoint |
 | `quarry_server` | FastAPI HTTP API + in-process Temporal worker (via lifespan) |
 | `quarry_client` | httpx client SDK for CLI/TUI to talk to server |
-| `quarry_cli` | Typer CLI (`quarry scan run/diff/resume/cancel/list/status`, `quarry benchmark local`) |
+| `quarry_cli` | Typer CLI (`quarry scan run/diff/resume/rerun/cancel/list/status`, `quarry benchmark local`) |
 | `quarry_tui` | Textual TUI consuming the HTTP API |
 | `quarry_persistence` | SQLite via SQLAlchemy (server + activities only) |
-| `quarry_plugins` | Vulnerability scanners (secrets scanner) |
+| `quarry_plugins` | Vulnerability scanners (secrets, IDOR, command-injection) |
 | `quarry_models` | Model layer: redaction scrubber, safe prompt construction, model-output guard, `ModelClient` (Mock + LiteLLM) |
+| `quarry_artifacts` | Artifact storage — `LocalArtifactStore` (filesystem-backed) |
+| `quarry_integrations` | Finding sinks — dry-run Jira/Slack delivery, idempotent per scan |
 
 **Data flow**: CLI/TUI → `QuarryClient` (httpx) → FastAPI server → Temporal workflow → activities → SQLite/filesystem
 
@@ -76,7 +78,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - **pytest-asyncio** in `auto` mode — async tests just work, no decorators needed.
 - **Temporal integration tests** use `temporal_env`, `temporal_client`, `temporal_worker` fixtures from `tests/conftest.py`. These start a `WorkflowEnvironment` with the test server and register all activities + both workflows.
 - Integration tests create real git repos via `subprocess.run(["git", ...])` in `tmp_path`.
-- 183 tests total (~35 integration, ~148 unit).
+- 325 tests total (~277 unit, ~24 integration, ~24 golden).
 
 ## Environment
 
@@ -94,7 +96,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 ## Workflows
 
-- `RunScanWorkflow` — full repo scan (SNAPSHOT → ATTACK_SURFACE → SECRETS_SCAN → VALIDATION → COVERAGE → REPORT). Supports resume and cancellation. The COVERAGE stage runs the `build-coverage-ledger` activity, persists a coverage-ledger artifact, and feeds the report's `## Coverage` section (scanned vs skipped, honest gaps).
+- `RunScanWorkflow` — full repo scan (SNAPSHOT → ATTACK_SURFACE → SECRETS_SCAN → VALIDATION → IDOR_SCAN → CMDI_SCAN → COVERAGE → REPORT → INTEGRATING). Supports resume and cancellation. The COVERAGE stage runs the `build-coverage-ledger` activity, persists a coverage-ledger artifact, and feeds the report's `## Coverage` section (scanned vs skipped, honest gaps). INTEGRATING fires dry-run sinks after the report is written.
 - `RunDiffScanWorkflow` — commit-to-commit diff scan (GIT_DIFF → MAP_REGIONS → SCAN_REGIONS → VALIDATE → REPORT). Only scans changed regions.
 
 ## Server Endpoints
@@ -106,6 +108,8 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - `GET /scans/{id}/findings` — get findings
 - `GET /scans/{id}/attack-surface` — get attack surface
 - `GET /scans/{id}/status` — SSE stream
-- `POST /scans/{id}/cancel` — cancel scan (409 if completed)
+- `POST /scans/{id}/cancel` — cancel scan (409 if already ended)
 - `POST /scans/{id}/resume` — resume from checkpoint
+- `POST /scans/{id}/replay` — re-render report from stored findings (no new model calls)
+- `GET /scans/{id}/integrations` — list integration deliveries for a scan
 - `GET /healthz` — health check
