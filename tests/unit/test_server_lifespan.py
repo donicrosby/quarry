@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -38,12 +39,14 @@ class RecordingWorker:
         workflows: list[type[object]],
         activities: list[object],
         activity_executor: ThreadPoolExecutor,
+        graceful_shutdown_timeout: timedelta | None = None,
     ) -> None:
         self.client = client
         self.task_queue = task_queue
         self.workflows = workflows
         self.activities = activities
         self.activity_executor = activity_executor
+        self.graceful_shutdown_timeout = graceful_shutdown_timeout
         self.started = asyncio.Event()
         self.cancelled = False
         RecordingWorker.instances.append(self)

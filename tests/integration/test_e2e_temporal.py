@@ -14,7 +14,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -125,21 +125,16 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
     terminate_local_target(process)
 
 
-async def _wait_for_status(db_path: Path, scan_id: str, status: ScanStatus) -> None:
-    repository = QuarryRepository(db_path)
-    deadline = asyncio.get_running_loop().time() + 10
+async def _wait_for_stage(handle: object, stage: str, *, timeout: float = 15.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        try:
-            scan = repository.load_scan(scan_id)
-        except ValueError:
-            await asyncio.sleep(0.05)
-            continue
-        if scan.status == status:
+        current = await handle.query("get_stage")  # type: ignore[union-attr]
+        if current == stage:
             return
-        if scan.status in {ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED}:
-            pytest.fail(f"Scan reached terminal status before {status}: {scan.status}")
+        if current == "COMPLETED":
+            pytest.fail(f"Scan completed before reaching cancellable stage {stage!r}")
         await asyncio.sleep(0.05)
-    pytest.fail(f"Timed out waiting for scan {scan_id} to reach {status}")
+    pytest.fail(f"Timed out waiting for workflow stage {stage!r}")
 
 
 @activity.defn(name="scan-repo-for-secrets")
@@ -423,17 +418,7 @@ async def test_e2e_cancel_sets_cancelled_status(
 ) -> None:
     """Cancelling a running full scan sets CANCELLED status in the database."""
     repo_path = tmp_path / "repo"
-    repo_path.mkdir()
-
-    for index in range(500):
-        (repo_path / f"module_{index}.py").write_text(
-            f'def handler_{index}():\n    return "ok-{index}"\n',
-            encoding="utf-8",
-        )
-    (repo_path / "secret.py").write_text(
-        'ADMIN_API_KEY = "real-cancel-secret"\n',
-        encoding="utf-8",
-    )
+    _create_repo_with_secrets(repo_path)
 
     db_path = tmp_path / "quarry.db"
     output_dir = tmp_path / "output"
@@ -455,6 +440,7 @@ async def test_e2e_cancel_sets_cancelled_status(
             build_scan_manifest_activity,
         ],
         activity_executor=activity_executor,
+        graceful_shutdown_timeout=timedelta(seconds=5),
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
     try:
@@ -470,7 +456,7 @@ async def test_e2e_cancel_sets_cancelled_status(
                 task_queue=task_queue,
             )
 
-            await _wait_for_status(db_path, scan_id, ScanStatus.RUNNING)
+            await _wait_for_stage(handle, "SECRETS_SCAN")
             await handle.cancel()
 
             with pytest.raises(WorkflowFailureError) as exc_info:
