@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from quarry.schemas import (
+    ArchitectureDoc,
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
@@ -210,3 +211,76 @@ def test_tool_invocations_persist_and_load(tmp_path: Path) -> None:
     invocations = repository.load_tool_invocations("scan-1")
     assert len(invocations) == 1
     assert invocations[0].tool_name == "git"
+
+
+# ---------------------------------------------------------------------------
+# Gap 3: ArchitectureDoc persistence (RED)
+# ---------------------------------------------------------------------------
+
+
+def _make_architecture_doc(primary_language: str = "javascript") -> ArchitectureDoc:
+    return ArchitectureDoc(
+        repo_languages=[primary_language],
+        primary_language=primary_language,
+        repo_type="web_service",
+        subsystems=[],
+        entry_points=[],
+        trust_boundaries=[],
+        build_commands=[],
+        attack_surface_summary="Express REST API",
+        transcript_refs=["scan-arch-001"],
+    )
+
+
+def test_save_and_load_architecture_doc_round_trips(tmp_path: Path) -> None:
+    """save_architecture_doc + load_architecture_doc must round-trip the model."""
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    doc = _make_architecture_doc("javascript")
+
+    repository.save_architecture_doc("scan-arch-001", doc)
+    loaded = repository.load_architecture_doc("scan-arch-001")
+
+    assert loaded is not None
+    assert loaded.primary_language == "javascript"
+    assert loaded.repo_type == "web_service"
+
+
+def test_load_architecture_doc_returns_none_when_missing(tmp_path: Path) -> None:
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    assert repository.load_architecture_doc("nonexistent-scan") is None
+
+
+def test_save_architecture_doc_is_idempotent(tmp_path: Path) -> None:
+    """Saving twice with the same scan_id must not raise (session.merge)."""
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    doc1 = _make_architecture_doc("javascript")
+    doc2 = _make_architecture_doc("python")
+
+    repository.save_architecture_doc("scan-arch-idem", doc1)
+    repository.save_architecture_doc("scan-arch-idem", doc2)  # overwrites
+    loaded = repository.load_architecture_doc("scan-arch-idem")
+
+    assert loaded is not None
+    assert loaded.primary_language == "python"
+
+
+def test_architecture_doc_full_round_trip_json(tmp_path: Path) -> None:
+    """JSON serialised form must survive the save→load cycle intact."""
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    doc = ArchitectureDoc(
+        repo_languages=["go", "javascript"],
+        primary_language="go",
+        repo_type="cli",
+        subsystems=[],
+        entry_points=[],
+        trust_boundaries=[],
+        build_commands=[],
+        attack_surface_summary="Go CLI tool",
+        transcript_refs=["step-1", "step-2"],
+    )
+    repository.save_architecture_doc("scan-go-001", doc)
+    loaded = repository.load_architecture_doc("scan-go-001")
+
+    assert loaded is not None
+    assert loaded.repo_languages == ["go", "javascript"]
+    assert loaded.transcript_refs == ["step-1", "step-2"]

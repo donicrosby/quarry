@@ -13,6 +13,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from quarry.schemas import ArchitectureDoc
+from quarry_persistence import QuarryRepository
 from quarry_workflows.recon import ReconWorkflow
 
 FIXTURE_REPO = Path("examples/vulnerable-express")
@@ -56,3 +57,32 @@ async def test_recon_workflow_produces_http_handler_entry_point(
         all_kinds.extend(ep.kind for ep in sub.entry_points)
     # At minimum one http_handler should be detected from the Express app
     assert "http_handler" in all_kinds or len(all_kinds) >= 0  # relaxed: don't fail if mock
+
+
+# ---------------------------------------------------------------------------
+# Gap 3: ArchitectureDoc is persisted to SQLite (RED)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not FIXTURE_REPO.exists(),
+    reason="examples/vulnerable-express fixture not found",
+)
+async def test_recon_workflow_persists_architecture_doc(
+    temporal_client: Client, temporal_worker: Worker, tmp_path: Path
+) -> None:
+    """ReconWorkflow must save the ArchitectureDoc to SQLite via persist_scan_state."""
+    db_path = str(tmp_path / "quarry.db")
+    scan_id = "persist-test-scan-001"
+
+    await temporal_client.execute_workflow(
+        ReconWorkflow.run,
+        args=[str(FIXTURE_REPO.resolve()), scan_id, db_path],
+        id="recon-persist-test-001",
+        task_queue="quarry-control",
+    )
+
+    repo = QuarryRepository(db_path)
+    loaded = repo.load_architecture_doc(scan_id)
+    assert loaded is not None
+    assert loaded.primary_language.lower() == "javascript"

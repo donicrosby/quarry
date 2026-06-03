@@ -6,7 +6,7 @@ from typing import Any, ClassVar, Self
 import httpx
 from typer.testing import CliRunner
 
-from quarry.schemas import ScanSummary
+from quarry.schemas import ScanSummary, VulnerabilityClass
 from quarry_cli import main
 
 runner = CliRunner()
@@ -40,11 +40,19 @@ class FakeQuarryClient:
     ) -> None:
         type(self).closed_count += 1
 
-    async def start_scan(self, repo_path: str, target_url: str | None = None) -> dict[str, str]:
+    async def start_scan(
+        self,
+        repo_path: str,
+        target_url: str | None = None,
+        vuln_classes: list[VulnerabilityClass] | None = None,
+    ) -> dict[str, str]:
         if self.connect_error_on == "start":
             raise httpx.ConnectError("server unavailable")
         self.started_scans.append((repo_path, target_url))
+        type(self).last_vuln_classes = vuln_classes
         return self.start_response
+
+    last_vuln_classes: ClassVar[list[VulnerabilityClass] | None] = None
 
     async def start_diff_scan(
         self,
@@ -206,3 +214,48 @@ def test_scan_commands_show_clear_error_when_server_unreachable(monkeypatch: Any
 
     assert result.exit_code == 1
     assert result.stderr == "Error: Quarry server not reachable at http://quarry.test\n"
+
+
+# ---------------------------------------------------------------------------
+# Gap 2: --focus forwards vuln_classes to QuarryClient.start_scan (RED)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_run_focus_flag_forwards_vuln_classes_to_client(monkeypatch: Any) -> None:
+    """--focus ssrf,xss must arrive at start_scan as vuln_classes=[SSRF, XSS]."""
+    setup_fake_client(monkeypatch)
+    FakeQuarryClient.last_vuln_classes = None
+
+    result = runner.invoke(
+        main.app,
+        ["scan", "run", "--repo", "/tmp/example-repo", "--focus", "ssrf,xss", "--async"],
+    )
+
+    assert result.exit_code == 0
+    assert FakeQuarryClient.last_vuln_classes == [VulnerabilityClass.SSRF, VulnerabilityClass.XSS]
+
+
+def test_scan_run_without_focus_passes_none_to_client(monkeypatch: Any) -> None:
+    """Without --focus, start_scan should receive vuln_classes=None (use defaults)."""
+    setup_fake_client(monkeypatch)
+    FakeQuarryClient.last_vuln_classes = "sentinel"  # type: ignore[assignment]
+
+    result = runner.invoke(
+        main.app,
+        ["scan", "run", "--repo", "/tmp/example-repo", "--async"],
+    )
+
+    assert result.exit_code == 0
+    assert FakeQuarryClient.last_vuln_classes is None
+
+
+def test_scan_run_focus_bogus_exits_with_error(monkeypatch: Any) -> None:
+    """--focus with an unknown class name must exit 1 with a helpful message."""
+    setup_fake_client(monkeypatch)
+
+    result = runner.invoke(
+        main.app,
+        ["scan", "run", "--repo", "/tmp/example-repo", "--focus", "not_a_class", "--async"],
+    )
+
+    assert result.exit_code == 1

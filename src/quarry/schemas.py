@@ -880,11 +880,19 @@ class AgentLoopResult(BaseModel):
     ]
 
 
-def local_scan_profile(target_url: str | None = None) -> ScanProfile:
+def local_scan_profile(
+    target_url: str | None = None,
+    vuln_classes: list[VulnerabilityClass] | None = None,
+) -> ScanProfile:
     return ScanProfile(
         id="local-fast",
         name="Local Fast",
-        vuln_classes=[VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR],
+        vuln_classes=vuln_classes
+        or [
+            VulnerabilityClass.SECRETS,
+            VulnerabilityClass.IDOR,
+            VulnerabilityClass.COMMAND_INJECTION,
+        ],
         dynamic_validation_enabled=target_url is not None,
         integrations_enabled=True,  # dry-run by default (dry_run_integrations=True)
     )

@@ -13,6 +13,7 @@ from quarry.schemas import (
     IntegrationRun,
     Scan,
     ScanSummary,
+    VulnerabilityClass,
 )
 
 FindingsResponse = dict[str, list[CandidateFinding] | list[FinalFinding]]
@@ -45,10 +46,19 @@ class QuarryClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def start_scan(self, repo_path: str, target_url: str | None = None) -> dict[str, str]:
+    async def start_scan(
+        self,
+        repo_path: str,
+        target_url: str | None = None,
+        vuln_classes: list[VulnerabilityClass] | None = None,
+    ) -> dict[str, str]:
         response = await self._client.post(
             "/scans",
-            json={"repo_path": repo_path, "target_url": target_url},
+            json={
+                "repo_path": repo_path,
+                "target_url": target_url,
+                "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
+            },
         )
         response.raise_for_status()
         payload = _json_object(response)

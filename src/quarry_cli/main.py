@@ -154,7 +154,9 @@ async def _run_scan_command(
     focus_classes: list[VulnerabilityClass] | None = None,
 ) -> list[str]:
     async with QuarryClient(base_url=settings.server_url) as client:
-        result = await client.start_scan(repo_path=repo, target_url=target)
+        result = await client.start_scan(
+            repo_path=repo, target_url=target, vuln_classes=focus_classes
+        )
         scan_id = result["scan_id"]
         if async_mode:
             return [scan_id]

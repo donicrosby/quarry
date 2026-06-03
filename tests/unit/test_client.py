@@ -132,6 +132,37 @@ async def test_start_scan_posts_scan_request(client_context: ClientTestContext) 
     )
 
 
+async def test_start_scan_with_vuln_classes_threads_them_to_workflow(
+    client_context: ClientTestContext,
+) -> None:
+    """start_scan(vuln_classes=[SSRF]) must reach RunScanInput.vuln_classes."""
+    response = await client_context.client.start_scan(
+        repo_path="/tmp/example-repo",
+        vuln_classes=[VulnerabilityClass.SSRF, VulnerabilityClass.XSS],
+    )
+
+    assert response["status"] == "RUNNING"
+    started_workflow = client_context.temporal_client.started_workflows[0]
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    assert VulnerabilityClass.SSRF in scan_input.vuln_classes
+    assert VulnerabilityClass.XSS in scan_input.vuln_classes
+
+
+async def test_start_scan_without_vuln_classes_uses_defaults(
+    client_context: ClientTestContext,
+) -> None:
+    """start_scan with no vuln_classes param should not restrict the scan profile."""
+    response = await client_context.client.start_scan(repo_path="/tmp/example-repo")
+
+    assert response["status"] == "RUNNING"
+    started_workflow = client_context.temporal_client.started_workflows[0]
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    # Empty vuln_classes in RunScanInput means "use defaults" — not an empty scan
+    assert scan_input.vuln_classes == []
+
+
 async def test_start_diff_scan_posts_diff_scan_request(
     client_context: ClientTestContext,
 ) -> None:

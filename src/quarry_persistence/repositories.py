@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quarry.schemas import (
+    ArchitectureDoc,
     ArtifactRef,
     AttackSurfaceItem,
     CandidateFinding,
@@ -134,6 +135,17 @@ class ScanManifestRecord(Base):
     # One manifest per scan; scan_id is the key so resume re-writes are idempotent.
     scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), primary_key=True)
     manifest_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ArchitectureDocRecord(Base):
+    __tablename__ = "architecture_docs"
+
+    # One ArchitectureDoc per scan; merge-on-save is idempotent.
+    # Note: SQLite does not enforce FKs by default (no PRAGMA foreign_keys=ON),
+    # so ReconWorkflow can persist docs for scan_ids that have no row in 'scans'
+    # (e.g. when run standalone without RunScanWorkflow). This is intentional.
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), primary_key=True)
+    doc_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ToolInvocationRecord(Base):
@@ -377,6 +389,22 @@ class QuarryRepository:
             if record is None:
                 return None
             return ScanManifest.model_validate_json(record.manifest_json)
+
+    def save_architecture_doc(self, scan_id: str, doc: ArchitectureDoc) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ArchitectureDocRecord(
+                    scan_id=scan_id,
+                    doc_json=doc.model_dump_json(),
+                )
+            )
+
+    def load_architecture_doc(self, scan_id: str) -> ArchitectureDoc | None:
+        with session_scope(self.engine) as session:
+            record = session.get(ArchitectureDocRecord, scan_id)
+            if record is None:
+                return None
+            return ArchitectureDoc.model_validate_json(record.doc_json)
 
     def save_tool_invocation(self, invocation: ToolInvocation) -> None:
         with session_scope(self.engine) as session:

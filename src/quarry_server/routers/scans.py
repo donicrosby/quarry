@@ -50,6 +50,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             db_path=body.db_path,
             output_dir=body.output_dir,
             target_url=body.target_url,
+            vuln_classes=list(body.vuln_classes),
         ),
         id=scan_id,
         task_queue=settings.task_queue,
