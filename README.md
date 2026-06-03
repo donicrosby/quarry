@@ -1,9 +1,10 @@
 # Quarry
 
-Quarry is a local-first, Temporal-orchestrated vulnerability research harness. It scans a
-Python repository for secrets, IDOR patterns, and command-injection sinks, validates each
-candidate finding with dynamic checks against a live target, produces a safe local proof,
-and writes a Markdown report with provenance and a coverage ledger.
+Quarry is a local-first, Temporal-orchestrated agentic vulnerability research harness. It
+maps the architecture of any repository with a recon agent, then scans for secrets, IDOR
+patterns, and command-injection sinks, validates each candidate finding against a live
+target, produces a safe local proof, and writes a Markdown report with provenance and a
+coverage ledger.
 
 ## Quickstart
 
@@ -17,6 +18,8 @@ docker compose -f docker-compose.temporal.yml up -d
 
 # 2. Vulnerable-FastAPI target (port 9000)
 task target
+# or the Node/Express target (port 3000):
+# cd examples/vulnerable-express && npm install && node app.js
 
 # 3. Quarry server + worker (port 8000)
 uv run quarry server
@@ -36,6 +39,8 @@ prerequisite is down it prints the exact commands to start it.
 
 After a successful scan:
 
+- **Architecture doc** — `ArchitectureDoc` with detected languages, subsystems, entry
+  points, trust boundaries, and build commands, produced by the recon agent.
 - **Attack surface** — FastAPI routes extracted from the repo source.
 - **Findings** — secrets, IDOR, and command-injection findings, each with a fingerprint
   and a safe local proof artifact.
@@ -51,12 +56,36 @@ View scan status while it runs:
 uv run quarry tui --db .quarry/quarry.db
 ```
 
+Limit the scan to specific vulnerability classes:
+
+```bash
+uv run quarry scan run --repo . --focus ssrf,xss
+```
+
+Invalid class names fail fast with the list of valid choices:
+
+```bash
+uv run quarry scan run --repo . --focus bogus   # exits with error + valid list
+```
+
 List scans and open the report:
 
 ```bash
 uv run quarry scan list
 cat .quarry/reports/<scan_id>.md
 ```
+
+### Configuration (optional)
+
+Copy `quarry.toml.example` to `quarry.toml` in your project root to configure model
+panels and scan defaults without environment variables:
+
+```bash
+cp quarry.toml.example quarry.toml
+```
+
+Never store API keys in `quarry.toml` — Quarry rejects the file at startup if it
+finds credential-like keys.
 
 ### Re-render a report (replay)
 
@@ -85,6 +114,7 @@ uv run pre-commit install --hook-type commit-msg
 
 ## Deferred
 
-- Live model calls in the scan path (currently uses `MockModelClient`).
+- Live model calls in the scan path (currently uses `MockModelClient`; real provider
+  wiring is later milestones).
 - Automatic target launching.
 - Kubernetes deployment (see `docs/kubernetes-scale-plan.md`).

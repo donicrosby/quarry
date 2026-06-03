@@ -1,0 +1,53 @@
+# quarry.toml.example
+# Copy to quarry.toml and edit as needed.
+# Never store API keys or secrets in this file.
+
+# --------------------------------------------------------------------------
+# Vulnerability class focus (optional)
+# Omit or leave empty to scan all classes.
+# --------------------------------------------------------------------------
+# [scan_defaults]
+# focus_classes = ["ssrf", "xss"]
+
+# --------------------------------------------------------------------------
+# Model panels
+# Define named panels that override the built-in defaults role-by-role.
+# Any role not listed falls back to the DEFAULT_PANEL (mock provider).
+# --------------------------------------------------------------------------
+
+# [panels.oss.roles.recon]
+# provider = "anthropic"
+# model = "claude-3-haiku-20240307"
+# rpm = 10
+#
+# [panels.oss.roles.hunt]
+# provider = "anthropic"
+# model = "claude-3-5-sonnet-20241022"
+# rpm = 5
+
+# [panels.bedrock.roles.recon]
+# provider = "bedrock"
+# model = "anthropic.claude-3-haiku-20240307-v1:0"
+# rpm = 10
+#
+# [panels.bedrock.roles.hunt]
+# provider = "bedrock"
+# model = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+# rpm = 5
+
+# [panels.benchmark.roles.recon]
+# provider = "anthropic"
+# model = "claude-3-opus-20240229"
+# rpm = 3
+#
+# [panels.benchmark.roles.hunt]
+# provider = "anthropic"
+# model = "claude-3-opus-20240229"
+# rpm = 3
+
+# --------------------------------------------------------------------------
+# Budget limits (optional)
+# --------------------------------------------------------------------------
+# [budget]
+# max_cost_per_scan_usd = 5.0
+# max_tokens_per_scan = 500000

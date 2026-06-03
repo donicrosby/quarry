@@ -26,3 +26,8 @@ class QuarrySettings(BaseSettings):
     default_model: str = ""
     prompt_retention: str = "metadata_only"
     redaction_enabled: bool = True
+
+    # quarry.toml panel config
+    config_file: str = "quarry.toml"
+    panel: str = ""
+    focus_classes: str = ""  # comma-separated, env: QUARRY_FOCUS_CLASSES
