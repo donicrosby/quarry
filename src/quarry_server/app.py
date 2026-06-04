@@ -36,6 +36,7 @@ from quarry_activities.validation import (
     validate_secret_candidate,
 )
 from quarry_workflows import RunDiffScanWorkflow, RunScanWorkflow
+from quarry_workflows.commit_stage import CommitStageWorkflow
 from quarry_workflows.recon import ReconWorkflow
 
 
@@ -69,7 +70,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         worker = Worker(
             client,
             task_queue=settings.task_queue,
-            workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow],
+            workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow, CommitStageWorkflow],
             activities=[
                 create_repository_snapshot,
                 persist_scan_state,

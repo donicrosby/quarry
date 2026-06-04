@@ -43,6 +43,7 @@ from quarry_activities.validation import (
     promote_to_final_finding_metadata,
     validate_secret_candidate,
 )
+from quarry_workflows.commit_stage import CommitStageWorkflow
 from quarry_workflows.diff_scan import RunDiffScanWorkflow
 from quarry_workflows.recon import ReconWorkflow
 from quarry_workflows.run_scan import RunScanWorkflow
@@ -87,7 +88,7 @@ async def temporal_worker(
     worker = Worker(
         temporal_client,
         task_queue="quarry-control",
-        workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow, PingWorkflow],
+        workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow, CommitStageWorkflow, PingWorkflow],
         activities=[
             create_repository_snapshot,
             persist_scan_state,

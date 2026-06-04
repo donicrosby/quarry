@@ -1,0 +1,22 @@
+{
+  "scenario": "hunt-express-command-injection",
+  "vuln_class": "command_injection",
+  "scope": "routes/",
+  "mock_finding": {
+    "vuln_class": "command_injection",
+    "title": "Unsanitized user input passed to exec in admin route",
+    "hypothesis": "The POST /admin/exec route passes the 'cmd' body field directly to child_process.exec without sanitization.",
+    "affected_component": "routes/admin.js:5",
+    "confidence": "high",
+    "severity": "critical",
+    "source_refs": [
+      {
+        "repo": ".",
+        "file": "routes/admin.js",
+        "start_line": 5,
+        "end_line": 7,
+        "snippet": "exec(req.body.cmd, (err, stdout) => { res.json({ output: stdout }); });"
+      }
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "id": "gt-go-idor-get-user",
+    "vuln_class": "idor",
+    "file_path": "handlers/users.go",
+    "route": "/users/{id}",
+    "severity": "high",
+    "expected_fingerprint_hint": "idor:handlers/users.go:GetUser"
+  },
+  {
+    "id": "gt-go-cmdi-run-command",
+    "vuln_class": "command_injection",
+    "file_path": "handlers/admin.go",
+    "route": "/admin/exec",
+    "severity": "critical",
+    "expected_fingerprint_hint": "command_injection:handlers/admin.go:RunCommand"
+  }
+]

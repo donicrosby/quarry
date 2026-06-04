@@ -1,46 +1,64 @@
-"""Integration test: recon runs as a scan stage and produces AgentTasks.
+"""Integration test: recon runs as a scan stage inside RunScanWorkflow.
 
-Written RED first — this test verifies that a scan run invokes the recon
-activities inline and that AgentTask objects are emitted for hunt.
+Verifies that:
+1. A scan run executes the RECON stage (recon activities run inline).
+2. After RECON the workflow advances to HUNT.
+3. The scan completes with status COMPLETED.
+4. A recon.completed event is emitted.
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
+from temporalio.client import Client
+from temporalio.worker import Worker
 
-from quarry.schemas import AgentTask, VulnerabilityClass
+from quarry_persistence import QuarryRepository
+from quarry_workflows.run_scan import RunScanInput, RunScanWorkflow
+
+FIXTURE_REPO = Path("examples/vulnerable-fastapi").resolve()
 
 
-@pytest.mark.asyncio
-async def test_scan_run_produces_agent_tasks_after_recon(
-    temporal_worker: object,
+@pytest.mark.skipif(
+    not FIXTURE_REPO.exists(),
+    reason="examples/vulnerable-fastapi not present",
+)
+async def test_scan_run_executes_recon_stage(
+    temporal_client: Client,
+    temporal_worker: Worker,
     tmp_path: Path,
 ) -> None:
-    """A scan run should produce at least one AgentTask per vuln class in focus."""
-    from quarry_workflows.run_scan import RunScanInput, RunScanWorkflow
-    from quarry_client.client import QuarryClient
-    from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Worker
+    """A scan run includes RECON: recon.completed event is emitted and scan completes."""
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
 
-    # Use the vulnerable-fastapi example so recon finds real structure
-    repo_path = str(Path(__file__).parent.parent.parent / "examples" / "vulnerable-fastapi")
-
-    # Build a minimal scan that runs through RECON (mock model client default)
-    # and stops early — we just want to see that AgentTasks are persisted.
-    db_path = str(tmp_path / "quarry.db")
-    output_dir = str(tmp_path)
-
-    scan_input = RunScanInput(
-        repo_path=repo_path,
-        db_path=db_path,
-        output_dir=output_dir,
-        vuln_classes=[VulnerabilityClass.SECRETS],
+    handle = await temporal_client.start_workflow(
+        RunScanWorkflow.run,
+        RunScanInput(
+            repo_path=str(FIXTURE_REPO),
+            db_path=str(db_path),
+            output_dir=str(output_dir),
+        ),
+        id="recon-stage-test-1",
+        task_queue="quarry-control",
     )
 
-    # Run the workflow using the test worker fixture
-    # This test uses the existing integration test pattern from test_recon_workflow.py
-    # The key assertion: the resulting scan has agent tasks in the DB.
-    pytest.skip("Scaffold — fill in after workflow restructure lands")
+    result = await handle.result()
+
+    assert result.scan_id == "recon-stage-test-1"
+    assert Path(result.report_path).exists()
+
+    repository = QuarryRepository(db_path)
+    scan = repository.load_scan(result.scan_id)
+    from quarry.schemas import ScanStatus
+    assert scan.status is ScanStatus.COMPLETED
+    assert scan.metadata.get("current_stage") == "COMPLETED"
+
+    # Verify recon.completed event was emitted
+    events = repository.load_events(result.scan_id)
+    event_types = [e.event_type for e in events]
+    assert "recon.completed" in event_types, (
+        f"Expected recon.completed in events, got: {event_types}"
+    )
