@@ -493,8 +493,17 @@ class ModelInvocation(BaseModel):
     role: str
     provider: str
     model: str
-    prompt_version: str
-    prompt_hash: str
+    # Legacy flat fields — kept for backward compat with existing DB records.
+    prompt_version: str = ""
+    prompt_hash: str = ""
+    # Template provenance fields (ADR-019).
+    prompt_template_id: str = ""
+    prompt_template_version: str = ""
+    template_sha256: str = ""
+    system_prompt_hash: str = ""
+    developer_prompt_hash: str | None = None
+    user_prompt_hash: str = ""
+    evidence_hashes: list[str] = Field(default_factory=list)
     temperature: float = 0.0
     prompt_ref: ArtifactRef | None = None
     response_ref: ArtifactRef | None = None

@@ -26,8 +26,9 @@ from quarry.schemas import (
     SourceRef,
     VulnerabilityClass,
 )
-from quarry_models.hunt_prompt import build_hunt_prompt
 from quarry_models.loop import ToolCallRequest, run_agent_loop
+from quarry_prompts import get_registry
+from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolRunner
 
@@ -116,15 +117,25 @@ def _hunt_impl(
         budget_spec=budget_spec,
     )
 
-    prompt = build_hunt_prompt(
-        vuln_class=task.vuln_class or VulnerabilityClass.SECRETS,
-        scope=task.scope,
-        entry_points=[],
-        task_prompt=task.task_prompt,
-        scope_exclusions=[],
+    registry = get_registry()
+    prompt = build_prompt(
+        registry=registry,
+        role="hunt",
+        name="hunt",
+        version="1.0.0",
+        variables={
+            "vuln_class": (task.vuln_class or VulnerabilityClass.SECRETS).value,
+            "scope": task.scope,
+            "entry_points": [],
+            "focus_classes": [],
+            "scope_exclusions": [],
+            "task_prompt": task.task_prompt,
+            "evidence_chunks": [],
+        },
     )
 
-    system_prompt = prompt.messages[0].content
+    # Strip provenance header before passing to run_agent_loop
+    _, system_prompt = strip_provenance_header(prompt.messages[0].content)
     initial_message = prompt.messages[1].content
 
     result = run_agent_loop(
