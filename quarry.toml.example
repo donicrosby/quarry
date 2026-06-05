@@ -8,6 +8,8 @@
 # --------------------------------------------------------------------------
 # [scan_defaults]
 # focus_classes = ["ssrf", "xss"]
+# hunt_max_iterations = 12   # tool-call iterations per hunter agent (default: 12)
+# hunt_max_concurrent = 8    # maximum hunters running in parallel (default: 8)
 
 # --------------------------------------------------------------------------
 # Model panels

@@ -85,6 +85,7 @@ class RunScanInput(BaseModel):
     target_url: str | None = None
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
+    hunt_max_concurrent: int = 8
 
 
 class RunScanResult(BaseModel):
@@ -236,12 +237,26 @@ class RunScanWorkflow:
             )
             assignments = _subsystem_assignments_from_activity(assignments_payload)
 
-            # Step 2: analyse each subsystem in parallel
+            # Step 2: analyse each subsystem in parallel.
+            # Pass the serialised recon RoleConfig so the activity can select the
+            # correct model client (mock vs. real) based on the panel config.
+            recon_panel_entry = next(
+                (e for e in scan.panel_snapshot if e.role == "recon"), None
+            )
+            recon_panel_json: str | None = None
+            if recon_panel_entry is not None:
+                from quarry.panel_config import RoleConfig as _RoleConfig
+                recon_panel_json = _RoleConfig(
+                    provider=recon_panel_entry.provider,
+                    model=recon_panel_entry.model,
+                    rpm=recon_panel_entry.rate_limit_rpm,
+                ).model_dump_json()
+
             subsystem_payloads = await asyncio.gather(
                 *[
                     workflow.execute_activity(
                         "recon-subsystem",
-                        args=[a, scan_input.repo_path, scan.id],
+                        args=[a, scan_input.repo_path, scan.id, None, recon_panel_json],
                         start_to_close_timeout=timedelta(minutes=5),
                         heartbeat_timeout=timedelta(seconds=30),
                         retry_policy=ACTIVITY_RETRY_POLICY,
@@ -324,7 +339,7 @@ class RunScanWorkflow:
                 if t.vuln_class is not None and t.vuln_class.value not in excluded_classes
             ]
 
-            max_concurrent = 8  # hunt_max_concurrent default
+            max_concurrent = scan_input.hunt_max_concurrent
             semaphore = asyncio.Semaphore(max_concurrent)
 
             async def _run_one_hunt(task: AgentTask) -> list[dict]:  # type: ignore[type-arg]

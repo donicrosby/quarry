@@ -196,6 +196,7 @@ def slow_recon_subsystem(
     repo_root: str | None = None,
     scan_id: str | None = None,
     budget_spec: object = None,
+    panel_json: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
     if isinstance(assignment, dict):
