@@ -415,7 +415,8 @@ class ValidationResult(BaseModel):
     checks_run: list[str] = Field(default_factory=_empty_strings)
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     model_invocation_id: str | None = None
-    cross_vendor: bool = False
+    cross_vendor: bool = False  # deprecated alias; use cross_vendor_disagreement
+    cross_vendor_disagreement: bool = False
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
