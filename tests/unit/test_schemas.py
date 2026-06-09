@@ -37,7 +37,9 @@ def test_scan_serializes_and_deserializes() -> None:
     loaded = Scan.model_validate_json(scan.model_dump_json())
 
     assert loaded.id == "scan-1"
-    assert loaded.profile.vuln_classes == [VulnerabilityClass.SECRETS, VulnerabilityClass.IDOR]
+    assert VulnerabilityClass.SECRETS in loaded.profile.vuln_classes
+    assert VulnerabilityClass.IDOR in loaded.profile.vuln_classes
+    assert VulnerabilityClass.COMMAND_INJECTION in loaded.profile.vuln_classes
     assert loaded.status is ScanStatus.CREATED
     # Defaulted week-1 alignment fields.
     assert loaded.parent_scan_id is None
@@ -151,6 +153,35 @@ def test_proof_agent_gapfill_models_construct() -> None:
     assert task.gapfill_pass == 0
     assert gapfill.gapfill_pass == 1
     assert TriageLabel.TP.value == "tp"
+
+
+def test_agent_task_has_task_prompt_field() -> None:
+    """task_prompt must be a settable field on AgentTask (default empty string)."""
+    created_at = datetime.now(UTC)
+    task = AgentTask(
+        id="task-2",
+        scan_id="scan-1",
+        role="hunt",
+        task_name="idor-hunt",
+        task_prompt="Look for unguarded object-fetch endpoints.",
+        vuln_class=VulnerabilityClass.IDOR,
+        scope="handlers/",
+        status="pending",
+        created_at=created_at,
+    )
+    assert task.task_prompt == "Look for unguarded object-fetch endpoints."
+    assert task.scope == "handlers/"
+
+    # Default is empty string when not supplied
+    task_no_prompt = AgentTask(
+        id="task-3",
+        scan_id="scan-1",
+        role="hunt",
+        task_name="secrets-hunt",
+        status="pending",
+        created_at=created_at,
+    )
+    assert task_no_prompt.task_prompt == ""
 
 
 def test_candidate_finding_keeps_artifact_refs() -> None:

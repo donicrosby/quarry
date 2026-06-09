@@ -1,0 +1,22 @@
+{
+  "scenario": "hunt-go-command-injection",
+  "vuln_class": "command_injection",
+  "scope": "handlers/",
+  "mock_finding": {
+    "vuln_class": "command_injection",
+    "title": "User-supplied command passed to exec.Command without sanitization",
+    "hypothesis": "The POST /admin/exec handler passes req.Cmd directly to exec.Command via sh -c, enabling arbitrary command execution.",
+    "affected_component": "handlers/admin.go:27",
+    "confidence": "high",
+    "severity": "critical",
+    "source_refs": [
+      {
+        "repo": ".",
+        "file": "handlers/admin.go",
+        "start_line": 27,
+        "end_line": 27,
+        "snippet": "out, err := exec.Command(\"sh\", \"-c\", req.Cmd).CombinedOutput()"
+      }
+    ]
+  }
+}

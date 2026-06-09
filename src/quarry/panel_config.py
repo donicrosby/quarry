@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from quarry.schemas import VulnerabilityClass
+from quarry.schemas import Provider, VulnerabilityClass
 
 
 def _empty_vuln_classes() -> list[VulnerabilityClass]:
@@ -29,7 +29,7 @@ _CREDENTIAL_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSW
 class RoleConfig(BaseModel):
     """Configuration for one model role in a panel."""
 
-    provider: str = ""
+    provider: Provider = Provider.MOCK
     model: str = ""
     rpm: int = 30
 
@@ -63,6 +63,8 @@ class ScanDefaultsConfig(BaseModel):
     """Defaults applied to every scan unless overridden at the CLI or TUI."""
 
     focus_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
+    hunt_max_iterations: int = 12
+    hunt_max_concurrent: int = 8
 
 
 class QuarryConfig(BaseModel):

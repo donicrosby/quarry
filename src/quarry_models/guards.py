@@ -11,15 +11,21 @@ from pydantic import BaseModel
 from quarry_models.redaction import scrub
 
 
+import re as _re
+
+_REDACTED_MARKER = _re.compile(r"\[REDACTED_SECRET_\d+\]")
+
+
 def check_leaked_secret(text: str) -> bool:
     """Return True if *text* appears to contain an unredacted secret.
 
     Compares the scrubbed version of *text* with the original; if the
     scrubber made changes (hits > 0), the original text contained a secret.
     Redacted markers (``[REDACTED_SECRET_N]``) from a prior scrub pass do
-    not count as a new leak.
+    not count as a new leak — they are stripped before the check.
     """
-    result = scrub(text)
+    stripped = _REDACTED_MARKER.sub("", text)
+    result = scrub(stripped)
     return result.hits > 0
 
 

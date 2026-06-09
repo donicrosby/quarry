@@ -17,14 +17,14 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from quarry.config import QuarrySettings
 from quarry.schemas import ScanStatus
-from quarry_activities.attack_surface import extract_fastapi_routes_for_repo
-from quarry_activities.inputs import ScanSecretsInput
+from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.provenance import build_scan_manifest_activity
+from quarry_activities.recon_orchestrator import recon_orchestrator_activity
+from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.validation import validate_secret_candidate
 from quarry_persistence import QuarryRepository
-from quarry_plugins.vuln_classes.secrets import SecretMatch, scan_repo_for_secrets
 from quarry_server.app import create_app
 from quarry_workflows import RunScanInput, RunScanWorkflow
 
@@ -52,8 +52,11 @@ async def test_cancel_mid_scan_sets_cancelled_status(
         activities=[
             create_repository_snapshot,
             persist_scan_state,
-            extract_fastapi_routes_for_repo,
-            slow_scan_repo_for_secrets,
+            recon_orchestrator_activity,
+            slow_recon_subsystem,
+            recon_synthesis_activity,
+            emit_agent_tasks,
+            slow_hunt_activity,
             validate_secret_candidate,
             render_markdown_report_activity,
             build_scan_manifest_activity,
@@ -76,7 +79,7 @@ async def test_cancel_mid_scan_sets_cancelled_status(
             )
 
             await _wait_for_status(db_path, scan_id, ScanStatus.RUNNING)
-            await _wait_for_stage(handle, "SECRETS_SCAN")
+            await _wait_for_stage(handle, "HUNT")
             await handle.cancel()
             with pytest.raises(WorkflowFailureError) as exc_info:
                 await handle.result()
@@ -187,17 +190,47 @@ def _create_large_repo(repo_path: Path) -> Path:
     return repo_path
 
 
-@activity.defn(name="scan-repo-for-secrets")
-def slow_scan_repo_for_secrets(
-    repo_root: ScanSecretsInput | dict[str, object] | Path,
-) -> list[SecretMatch]:
-    for index in range(1_000):
+@activity.defn(name="recon-subsystem")
+def slow_recon_subsystem(
+    assignment: object,
+    repo_root: str | None = None,
+    scan_id: str | None = None,
+    budget_spec: object = None,
+    panel_json: str | None = None,
+) -> dict[str, object]:
+    from quarry.schemas import SubsystemAssignment
+    if isinstance(assignment, dict):
+        assignment = SubsystemAssignment.model_validate(assignment)
+    for index in range(200):
         with suppress(RuntimeError):
-            activity.heartbeat(f"Waiting for cancellation {index}")
+            activity.heartbeat(f"Slow recon subsystem {index}")
         if _activity_cancel_requested():
-            raise CancelledError("Secrets scan cancelled")
+            raise CancelledError("Recon cancelled")
         time.sleep(0.01)
-    return scan_repo_for_secrets(repo_root)
+    return {
+        "name": getattr(assignment, "name", "main"),
+        "root_paths": getattr(assignment, "root_paths", ["."]),
+        "languages": getattr(assignment, "languages", ["python"]),
+        "responsibility": "handler",
+        "entry_points": [],
+        "notes": "",
+    }
+
+
+@activity.defn(name="hunt-vuln-class")
+def slow_hunt_activity(
+    task: object,
+    repo_path: str | None = None,
+    max_iterations: int = 12,
+    budget_cap_usd: float | None = None,
+) -> list[object]:
+    for index in range(200):
+        with suppress(RuntimeError):
+            activity.heartbeat(f"Slow hunt {index}")
+        if _activity_cancel_requested():
+            raise CancelledError("Hunt cancelled")
+        time.sleep(0.01)
+    return []
 
 
 def _activity_cancel_requested() -> bool:

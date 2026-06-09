@@ -11,24 +11,27 @@ from temporalio import activity
 from temporalio.client import Client, WorkflowFailureError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from quarry.schemas import ScanStatus
-from quarry_activities.attack_surface import extract_fastapi_routes_for_repo
-from quarry_activities.inputs import ScanSecretsInput
+from quarry.schemas import ScanStatus, SubsystemAssignment
+from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.hunt import hunt_activity
 from quarry_activities.provenance import build_scan_manifest_activity
+from quarry_activities.recon_orchestrator import recon_orchestrator_activity
+from quarry_activities.recon_subsystem import recon_subsystem_activity
+from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.validation import validate_secret_candidate
 from quarry_persistence import QuarryRepository
-from quarry_plugins.vuln_classes.secrets import SecretMatch
 from quarry_workflows import RunScanInput, RunScanWorkflow
 
-FAILURE_MESSAGE = "secrets scanner exploded"
+FAILURE_MESSAGE = "recon orchestrator exploded"
 
 
-@activity.defn(name="scan-repo-for-secrets")
-def failing_scan_repo_for_secrets(
-    repo_root: ScanSecretsInput | dict[str, object] | Path,
-) -> list[SecretMatch]:
+@activity.defn(name="recon-orchestrator")
+def failing_recon_orchestrator(
+    repo_root: object,
+    scan_id: str | None = None,
+) -> list[SubsystemAssignment]:
     raise RuntimeError(FAILURE_MESSAGE)
 
 
@@ -52,8 +55,11 @@ async def test_failed_scan_sets_failed_status_and_preserves_artifacts(
         activities=[
             create_repository_snapshot,
             persist_scan_state,
-            extract_fastapi_routes_for_repo,
-            failing_scan_repo_for_secrets,
+            failing_recon_orchestrator,
+            recon_subsystem_activity,
+            recon_synthesis_activity,
+            emit_agent_tasks,
+            hunt_activity,
             validate_secret_candidate,
             render_markdown_report_activity,
             build_scan_manifest_activity,

@@ -15,9 +15,10 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import is_cancelled_exception
 
 from quarry.schemas import (
+    AgentTask,
     ArtifactKind,
     ArtifactRef,
-    AttackSurfaceItem,
+    ArchitectureDoc,
     CandidateFinding,
     CoverageGap,
     FinalFinding,
@@ -31,6 +32,7 @@ from quarry.schemas import (
     ScanManifest,
     ScanStatus,
     Severity,
+    SubsystemAssignment,
     Target,
     ValidationResult,
     VulnerabilityClass,
@@ -38,43 +40,31 @@ from quarry.schemas import (
     local_scan_profile,
     utc_now,
 )
-from quarry_activities.attack_surface import extract_fastapi_routes
 from quarry_activities.coverage import build_coverage_ledger, write_coverage_artifact
 from quarry_activities.inputs import (
     BuildCoverageLedgerInput,
     BuildCoverageLedgerOutput,
     BuildScanManifestInput,
-    CommandInjectionScanInput,
     CreateSnapshotInput,
     DeliverIntegrationsInput,
-    ExtractRoutesForRepoInput,
-    IdorScanInput,
     PersistScanStateInput,
     RenderReportInput,
     RenderReportOutput,
-    ScanSecretsInput,
     ValidateCandidateInput,
-    ValidateCommandInjectionInput,
-    ValidateIDORInput,
 )
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
-from quarry_activities.validation import SecretValidationResult, validate_secret_candidate
+from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
-from quarry_plugins.vuln_classes.secrets import (
-    SecretMatch,
-    scan_repo_for_secrets,
-    secret_match_to_candidate_finding,
-)
 
 ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 COMPLETED_STAGE_ORDER = {
     "CREATED": 0,
     "SNAPSHOT": 1,
-    "ATTACK_SURFACE": 2,
-    "SECRETS_SCAN": 3,
-    "IDOR_SCAN": 4,
-    "CMDI_SCAN": 5,
+    "RECON": 2,
+    "HUNT": 3,
+    "VALIDATION": 4,
+    "COVERAGE": 5,
     "REPORT": 6,
     "INTEGRATING": 7,
     "COMPLETED": 8,
@@ -95,6 +85,7 @@ class RunScanInput(BaseModel):
     target_url: str | None = None
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
+    hunt_max_concurrent: int = 8
 
 
 class RunScanResult(BaseModel):
@@ -227,151 +218,218 @@ class RunScanWorkflow:
             )
             await _persist_scan_stage(scan_input.db_path, scan.id, "SNAPSHOT")
 
-        if _stage_completed(completed_stage, "ATTACK_SURFACE"):
-            attack_surface_items = await _load_attack_surface_items(scan_input.db_path, scan.id)
+        # ── RECON stage ──────────────────────────────────────────────────────
+        # Runs the recon agent (orchestrator → subsystems → synthesis) to
+        # produce a language-agnostic ArchitectureDoc, then emits one AgentTask
+        # per (vuln_class, scope) for the hunt stage.
+        agent_tasks: list[AgentTask] = []
+        arch_doc: ArchitectureDoc | None = None
+        if _stage_completed(completed_stage, "RECON"):
+            agent_tasks = await _load_agent_tasks(scan_input.db_path, scan.id)
         else:
-            self._current_stage = "ATTACK_SURFACE"
-            attack_surface_payload = await workflow.execute_activity(
-                "extract-fastapi-routes-for-repo",
-                ExtractRoutesForRepoInput(repo_path=scan_input.repo_path, scan_id=scan.id),
-                start_to_close_timeout=timedelta(minutes=5),
+            self._current_stage = "RECON"
+            # Step 1: orchestrate subsystem assignments
+            assignments_payload = await workflow.execute_activity(
+                "recon-orchestrator",
+                args=[scan_input.repo_path, scan.id],
+                start_to_close_timeout=timedelta(minutes=3),
                 retry_policy=ACTIVITY_RETRY_POLICY,
             )
-            attack_surface_items = _attack_surface_from_activity(attack_surface_payload)
-            if attack_surface_items:
+            assignments = _subsystem_assignments_from_activity(assignments_payload)
+
+            # Step 2: analyse each subsystem in parallel.
+            # Pass the serialised recon RoleConfig so the activity can select the
+            # correct model client (mock vs. real) based on the panel config.
+            recon_panel_entry = next(
+                (e for e in scan.panel_snapshot if e.role == "recon"), None
+            )
+            recon_panel_json: str | None = None
+            if recon_panel_entry is not None:
+                from quarry.panel_config import RoleConfig as _RoleConfig
+                recon_panel_json = _RoleConfig(
+                    provider=recon_panel_entry.provider,
+                    model=recon_panel_entry.model,
+                    rpm=recon_panel_entry.rate_limit_rpm,
+                ).model_dump_json()
+
+            subsystem_payloads = await asyncio.gather(
+                *[
+                    workflow.execute_activity(
+                        "recon-subsystem",
+                        args=[a, scan_input.repo_path, scan.id, None, recon_panel_json],
+                        start_to_close_timeout=timedelta(minutes=5),
+                        heartbeat_timeout=timedelta(seconds=30),
+                        retry_policy=ACTIVITY_RETRY_POLICY,
+                    )
+                    for a in assignments
+                ]
+            )
+
+            # Step 3: synthesise into ArchitectureDoc
+            # Build typed Subsystem list from payloads for synthesis activity
+            from quarry.schemas import Subsystem as _Subsystem
+            subsystems: list[_Subsystem] = []
+            for sp in subsystem_payloads:
+                if isinstance(sp, _Subsystem):
+                    subsystems.append(sp)
+                elif isinstance(sp, dict):
+                    try:
+                        subsystems.append(_Subsystem.model_validate(sp))
+                    except Exception:
+                        pass
+
+            synthesis_payload = await workflow.execute_activity(
+                "recon-synthesis",
+                args=[subsystems, scan_input.repo_path, scan.id],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=ACTIVITY_RETRY_POLICY,
+            )
+            arch_doc = _architecture_doc_from_activity(synthesis_payload)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_architecture_doc",
+                {"scan_id": scan.id, "doc": _model_json_dict(arch_doc)},
+            )
+
+            # Emit one AgentTask per (vuln_class, scope)
+            emit_payload = await workflow.execute_activity(
+                "emit-agent-tasks",
+                args=[scan.id, arch_doc.model_dump_json(), [vc.value for vc in scan.profile.vuln_classes]],
+                start_to_close_timeout=timedelta(minutes=1),
+                retry_policy=ACTIVITY_RETRY_POLICY,
+            )
+            agent_tasks = _agent_tasks_from_activity(emit_payload)
+            for task in agent_tasks:
                 await _persist_scan_state(
                     scan_input.db_path,
-                    "save_attack_surface_items",
-                    {"items": [_model_json_dict(item) for item in attack_surface_items]},
+                    "save_agent_task",
+                    {"task": _model_json_dict(task)},
                 )
-            await _persist_scan_stage(scan_input.db_path, scan.id, "ATTACK_SURFACE")
+            await _persist_scan_stage(scan_input.db_path, scan.id, "RECON")
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "recon.completed",
+                {"task_count": str(len(agent_tasks))},
+            )
 
+        # ── HUNT stage ───────────────────────────────────────────────────────
+        # Focus + exclusion drops happen here in workflow code (deterministic).
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
-        if _stage_completed(completed_stage, "SECRETS_SCAN"):
+        proof_artifacts: list[ProofArtifact] = []
+        if _stage_completed(completed_stage, "HUNT"):
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        elif VulnerabilityClass.SECRETS in scan.profile.vuln_classes:
-            self._current_stage = "SECRETS_SCAN"
-            secret_match_payload = await workflow.execute_activity(
-                "scan-repo-for-secrets",
-                ScanSecretsInput(repo_root=scan_input.repo_path),
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=10),
-                cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                retry_policy=ACTIVITY_RETRY_POLICY,
-            )
-            secret_matches = _secret_matches_from_activity(secret_match_payload)
+        else:
+            self._current_stage = "HUNT"
+            # Drop 1: focus guard (structural enforcement of --focus)
+            focused_tasks = [
+                t for t in agent_tasks
+                if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
+            ]
+            # Drop 2: exclusion guard (always wins over focus)
+            excluded_classes = {
+                exc.value
+                for exc in scan.profile.scope_exclusions
+                if exc.kind == "vuln_class"
+            }
+            runnable_tasks = [
+                t for t in focused_tasks
+                if t.vuln_class is not None and t.vuln_class.value not in excluded_classes
+            ]
 
-            for match in secret_matches:
-                candidate = secret_match_to_candidate_finding(
-                    match,
-                    scan_id=scan.id,
-                    workspace_id="local",
-                    created_by="secrets-scanner",
-                    created_at=workflow.now(),
-                )
-                await _persist_scan_state(
-                    scan_input.db_path,
-                    "save_candidate_finding",
-                    {"finding": _model_json_dict(candidate)},
-                )
-                candidate_findings.append(candidate)
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "finding.candidate_created",
-                    {"finding_id": candidate.id},
-                )
+            max_concurrent = scan_input.hunt_max_concurrent
+            semaphore = asyncio.Semaphore(max_concurrent)
 
-                self._current_stage = "VALIDATION"
-                validation_payload = await workflow.execute_activity(
-                    "validate-secret-candidate",
-                    ValidateCandidateInput(finding_json=candidate.model_dump_json()),
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=ACTIVITY_RETRY_POLICY,
-                )
-                validation = _validation_result_from_activity(validation_payload)
-                if validation.is_valid:
-                    final = FinalFinding(
-                        id=candidate.id,
-                        scan_id=scan.id,
-                        workspace_id="local",
-                        fingerprint=candidate.id,
-                        vuln_class=candidate.vuln_class,
-                        severity=Severity.HIGH,
-                        title=candidate.title,
-                        summary=candidate.hypothesis,
-                        affected_component=candidate.affected_component,
-                        source_refs=candidate.source_refs,
-                        validation_result_id=f"{candidate.id}-validation",
-                        remediation="Move the secret to an environment variable or secret manager.",
-                        created_at=workflow.now(),
+            async def _run_one_hunt(task: AgentTask) -> list[dict]:  # type: ignore[type-arg]
+                async with semaphore:
+                    budget_cap = (
+                        scan.budget_cap_usd / len(runnable_tasks)
+                        if scan.budget_cap_usd and runnable_tasks
+                        else None
                     )
+                    return await workflow.execute_activity(
+                        "hunt-vuln-class",
+                        args=[task, scan_input.repo_path, 12, budget_cap],
+                        start_to_close_timeout=timedelta(minutes=10),
+                        heartbeat_timeout=timedelta(seconds=60),
+                        retry_policy=ACTIVITY_RETRY_POLICY,
+                    )
+
+            hunt_results = await asyncio.gather(
+                *[_run_one_hunt(t) for t in runnable_tasks]
+            )
+
+            for task_findings in hunt_results:
+                for finding_dict in task_findings:
+                    candidate = CandidateFinding.model_validate(finding_dict)
+                    # Post-hunt: label OOS findings, skip from final promotion
+                    is_oos = any(
+                        exc.kind == "route" and exc.value in (candidate.affected_component or "")
+                        for exc in scan.profile.scope_exclusions
+                    )
+                    if is_oos:
+                        candidate = candidate.model_copy(update={"triage_label": "oos"})
                     await _persist_scan_state(
                         scan_input.db_path,
-                        "save_final_finding",
-                        {"finding": _model_json_dict(final)},
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(candidate)},
                     )
-                    final_findings.append(final)
+                    candidate_findings.append(candidate)
                     await _append_workflow_event(
-                        scan_input.db_path, scan.id, "finding.validated", {"finding_id": final.id}
-                    )
-                else:
-                    await _append_workflow_event(
-                        scan_input.db_path,
-                        scan.id,
-                        "finding.rejected",
+                        scan_input.db_path, scan.id, "finding.candidate_created",
                         {"finding_id": candidate.id},
                     )
-            await _persist_scan_stage(scan_input.db_path, scan.id, "SECRETS_SCAN")
 
-        proof_artifacts: list[ProofArtifact] = []
-        idor_scan_completed = _stage_completed(completed_stage, "IDOR_SCAN")
-        if idor_scan_completed:
-            candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
-            final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        elif VulnerabilityClass.IDOR in scan.profile.vuln_classes:
-            self._current_stage = "IDOR_SCAN"
-            await self._run_idor_scan(
-                scan_input,
-                scan,
-                attack_surface_items,
-                candidate_findings,
-                final_findings,
-                proof_artifacts,
-                artifact_root,
-            )
-            await _persist_scan_stage(scan_input.db_path, scan.id, "IDOR_SCAN")
-            idor_scan_completed = True
+                    if not is_oos:
+                        self._current_stage = "VALIDATION"
+                        validation_payload = await workflow.execute_activity(
+                            "validate-secret-candidate",
+                            ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                            start_to_close_timeout=timedelta(seconds=30),
+                            retry_policy=ACTIVITY_RETRY_POLICY,
+                        )
+                        validation = _validation_result_from_activity(validation_payload)
+                        if validation.is_valid:
+                            final = FinalFinding(
+                                id=candidate.id,
+                                scan_id=scan.id,
+                                workspace_id="local",
+                                fingerprint=candidate.metadata.get("fingerprint", candidate.id),
+                                vuln_class=candidate.vuln_class,
+                                severity=candidate.severity,
+                                title=candidate.title,
+                                summary=candidate.hypothesis,
+                                affected_component=candidate.affected_component,
+                                source_refs=candidate.source_refs,
+                                validation_result_id=f"{candidate.id}-validation",
+                                created_at=workflow.now(),
+                            )
+                            await _persist_scan_state(
+                                scan_input.db_path, "save_final_finding",
+                                {"finding": _model_json_dict(final)},
+                            )
+                            final_findings.append(final)
+                            await _append_workflow_event(
+                                scan_input.db_path, scan.id, "finding.validated",
+                                {"finding_id": final.id},
+                            )
+                        else:
+                            await _append_workflow_event(
+                                scan_input.db_path, scan.id, "finding.rejected",
+                                {"finding_id": candidate.id},
+                            )
 
-        cmdi_scan_completed = _stage_completed(completed_stage, "CMDI_SCAN")
-        if cmdi_scan_completed:
-            candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
-            final_findings = await _load_final_findings(scan_input.db_path, scan.id)
-        elif VulnerabilityClass.COMMAND_INJECTION in scan.profile.vuln_classes:
-            self._current_stage = "CMDI_SCAN"
-            await self._run_command_injection_scan(
-                scan_input,
-                scan,
-                attack_surface_items,
-                candidate_findings,
-                final_findings,
-                proof_artifacts,
-                artifact_root,
-            )
-            await _persist_scan_stage(scan_input.db_path, scan.id, "CMDI_SCAN")
-            cmdi_scan_completed = True
+            await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
 
         self._current_stage = "COVERAGE"
         coverage_ledger_json = await self._record_coverage(
             scan_input,
             scan,
-            attack_surface_items,
+            agent_tasks,
             final_findings,
             artifact_root,
-            idor_scan_completed,
-            cmdi_scan_completed,
         )
 
         self._current_stage = "REPORT"
@@ -384,7 +442,7 @@ class RunScanWorkflow:
                 scan_json=reporting_scan.model_dump_json(),
                 findings_json=_model_list_json(candidate_findings),
                 snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
-                attack_surface_json=_model_list_json(attack_surface_items),
+                attack_surface_json=None,
                 final_findings_json=_model_list_json(final_findings),
                 report_path=report_path,
                 coverage_json=coverage_ledger_json,
@@ -463,233 +521,7 @@ class RunScanWorkflow:
             final_finding_count=len(final_findings),
         )
 
-    async def _run_idor_scan(
-        self,
-        scan_input: "RunScanInput",
-        scan: Scan,
-        attack_surface_items: list[AttackSurfaceItem],
-        candidate_findings: list[CandidateFinding],
-        final_findings: list[FinalFinding],
-        proof_artifacts: list[ProofArtifact],
-        artifact_root: str,
-    ) -> None:
-        idor_candidate_payload = await workflow.execute_activity(
-            "scan-attack-surface-for-idor",
-            IdorScanInput(
-                repo_root=scan_input.repo_path,
-                scan_id=scan.id,
-                attack_surface_items=tuple(attack_surface_items),
-                workspace_id="local",
-            ),
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=10),
-            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
-        idor_candidates = _candidate_findings_from_activity(idor_candidate_payload)
 
-        for candidate in idor_candidates:
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_candidate_finding",
-                {"finding": _model_json_dict(candidate)},
-            )
-            candidate_findings.append(candidate)
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "finding.candidate_created",
-                {"finding_id": candidate.id},
-            )
-
-            if scan_input.target_url is None:
-                continue
-
-            self._current_stage = "VALIDATION"
-            validation_payload = await workflow.execute_activity(
-                "validate-idor-candidate",
-                ValidateIDORInput(
-                    finding_json=candidate.model_dump_json(),
-                    target_url=scan_input.target_url,
-                    artifact_store_path=artifact_root,
-                ),
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=ACTIVITY_RETRY_POLICY,
-            )
-            validation = _idor_validation_result_from_activity(validation_payload)
-            if validation.verdict == "validated":
-                proof: ProofArtifact | None = None
-                if validation.evidence_refs:
-                    proof = ProofArtifact(
-                        id=str(workflow.uuid4()),
-                        scan_id=scan.id,
-                        candidate_finding_id=candidate.id,
-                        final_finding_id=candidate.id,
-                        proof_type="dynamic_idor_two_user",
-                        description=(
-                            "User A retrieved User B's resource by manipulating the object "
-                            "identifier; captured HTTP request and response demonstrate the access."
-                        ),
-                        evidence_refs=validation.evidence_refs,
-                        redaction_status=validation.evidence_refs[0].redaction_status,
-                        created_at=workflow.now(),
-                    )
-                final = FinalFinding(
-                    id=candidate.id,
-                    scan_id=scan.id,
-                    workspace_id="local",
-                    fingerprint=candidate.id,
-                    vuln_class=candidate.vuln_class,
-                    severity=candidate.severity,
-                    title=candidate.title,
-                    summary=candidate.hypothesis,
-                    affected_component=candidate.affected_component,
-                    attack_surface_item_id=candidate.attack_surface_item_id,
-                    source_refs=candidate.source_refs,
-                    validation_result_id=validation.id,
-                    proof_artifact_ids=[proof.id] if proof is not None else [],
-                    remediation=(
-                        "Add object-level authorization checks before returning "
-                        "user-controlled resources."
-                    ),
-                    created_at=workflow.now(),
-                )
-                await _persist_scan_state(
-                    scan_input.db_path,
-                    "save_final_finding",
-                    {"finding": _model_json_dict(final)},
-                )
-                final_findings.append(final)
-                if proof is not None:
-                    proof_artifacts.append(proof)
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "finding.validated",
-                    {"finding_id": final.id},
-                )
-            elif validation.verdict == "rejected":
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "finding.rejected",
-                    {"finding_id": candidate.id},
-                )
-
-    async def _run_command_injection_scan(
-        self,
-        scan_input: "RunScanInput",
-        scan: Scan,
-        attack_surface_items: list[AttackSurfaceItem],
-        candidate_findings: list[CandidateFinding],
-        final_findings: list[FinalFinding],
-        proof_artifacts: list[ProofArtifact],
-        artifact_root: str,
-    ) -> None:
-        candidate_payload = await workflow.execute_activity(
-            "scan-attack-surface-for-command-injection",
-            CommandInjectionScanInput(
-                repo_root=scan_input.repo_path,
-                scan_id=scan.id,
-                attack_surface_items=tuple(attack_surface_items),
-                workspace_id="local",
-            ),
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=10),
-            cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-            retry_policy=ACTIVITY_RETRY_POLICY,
-        )
-        candidates = _candidate_findings_from_activity(candidate_payload)
-
-        for candidate in candidates:
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_candidate_finding",
-                {"finding": _model_json_dict(candidate)},
-            )
-            candidate_findings.append(candidate)
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "finding.candidate_created",
-                {"finding_id": candidate.id},
-            )
-
-            if scan_input.target_url is None:
-                continue
-
-            self._current_stage = "VALIDATION"
-            validation_payload = await workflow.execute_activity(
-                "validate-command-injection-candidate",
-                ValidateCommandInjectionInput(
-                    finding_json=candidate.model_dump_json(),
-                    target_url=scan_input.target_url,
-                    allowed_hosts=("localhost", "127.0.0.1"),
-                    artifact_store_path=artifact_root,
-                ),
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=ACTIVITY_RETRY_POLICY,
-            )
-            validation = _idor_validation_result_from_activity(validation_payload)
-            if validation.verdict == "validated":
-                proof: ProofArtifact | None = None
-                if validation.evidence_refs:
-                    proof = ProofArtifact(
-                        id=str(workflow.uuid4()),
-                        scan_id=scan.id,
-                        candidate_finding_id=candidate.id,
-                        final_finding_id=candidate.id,
-                        proof_type="dynamic_command_injection_echo",
-                        description=(
-                            "Injected a benign echo marker into the request parameter; the "
-                            "marker was returned in the response, proving shell execution."
-                        ),
-                        evidence_refs=validation.evidence_refs,
-                        safe_payload=validation.safe_payload,
-                        redaction_status=validation.evidence_refs[0].redaction_status,
-                        created_at=workflow.now(),
-                    )
-                final = FinalFinding(
-                    id=candidate.id,
-                    scan_id=scan.id,
-                    workspace_id="local",
-                    fingerprint=candidate.id,
-                    vuln_class=candidate.vuln_class,
-                    severity=candidate.severity,
-                    title=candidate.title,
-                    summary=candidate.hypothesis,
-                    affected_component=candidate.affected_component,
-                    attack_surface_item_id=candidate.attack_surface_item_id,
-                    source_refs=candidate.source_refs,
-                    validation_result_id=validation.id,
-                    proof_artifact_ids=[proof.id] if proof is not None else [],
-                    remediation=(
-                        "Never pass request input into a shell; use argument lists without "
-                        "shell=True, or strict allowlist validation."
-                    ),
-                    created_at=workflow.now(),
-                )
-                await _persist_scan_state(
-                    scan_input.db_path,
-                    "save_final_finding",
-                    {"finding": _model_json_dict(final)},
-                )
-                final_findings.append(final)
-                if proof is not None:
-                    proof_artifacts.append(proof)
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "finding.validated",
-                    {"finding_id": final.id},
-                )
-            elif validation.verdict == "rejected":
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "finding.rejected",
-                    {"finding_id": candidate.id},
-                )
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
@@ -716,21 +548,27 @@ class RunScanWorkflow:
         self,
         scan_input: "RunScanInput",
         scan: Scan,
-        attack_surface_items: list[AttackSurfaceItem],
+        agent_tasks: list[AgentTask],
         final_findings: list[FinalFinding],
         artifact_root: str,
-        idor_scan_completed: bool,
-        cmdi_scan_completed: bool,
     ) -> str:
-        """Build and persist the coverage ledger, returning its JSON for the report."""
+        """Build and persist the coverage ledger over AgentTasks, returning JSON."""
         requested = tuple(vc.value for vc in scan.profile.vuln_classes)
-        completed_classes = {f.vuln_class.value for f in final_findings}
-        if idor_scan_completed:
-            completed_classes.add(VulnerabilityClass.IDOR.value)
-        if cmdi_scan_completed:
-            completed_classes.add(VulnerabilityClass.COMMAND_INJECTION.value)
-        completed = tuple(sorted(completed_classes))
-        skipped = _coverage_skipped_items(attack_surface_items, idor_scan_completed)
+        completed_classes = tuple(sorted({f.vuln_class.value for f in final_findings}))
+        # Skipped = tasks that ran but produced no finding
+        finding_components = {f.affected_component for f in final_findings if f.affected_component}
+        skipped: list[dict[str, str]] = [
+            {
+                "task_id": t.id,
+                "vuln_class": t.vuln_class.value if t.vuln_class else "",
+                "scope": t.scope or "",
+                "reason": "no finding from hunt agent",
+            }
+            for t in agent_tasks
+            if not any(
+                f.vuln_class == t.vuln_class for f in final_findings
+            )
+        ]
         payload = await workflow.execute_activity(
             "build-coverage-ledger",
             BuildCoverageLedgerInput(
@@ -738,11 +576,9 @@ class RunScanWorkflow:
                 workspace_id="local",
                 artifact_root=artifact_root,
                 requested_vuln_classes=requested,
-                completed_vuln_classes=completed,
-                attack_surface_items_total=len(attack_surface_items),
-                attack_surface_items_scanned=(
-                    len(attack_surface_items) if idor_scan_completed else 0
-                ),
+                completed_vuln_classes=completed_classes,
+                attack_surface_items_total=len(agent_tasks),
+                attack_surface_items_scanned=len(agent_tasks),
                 skipped_json=json.dumps(skipped, sort_keys=True),
             ),
             start_to_close_timeout=timedelta(minutes=1),
@@ -760,7 +596,7 @@ class RunScanWorkflow:
             scan.id,
             "coverage.recorded",
             {
-                "attack_surface_total": str(len(attack_surface_items)),
+                "agent_tasks_total": str(len(agent_tasks)),
                 "skipped": str(len(skipped)),
             },
         )
@@ -866,6 +702,13 @@ def _describe_failure(exc: BaseException) -> str:
 
 
 def run_scan(scan_input: RunScanInput) -> RunScanResult:
+    """Synchronous (non-Temporal) scan runner used by tests and the CLI fallback.
+
+    Pure-agentic pivot: candidate generation now happens through the Temporal
+    workflow's RECON + HUNT stages.  This sync path only creates the scan record,
+    takes a snapshot, and writes an empty report — it is a scaffold for the
+    non-Temporal path and is not expected to produce findings.
+    """
     repo_path = Path(scan_input.repo_path).resolve()
     if not repo_path.exists():
         msg = f"Repository path does not exist: {repo_path}"
@@ -914,88 +757,23 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         },
     )
 
-    attack_surface_items: list[AttackSurfaceItem] = []
-    for py_file in repo_path.rglob("*.py"):
-        extracted = extract_fastapi_routes(py_file)
-        for item in extracted:
-            attack_surface_items.append(
-                item.model_copy(update={"id": str(uuid4()), "scan_id": scan.id})
-            )
-    if attack_surface_items:
-        repository.save_attack_surface_items(attack_surface_items)
-
-    secret_matches = scan_repo_for_secrets(repo_path)
     candidate_findings: list[CandidateFinding] = []
     final_findings: list[FinalFinding] = []
 
-    for match in secret_matches:
-        candidate = secret_match_to_candidate_finding(
-            match,
-            scan_id=scan.id,
-            workspace_id="local",
-            created_by="secrets-scanner",
-        )
-        repository.save_candidate_finding(candidate)
-        candidate_findings.append(candidate)
-        _append_event(
-            repository, scan.id, "finding.candidate_created", {"finding_id": candidate.id}
-        )
-
-        validation = validate_secret_candidate(candidate)
-        if validation.is_valid:
-            final = FinalFinding(
-                id=candidate.id,
-                scan_id=scan.id,
-                workspace_id="local",
-                fingerprint=candidate.id,
-                vuln_class=candidate.vuln_class,
-                severity=Severity.HIGH,
-                title=candidate.title,
-                summary=candidate.hypothesis,
-                affected_component=candidate.affected_component,
-                source_refs=candidate.source_refs,
-                validation_result_id=f"{candidate.id}-validation",
-                remediation="Move the secret to an environment variable or secret manager.",
-                created_at=utc_now(),
-            )
-            repository.save_final_finding(final)
-            final_findings.append(final)
-            _append_event(repository, scan.id, "finding.validated", {"finding_id": final.id})
-        else:
-            _append_event(repository, scan.id, "finding.rejected", {"finding_id": candidate.id})
-
-    coverage_gaps = [
-        CoverageGap(
-            id=str(uuid4()),
-            scan_id=scan.id,
-            attack_surface_item_id=item.id,
-            reason="Mapped HTTP route not probed; secrets scanning is file-based.",
-            recommended_next_task="Add route-level scanners (IDOR, command injection, SSRF).",
-        )
-        for item in attack_surface_items
-    ]
     coverage_ledger = build_coverage_ledger(
         scan_id=scan.id,
         workspace_id="local",
         requested_vuln_classes=list(scan.profile.vuln_classes),
-        completed_vuln_classes=sorted({f.vuln_class for f in final_findings}),
-        attack_surface_items_total=len(attack_surface_items),
+        completed_vuln_classes=[],
+        attack_surface_items_total=0,
         attack_surface_items_scanned=0,
-        skipped_items=coverage_gaps,
+        skipped_items=[],
     )
     coverage_ref = write_coverage_artifact(
         coverage_ledger, Path(scan_input.output_dir) / "artifacts"
     )
     repository.save_artifact_ref(scan.id, coverage_ref)
-    _append_event(
-        repository,
-        scan.id,
-        "coverage.recorded",
-        {
-            "attack_surface_total": str(len(attack_surface_items)),
-            "skipped": str(len(coverage_gaps)),
-        },
-    )
+    _append_event(repository, scan.id, "coverage.recorded", {"agent_tasks_total": "0", "skipped": "0"})
 
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
@@ -1004,7 +782,7 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         reporting_scan,
         candidate_findings,
         snapshot,
-        attack_surface_items,
+        [],
         final_findings,
         coverage_ledger,
     )
@@ -1132,9 +910,11 @@ async def _load_scan(db_path: str, scan_id: str) -> Scan | None:
     raise TypeError(msg)
 
 
-async def _load_attack_surface_items(db_path: str, scan_id: str) -> list[AttackSurfaceItem]:
-    payload = await _persist_scan_state(db_path, "load_attack_surface_items", {"scan_id": scan_id})
-    return _attack_surface_from_activity(payload)
+async def _load_agent_tasks(db_path: str, scan_id: str) -> list[AgentTask]:
+    payload = await _persist_scan_state(db_path, "load_agent_tasks", {"scan_id": scan_id})
+    if not isinstance(payload, list):
+        return []
+    return [AgentTask.model_validate(item) for item in cast(list[object], payload)]
 
 
 async def _load_candidate_findings(db_path: str, scan_id: str) -> list[CandidateFinding]:
@@ -1197,9 +977,9 @@ def _join_path(root: str, *parts: str) -> str:
 
 def _model_list_json(
     items: list[CandidateFinding]
-    | list[AttackSurfaceItem]
     | list[FinalFinding]
-    | list[ProofArtifact],
+    | list[ProofArtifact]
+    | list[AgentTask],
 ) -> str:
     return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 
@@ -1213,36 +993,30 @@ def _repository_snapshot_from_activity(payload: object) -> RepositorySnapshot:
     raise TypeError(msg)
 
 
-def _attack_surface_from_activity(payload: object) -> list[AttackSurfaceItem]:
+def _subsystem_assignments_from_activity(payload: object) -> list[SubsystemAssignment]:
     if not isinstance(payload, list):
-        msg = f"Unexpected attack surface payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    items = cast(list[object], payload)
+        return []
     return [
-        item if isinstance(item, AttackSurfaceItem) else AttackSurfaceItem.model_validate(item)
-        for item in items
+        item if isinstance(item, SubsystemAssignment) else SubsystemAssignment.model_validate(item)
+        for item in cast(list[object], payload)
     ]
 
 
-def _candidate_findings_from_activity(payload: object) -> list[CandidateFinding]:
-    if not isinstance(payload, list):
-        msg = f"Unexpected candidate finding payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    items = cast(list[object], payload)
-    return [
-        item if isinstance(item, CandidateFinding) else CandidateFinding.model_validate(item)
-        for item in items
-    ]
+def _architecture_doc_from_activity(payload: object) -> ArchitectureDoc:
+    if isinstance(payload, ArchitectureDoc):
+        return payload
+    if isinstance(payload, dict):
+        return ArchitectureDoc.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected ArchitectureDoc payload: {type(payload).__name__}"
+    raise TypeError(msg)
 
 
-def _secret_matches_from_activity(payload: object) -> list[SecretMatch]:
+def _agent_tasks_from_activity(payload: object) -> list[AgentTask]:
     if not isinstance(payload, list):
-        msg = f"Unexpected secret match payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    items = cast(list[object], payload)
+        return []
     return [
-        item if isinstance(item, SecretMatch) else _secret_match_from_dict(_dict_payload(item))
-        for item in items
+        item if isinstance(item, AgentTask) else AgentTask.model_validate(item)
+        for item in cast(list[object], payload)
     ]
 
 
@@ -1257,15 +1031,6 @@ def _validation_result_from_activity(payload: object) -> SecretValidationResult:
             checks_run=_required_str_list(values, "checks_run"),
         )
     msg = f"Unexpected validation payload: {type(payload).__name__}"
-    raise TypeError(msg)
-
-
-def _idor_validation_result_from_activity(payload: object) -> ValidationResult:
-    if isinstance(payload, ValidationResult):
-        return payload
-    if isinstance(payload, dict):
-        return ValidationResult.model_validate(cast(dict[str, Any], payload))
-    msg = f"Unexpected IDOR validation payload: {type(payload).__name__}"
     raise TypeError(msg)
 
 
@@ -1312,15 +1077,6 @@ def _dict_payload(payload: object) -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
-def _secret_match_from_dict(payload: dict[str, Any]) -> SecretMatch:
-    return SecretMatch(
-        line_number=_required_int(payload, "line_number"),
-        key_name=_required_str(payload, "key_name"),
-        value=_required_str(payload, "value"),
-        file_path=_required_str(payload, "file_path"),
-    )
-
-
 def _required_str(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str):
@@ -1349,21 +1105,6 @@ def _required_str_list(payload: dict[str, Any], key: str) -> list[str]:
     return [item for item in items if isinstance(item, str)]
 
 
-def _coverage_skipped_items(
-    attack_surface_items: list[AttackSurfaceItem],
-    idor_scan_completed: bool,
-) -> list[dict[str, str | None]]:
-    if idor_scan_completed:
-        return []
-    return [
-        {
-            "attack_surface_item_id": item.id,
-            "vuln_class": None,
-            "reason": "Mapped HTTP route not probed; secrets scanning is file-based.",
-            "recommended_next_task": "Add route-level scanners (IDOR, command injection, SSRF).",
-        }
-        for item in attack_surface_items
-    ]
 
 
 def _report_artifact_ref(report_path: Path) -> ArtifactRef:

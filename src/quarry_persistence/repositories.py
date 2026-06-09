@@ -255,6 +255,26 @@ class QuarryRepository:
                 )
             )
 
+    def load_events(self, scan_id: str) -> list[WorkflowEvent]:
+        with session_scope(self.engine) as session:
+            records = (
+                session.query(WorkflowEventRecord)
+                .filter(WorkflowEventRecord.scan_id == scan_id)
+                .order_by(WorkflowEventRecord.created_at)
+                .all()
+            )
+            return [
+                WorkflowEvent(
+                    id=r.id,
+                    scan_id=r.scan_id,
+                    workspace_id=r.workspace_id,
+                    event_type=r.event_type,
+                    payload=json.loads(r.payload_json) if r.payload_json else {},
+                    created_at=_decode_datetime(r.created_at),
+                )
+                for r in records
+            ]
+
     def save_artifact_ref(self, scan_id: str, artifact_ref: ArtifactRef) -> None:
         with session_scope(self.engine) as session:
             session.add(
@@ -461,3 +481,7 @@ def _encode_optional_datetime(value: datetime | None) -> str | None:
 
 def _encode_datetime(value: datetime) -> str:
     return value.isoformat()
+
+
+def _decode_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
