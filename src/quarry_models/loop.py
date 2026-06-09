@@ -15,6 +15,14 @@ Design:
   ``budget_spec.max_cost_usd`` (returns ``stop_reason="budget_exceeded"``).
 - After each turn the guard set is checked; a guard hit returns
   ``stop_reason="guard_triggered"``.
+
+ADR-020 re-prompt sub-loop:
+- If the model response contains ``proposed_actions`` (a list of ProposedAction),
+  ``check_vague_reasoning`` is run on each action before any tool is executed.
+- On failure: feedback rendered from ``prompts/_feedback/vague_reasoning.j2``
+  (ADR-019 — no prompt text inline), appended as a user message, and the
+  turn is re-prompted WITHOUT advancing the real iteration counter.
+- After ``reasoning_max_retries`` exhausted: ``stop_reason="reasoning_rejected"``.
 """
 
 from __future__ import annotations
@@ -24,8 +32,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from quarry.schemas import AgentLoopResult, AgentStep
-from quarry_models.guards import check_leaked_secret, check_schema_mismatch
+from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction
+from quarry_models.guards import check_leaked_secret, check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest
 
@@ -43,6 +51,45 @@ def _wrap_tool_result(tool_name: str, output: str) -> str:
     return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
 
 
+def _render_vague_feedback(
+    failed_checks: list[str],
+    detail: str,
+    tool_name: str,
+    retries_remaining: int,
+) -> str:
+    """Render the vague-reasoning feedback message from the registry template.
+
+    All prompt text lives in the .j2 file (ADR-019). This function only passes
+    variables to the template renderer.
+    """
+    from quarry_prompts import get_registry  # noqa: PLC0415
+    from quarry_prompts.build_prompt import build_prompt, strip_provenance_header  # noqa: PLC0415
+
+    registry = get_registry()
+    try:
+        prompt = build_prompt(
+            registry=registry,
+            role="_feedback",
+            name="vague_reasoning",
+            version="1.0.0",
+            variables={
+                "tool_name": tool_name,
+                "failed_checks": failed_checks,
+                "detail": detail,
+                "retries_remaining": retries_remaining,
+            },
+        )
+        # The feedback template has only a developer part, which lands in messages[1].
+        feedback_text = prompt.messages[1].content if len(prompt.messages) > 1 else ""
+        return feedback_text
+    except Exception:
+        # Fallback — should only happen if the template is missing; never inline text.
+        return (
+            f"Reasoning for '{tool_name}' failed checks: {', '.join(failed_checks)}. "
+            f"{detail}. Retries remaining: {retries_remaining}."
+        )
+
+
 def run_agent_loop(
     *,
     client: Any,
@@ -55,6 +102,8 @@ def run_agent_loop(
     response_model: type[BaseModel],
     max_iterations: int = 20,
     cost_per_iteration: float = 0.0,
+    reasoning_max_retries: int = 2,
+    task_context: dict[str, Any] | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -78,12 +127,18 @@ def run_agent_loop(
         Hard iteration cap.
     cost_per_iteration:
         Simulated per-iteration cost in USD (used in tests without real pricing).
+    reasoning_max_retries:
+        Number of re-prompts allowed per turn when ``check_vague_reasoning`` rejects
+        a proposed action. Default 2. On exhaustion: ``stop_reason="reasoning_rejected"``.
+        Re-prompt turns do NOT count toward ``max_iterations``.
+    task_context:
+        Context dict for the vagueness guard (e.g. ``{"vuln_class": "xss"}``).
 
     Returns
     -------
     AgentLoopResult
-        With one of four stop reasons: ``final_answer``, ``max_iterations``,
-        ``budget_exceeded``, or ``guard_triggered``.
+        With one of five stop reasons: ``final_answer``, ``max_iterations``,
+        ``budget_exceeded``, ``guard_triggered``, or ``reasoning_rejected``.
     """
     steps: list[AgentStep] = []
     total_cost: float = 0.0
@@ -92,35 +147,101 @@ def run_agent_loop(
         ModelMessage(role="user", content=initial_user_message),
     ]
     final_answer: BaseModel | None = None
+    ctx = task_context or {}
 
     for iteration in range(1, max_iterations + 1):
-        request = ModelRequest(
-            task_name=f"{role}-loop",
-            scan_id="loop",
-            role=role,  # type: ignore[arg-type]
-            messages=list(history),
-        )
-        response = client.complete_structured(request, response_model)
-        parsed = response.parsed
+        # ── ADR-020 reasoning re-prompt sub-loop ────────────────────────────
+        # Re-prompt turns do NOT advance ``iteration`` (the real-iteration counter).
+        reasoning_retries = 0
+        while True:
+            request = ModelRequest(
+                task_name=f"{role}-loop",
+                scan_id="loop",
+                role=role,  # type: ignore[arg-type]
+                messages=list(history),
+            )
+            response = client.complete_structured(request, response_model)
+            parsed = response.parsed
 
-        # Guard: schema mismatch
-        if check_schema_mismatch(parsed, response_model):
-            steps.append(
-                AgentStep(
-                    agent_kind=agent_kind,  # type: ignore[arg-type]
-                    iteration=iteration,
-                    tool_calls=[],
-                    model_invocation_id=str(uuid.uuid4()),
-                    estimated_cost=cost_per_iteration,
+            # Guard: schema mismatch
+            if check_schema_mismatch(parsed, response_model):
+                steps.append(
+                    AgentStep(
+                        agent_kind=agent_kind,  # type: ignore[arg-type]
+                        iteration=iteration,
+                        tool_calls=[],
+                        model_invocation_id=str(uuid.uuid4()),
+                        estimated_cost=cost_per_iteration,
+                    )
                 )
-            )
-            return AgentLoopResult(
-                final_answer=None,
-                steps=steps,
-                iterations_used=iteration,
-                total_cost=total_cost,
-                stop_reason="guard_triggered",
-            )
+                return AgentLoopResult(
+                    final_answer=None,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="guard_triggered",
+                )
+
+            # Check proposed_actions reasoning (ADR-020)
+            proposed_actions: list[ProposedAction] = []
+            raw_actions = getattr(parsed, "proposed_actions", None) or []
+            for item in raw_actions:
+                if isinstance(item, ProposedAction):
+                    proposed_actions.append(item)
+                elif isinstance(item, dict):
+                    try:
+                        proposed_actions.append(ProposedAction.model_validate(item))
+                    except Exception:
+                        pass
+
+            if proposed_actions:
+                # Run the vagueness guard on all proposed actions.
+                # First failure halts the entire turn (permissive: check one at a time).
+                failed_action: ProposedAction | None = None
+                from quarry.schemas import ReasoningCheckResult  # noqa: PLC0415
+                failed_check_result: ReasoningCheckResult | None = None
+                for pa in proposed_actions:
+                    check = check_vague_reasoning(pa, ctx, pa.args)
+                    if not check.passed:
+                        failed_action = pa
+                        failed_check_result = check
+                        break
+
+                if failed_action is not None and failed_check_result is not None:
+                    if reasoning_retries >= reasoning_max_retries:
+                        # Exhausted retries → halt with reasoning_rejected
+                        steps.append(
+                            AgentStep(
+                                agent_kind=agent_kind,  # type: ignore[arg-type]
+                                iteration=iteration,
+                                tool_calls=[],
+                                model_invocation_id=str(uuid.uuid4()),
+                                estimated_cost=cost_per_iteration,
+                                rejected_reasoning_refs=[],
+                            )
+                        )
+                        return AgentLoopResult(
+                            final_answer=None,
+                            steps=steps,
+                            iterations_used=iteration,
+                            total_cost=total_cost,
+                            stop_reason="reasoning_rejected",
+                        )
+
+                    # Re-prompt: render feedback (ADR-019 — all text in .j2)
+                    reasoning_retries += 1
+                    feedback = _render_vague_feedback(
+                        failed_checks=list(failed_check_result.failed_checks),
+                        detail=failed_check_result.detail,
+                        tool_name=failed_action.tool_name,
+                        retries_remaining=reasoning_max_retries - reasoning_retries,
+                    )
+                    history.append(ModelMessage(role="user", content=feedback))
+                    continue  # re-prompt this turn (does NOT advance iteration)
+
+            # All proposed_actions passed the guard (or there were none)
+            break
+        # ── End of reasoning re-prompt sub-loop ─────────────────────────────
 
         # Extract tool_calls from the response (field is optional on the model)
         tool_calls: list[ToolCallRequest] = []
