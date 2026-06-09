@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -91,6 +92,8 @@ class ArtifactKind(StrEnum):
     REPORT = "report"
     INTEGRATION_PAYLOAD = "integration_payload"
     COVERAGE_LEDGER = "coverage_ledger"
+    # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
+    REASONING = "reasoning"
 
 
 class RedactionStatus(StrEnum):
@@ -333,6 +336,7 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    hunter_provider: str | None = None
     trigger_input: str | None = None
     scrubber_hits: int = 0
     triage_label: TriageLabel | None = None
@@ -378,6 +382,29 @@ class Report(BaseModel):
 
 
 class WorkflowEvent(BaseModel):
+    """An observable event emitted during a scan workflow.
+
+    ``event_type`` is a dot-namespaced string. Known types:
+
+    Stage-grained (existing):
+      ``scan.started``, ``scan.completed``, ``scan.failed``, ``stage.completed``
+
+    Finding-grained (existing):
+      ``finding.candidate``, ``finding.validated``, ``finding.promoted``
+
+    Iteration-grained (ADR-020 / Week 13 addendum):
+      ``agent.action_proposed`` — emitted per proposed action after the vagueness check.
+        Payload: ``agent_kind``, ``iteration``, ``tool_name``, ``reasoning_summary``
+        (hypothesis, scrubbed), ``check_result`` (passed/failed), ``reasoning_retries``.
+      ``agent.reasoning_rejected`` — emitted when a retry is consumed or the loop halts
+        with ``reasoning_rejected``. Payload: ``agent_kind``, ``iteration``, ``tool_name``,
+        ``failed_checks``, ``retries_remaining``.
+
+    All ``agent.*`` payloads are scrubbed before emission. Raw ``args`` and full reasoning
+    text are never included in the payload; only the scrubbed ``reasoning_summary`` (hypothesis
+    only) and structural metadata appear.
+    """
+
     id: str
     scan_id: str
     workspace_id: str
@@ -413,7 +440,8 @@ class ValidationResult(BaseModel):
     checks_run: list[str] = Field(default_factory=_empty_strings)
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     model_invocation_id: str | None = None
-    cross_vendor: bool = False
+    cross_vendor: bool = False  # deprecated alias; use cross_vendor_disagreement
+    cross_vendor_disagreement: bool = False
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -631,6 +659,10 @@ class ToolInvocation(BaseModel):
     stderr_ref: ArtifactRef | None = None
     started_at: datetime
     completed_at: datetime | None = None
+    # ADR-020: accepted action reasoning (scrubbed hypothesis inlined for fast display;
+    # full ActionReasoning stored as an artifact via reasoning_ref).
+    reasoning_summary: str | None = None
+    reasoning_ref: ArtifactRef | None = None
 
 
 class FindingProvenance(BaseModel):
@@ -871,11 +903,19 @@ class AgentStep(BaseModel):
         "prove",
         "trace",
         "gapfill",
+        "dynamic_validate",
     ]
     iteration: int
     tool_calls: list[str] = Field(default_factory=_empty_strings)
     model_invocation_id: str
     estimated_cost: float = 0.0
+    # ADR-020: artifact IDs of ActionReasoning objects that were rejected this iteration.
+    # Enables audit of "what did the agent try to justify before getting it right?"
+    rejected_reasoning_refs: list[str] = Field(default_factory=_empty_strings)
+    # ADR-020: scrubbed hypothesis of the first *accepted* ProposedAction in this iteration.
+    # None when the iteration had no proposed_actions (e.g. a pure tool-execution turn or
+    # when the iteration ended in reasoning_rejected before any action was accepted).
+    reasoning_summary: str | None = None
 
 
 def _empty_agent_steps() -> list[AgentStep]:
@@ -894,7 +934,164 @@ class AgentLoopResult(BaseModel):
         "max_iterations",
         "budget_exceeded",
         "guard_triggered",
+        # ADR-020: all reasoning_max_retries for an action consumed; loop halted.
+        "reasoning_rejected",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Action reasoning and vagueness-guard schemas (ADR-020 / Week 13 addendum)
+# ---------------------------------------------------------------------------
+
+
+class ActionReasoning(BaseModel):
+    """Structured intent the agent must provide for every proposed tool call.
+
+    Four non-optional slots force specificity by construction: a model that cannot
+    fill ``target_ref`` with a concrete locator has no concrete locator to report.
+    All fields are scrubbed before persistence, logging, and TUI display.
+
+    Note: this describes *tool-call intent*, not *finding justification*.
+    ``CandidateFinding.reasoning`` (finding justification) is validator-blind;
+    ``ActionReasoning`` is operator-visible but never sent to any model role.
+    """
+
+    hypothesis: str
+    """What the agent believes and is testing RIGHT NOW (e.g. 'reflected XSS via `q`)."""
+
+    target_ref: str
+    """Concrete locator: URL path, param name, or file:line (e.g. 'GET /search?q=')."""
+
+    expected_evidence: str
+    """The specific observable signal that confirms or denies the hypothesis."""
+
+    why_this_tool: str
+    """Why this particular tool + args advances the hypothesis over other options."""
+
+
+class ProposedAction(BaseModel):
+    """An action the agent loop proposes to execute, with mandatory structured reasoning.
+
+    ``reasoning`` is required on every proposal. The loop's vagueness guard
+    (``check_vague_reasoning`` in ``guards.py``) inspects it deterministically
+    before any tool is executed.
+
+    This class lives in ``quarry.schemas`` and is re-exported from
+    ``quarry_models.validation`` for back-compat with code that imported it there.
+    """
+
+    kind: str
+    """Checked against ROLE_ALLOWED_ACTION_KINDS[role] before execution."""
+
+    tool_name: str
+    """The tool to call (matches a registered tool in the ToolRunner registry)."""
+
+    args: dict[str, Any] = Field(default_factory=dict)
+    """Tool-specific arguments (raw, before scrubbing)."""
+
+    reasoning: ActionReasoning
+    """MANDATORY structured reasoning — missing or partial reasoning is rejected."""
+
+
+class ReasoningCheckResult(BaseModel):
+    """Result of the deterministic vagueness guard over a ProposedAction's reasoning.
+
+    ``passed=True`` means the action may proceed to execution.
+    ``passed=False`` triggers a re-prompt (up to ``reasoning_max_retries`` times)
+    before the loop halts with ``stop_reason='reasoning_rejected'``.
+    """
+
+    passed: bool
+    failed_checks: list[str] = Field(default_factory=list)
+    """Names of sub-checks that failed: 'presence', 'context_reference', 'lexicon', 'args_coherence'."""
+
+    detail: str = ""
+    """Human-readable feedback rendered into the re-prompt (via the vague_reasoning.j2 template)."""
+
+
+# ---------------------------------------------------------------------------
+# Validator-independence boundary (ADR-021 / Week 13)
+# ---------------------------------------------------------------------------
+
+class ValidatorClaim(BaseModel):
+    """The subset of a CandidateFinding the validator is allowed to receive.
+
+    Contains only claim fields: file location, vuln_class, and the finding
+    description. Hunter reasoning, provider, tool trace, and model name are
+    intentionally excluded to preserve the adversarial-review design.
+    """
+
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    vuln_class: VulnerabilityClass
+    description: str
+    affected_code_snippet: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Live-dynamic validation schemas (ADR-017 / Week 13 schema-only)
+# ---------------------------------------------------------------------------
+
+# Patterns that look like inline credentials; auth_profile must never carry them.
+_CREDENTIAL_RE = re.compile(
+    r"^(sk-[A-Za-z0-9\-_]{8,}|ghp_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]{10,})$"
+)
+
+
+class TargetEndpoint(BaseModel):
+    """The single host:port the egress policy permits for live dynamic validation."""
+
+    host: str
+    port: int
+    scheme: Literal["http", "https"] = "http"
+    base_path: str = "/"
+
+
+class HttpRequestSpec(BaseModel):
+    """The HTTP request a dynamic_validate or prove agent proposes.
+
+    Carries no inline secrets; auth_profile references a named credential from
+    Target.auth_config_ref, never an inline token.
+    """
+
+    method: Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("auth_profile")
+    @classmethod
+    def _reject_inline_credential(cls, v: str | None) -> str | None:
+        if v is not None and _CREDENTIAL_RE.match(v):
+            msg = (
+                f"auth_profile looks like an inline credential: '{v[:12]}…'. "
+                "Use a named credential reference, never an inline token."
+            )
+            raise ValueError(msg)
+        return v
+
+
+class HttpResponseCapture(BaseModel):
+    """Captured HTTP response; body stored as an artifact, not inline."""
+
+    status_code: int
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_artifact_ref: str  # ArtifactRef id for the scrubbed, size-limited body
+    elapsed_ms: int
+    scrubber_hits: int = 0
+    redaction_status: RedactionStatus
+
+
+class DynamicEvidenceLink(BaseModel):
+    """Source-to-dynamic provenance chain: white-box anchor → HTTP round-trip → finding."""
+
+    source_ref: SourceRef
+    attack_surface_item_id: str | None = None
+    request_artifact_id: str
+    response_artifact_id: str
+    candidate_finding_id: str
 
 
 def local_scan_profile(

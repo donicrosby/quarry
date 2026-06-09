@@ -33,6 +33,7 @@ dev = [
   "pyright>=1.1.401",
   "pytest>=8.3.5",
   "pytest-asyncio>=0.26.0",
+  "pytest-xdist>=3.6.0",
   "ruff>=0.11.12",
 ]
 
@@ -71,6 +72,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+addopts = "-n auto"
 filterwarnings = ["error::ResourceWarning"]
 
 [tool.pyright]

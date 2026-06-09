@@ -1,0 +1,15 @@
+<!-- QUARRY:PART:developer -->
+Your proposed action for `{{ tool_name }}` was rejected because the reasoning did not meet the specificity requirement.
+
+Failed checks: {{ failed_checks | join(", ") }}
+
+{{ detail }}
+
+To proceed, revise your reasoning for `{{ tool_name }}` to include:
+- A **concrete hypothesis** naming the specific vulnerability and a locator (URL path, file:line, or parameter name).
+- A **target_ref** that is a concrete locator: a URL path like `/search?q=`, a file reference like `src/auth.py:42`, or a backtick-quoted parameter name like `` `id` ``.
+- **Expected evidence**: the specific observable signal that would confirm or deny your hypothesis (not "it works" or "confirmed").
+- **Why this tool**: a specific reason why `{{ tool_name }}` advances your hypothesis over other options.
+
+Do not repeat generic phrases like "test the exploit", "check the endpoint", or "see what happens".
+Retries remaining: {{ retries_remaining }}.

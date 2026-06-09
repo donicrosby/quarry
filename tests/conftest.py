@@ -23,6 +23,9 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from quarry_activities.coverage import build_coverage_ledger_activity
+from quarry_activities.dedup import deduplicate_activity
+from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.validate import validate_activity
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.dynamic_validation import (
@@ -108,6 +111,9 @@ async def temporal_worker(
             recon_synthesis_activity,
             emit_agent_tasks,
             hunt_activity,
+            validate_activity,
+            gapfill_activity,
+            deduplicate_activity,
         ],
         activity_executor=executor,
         graceful_shutdown_timeout=timedelta(seconds=5),

@@ -1,0 +1,11 @@
+{
+  "kind": "read_file",
+  "tool_name": "read_file",
+  "args": {"path": "src/auth.py"},
+  "reasoning": {
+    "hypothesis": "Command injection via unsanitized shell argument in src/auth.py exec call",
+    "target_ref": "src/auth.py:run_command",
+    "expected_evidence": "subprocess.Popen or os.system call receiving user input without shlex.quote",
+    "why_this_tool": "read_file inspects the source to confirm whether user input reaches the shell call"
+  }
+}

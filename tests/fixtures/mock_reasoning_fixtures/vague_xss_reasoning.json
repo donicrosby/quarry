@@ -1,0 +1,11 @@
+{
+  "kind": "http_request",
+  "tool_name": "http_request",
+  "args": {"method": "GET", "path": "/search?q=test"},
+  "reasoning": {
+    "hypothesis": "test the exploit",
+    "target_ref": "search",
+    "expected_evidence": "it works",
+    "why_this_tool": "see what happens"
+  }
+}

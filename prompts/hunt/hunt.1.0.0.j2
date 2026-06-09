@@ -47,7 +47,9 @@ entry_points:
 {% endfor %}</target_content>
 
 <!-- QUARRY:PART:output_schema -->
-Return a JSON object with a single key "findings" containing a list of CandidateFinding objects. Each object must include:
+Return a JSON object with these keys:
+
+"findings": list of CandidateFinding objects, each with:
   - vuln_class: string (the vulnerability class you were asked to hunt)
   - title: short descriptive title
   - hypothesis: one sentence explaining why this location is suspicious
@@ -56,4 +58,16 @@ Return a JSON object with a single key "findings" containing a list of Candidate
   - severity: "low", "medium", "high", or "critical"
   - source_refs: list of {repo, file, start_line, end_line, snippet} objects
 
-If you found no evidence, return {"findings": []}.
+"tool_calls": list of tool calls you want to make (empty list when done).
+
+"proposed_actions": list of proposed tool actions WITH structured reasoning. Each entry must have:
+  - kind: the action kind (e.g. "read_file", "grep", "http_request")
+  - tool_name: the tool name (same as kind for most tools)
+  - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe and are testing RIGHT NOW (≥4 words, names the vuln class + location)
+      - target_ref: a CONCRETE locator — URL path like "/search?q=", file like "src/auth.py:42", or param like "`id`"
+      - expected_evidence: the specific observable signal that confirms/denies (NOT "it works" or "confirmed")
+      - why_this_tool: why this tool advances the hypothesis (NOT "see what happens")
+
+If you found no evidence, return {"findings": [], "tool_calls": [], "proposed_actions": []}.
