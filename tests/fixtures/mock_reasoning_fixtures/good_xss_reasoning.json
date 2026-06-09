@@ -1,0 +1,11 @@
+{
+  "kind": "http_request",
+  "tool_name": "http_request",
+  "args": {"method": "GET", "path": "/search?q=<script>alert(1)</script>"},
+  "reasoning": {
+    "hypothesis": "Reflected XSS via the `q` param in /search endpoint — template renders q unescaped",
+    "target_ref": "GET /search?q=",
+    "expected_evidence": "<script>alert(1)</script> echoed verbatim and unescaped in response body",
+    "why_this_tool": "http_request sends the crafted payload to the live target to confirm reflection"
+  }
+}

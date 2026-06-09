@@ -1,0 +1,11 @@
+{
+  "kind": "http_request",
+  "tool_name": "http_request",
+  "args": {"method": "GET", "path": "/admin/users"},
+  "reasoning": {
+    "hypothesis": "IDOR via `id` param in /profile endpoint — user can access other users",
+    "target_ref": "GET /profile?id=",
+    "expected_evidence": "Response contains another user's data when id is changed",
+    "why_this_tool": "http_request sends crafted request to /profile?id= to confirm IDOR"
+  }
+}
