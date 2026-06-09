@@ -120,8 +120,10 @@ def create_app(no_worker: bool | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     from quarry_server.routers import health
+    from quarry_server.routers.events import router as events_router
     from quarry_server.routers.scans import router as scans_router
 
     app.include_router(health.router)
     app.include_router(scans_router)
+    app.include_router(events_router)
     return app

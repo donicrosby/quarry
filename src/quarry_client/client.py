@@ -14,6 +14,7 @@ from quarry.schemas import (
     Scan,
     ScanSummary,
     VulnerabilityClass,
+    WorkflowEvent,
 )
 
 FindingsResponse = dict[str, list[CandidateFinding] | list[FinalFinding]]
@@ -155,6 +156,42 @@ class QuarryClient:
         response = await self._client.get(f"/scans/{scan_id}/integrations")
         response.raise_for_status()
         return [IntegrationRun.model_validate(item) for item in _json_list(response)]
+
+    async def poll_events(
+        self,
+        scan_id: str,
+        event_types: list[str] | None = None,
+        after_id: str | None = None,
+        limit: int = 100,
+    ) -> list[WorkflowEvent]:
+        """Poll the events endpoint for iteration-grained agent events.
+
+        Parameters
+        ----------
+        scan_id:
+            Scan to query.
+        event_types:
+            Filter patterns (e.g. ['agent.action_proposed', 'agent.*']).
+            ``agent.*`` matches all events starting with ``agent.``.
+        after_id:
+            Cursor (exclusive) for pagination.
+        limit:
+            Maximum rows to return.
+
+        Returns
+        -------
+        list[WorkflowEvent]
+            Matching events ordered by created_at.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if event_types:
+            params["event_types"] = event_types
+        if after_id:
+            params["after_id"] = after_id
+
+        response = await self._client.get(f"/scans/{scan_id}/events", params=params)
+        response.raise_for_status()
+        return [WorkflowEvent.model_validate(item) for item in _json_list(response)]
 
 
 def _json_object(response: httpx.Response) -> dict[str, Any]:
