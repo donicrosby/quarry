@@ -20,8 +20,24 @@ languages: {{ languages | join(", ") }}
 {% endfor %}</target_content>
 
 <!-- QUARRY:PART:output_schema -->
-Return a JSON object with the following fields:
-  - entry_points: list of {repo, file, function, kind} objects (kind: http_handler, cli_arg, main, fuzz_harness, library_export, message_handler, or unknown)
-  - responsibility: one-sentence description of what this subsystem does
-  - notes: any architectural observations worth recording (empty string if none)
-  - tool_calls: list of {tool, inputs} if you need more information, or [] for final answer
+Return a JSON object with these keys:
+
+"entry_points": list of {repo, file, function, kind} objects (kind: http_handler, cli_arg, main, fuzz_harness, library_export, message_handler, or unknown)
+
+"responsibility": one-sentence description of what this subsystem does
+
+"notes": any architectural observations worth recording (empty string if none)
+
+"tool_calls": list of tool calls you want to make (empty list when done).
+
+"proposed_actions": list of proposed tool actions WITH structured reasoning. Each entry must have:
+  - kind: the action kind (e.g. "read_file", "list_dir")
+  - tool_name: the tool name (same as kind for most tools)
+  - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe about this subsystem and are testing (≥4 words)
+      - target_ref: a CONCRETE path — e.g. "src/routes/index.js" or "src/controllers/"
+      - expected_evidence: the specific thing you expect to find (NOT "find entry points")
+      - why_this_tool: why this tool reveals the subsystem's entry points or structure
+
+If you have enough information, return with tool_calls=[] and proposed_actions=[].

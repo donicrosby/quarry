@@ -912,6 +912,10 @@ class AgentStep(BaseModel):
     # ADR-020: artifact IDs of ActionReasoning objects that were rejected this iteration.
     # Enables audit of "what did the agent try to justify before getting it right?"
     rejected_reasoning_refs: list[str] = Field(default_factory=_empty_strings)
+    # ADR-020: scrubbed hypothesis of the first *accepted* ProposedAction in this iteration.
+    # None when the iteration had no proposed_actions (e.g. a pure tool-execution turn or
+    # when the iteration ended in reasoning_rejected before any action was accepted).
+    reasoning_summary: str | None = None
 
 
 def _empty_agent_steps() -> list[AgentStep]:

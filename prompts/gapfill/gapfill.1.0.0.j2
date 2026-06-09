@@ -40,11 +40,24 @@ coverage_ledger:
 </target_content>
 
 <!-- QUARRY:PART:output_schema -->
-Return a JSON object with:
-  - gaps: list of gap objects. Each gap must include:
-      - vuln_class: string (from the requested classes)
-      - scope: string (file path prefix or area to investigate)
-      - reason: string explaining why this area needs investigation
+Return a JSON object with these keys:
 
-If coverage is adequate, return {"gaps": []}.
-Example: {"gaps": [{"vuln_class": "xss", "scope": "src/views/", "reason": "Template rendering not examined"}], "tool_calls": []}
+"gaps": list of gap objects. Each gap must include:
+  - vuln_class: string (from the requested classes)
+  - scope: string (file path prefix or area to investigate)
+  - reason: string explaining why this area needs investigation
+
+"tool_calls": list of tool calls you want to make (empty list when done).
+
+"proposed_actions": list of proposed tool actions WITH structured reasoning. Each entry must have:
+  - kind: the action kind (e.g. "read_file", "grep")
+  - tool_name: the tool name (same as kind for most tools)
+  - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe and are testing RIGHT NOW (≥4 words, names the vuln class + location)
+      - target_ref: a CONCRETE locator — file like "src/routes/users.js" or area like "src/views/"
+      - expected_evidence: the specific observable signal that confirms/denies (NOT "check coverage")
+      - why_this_tool: why this tool identifies the coverage gap (NOT "see what happens")
+
+If coverage is adequate, return {"gaps": [], "tool_calls": [], "proposed_actions": []}.
+Example: {"gaps": [{"vuln_class": "xss", "scope": "src/views/", "reason": "Template rendering not examined"}], "tool_calls": [], "proposed_actions": []}

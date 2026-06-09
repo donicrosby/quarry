@@ -153,6 +153,10 @@ def run_agent_loop(
         # ── ADR-020 reasoning re-prompt sub-loop ────────────────────────────
         # Re-prompt turns do NOT advance ``iteration`` (the real-iteration counter).
         reasoning_retries = 0
+        # Collect refs for reasoning that was rejected and reprompted this iteration.
+        reprompt_rejected_refs: list[str] = []
+        # Scrubbed hypothesis of the first accepted ProposedAction (if any).
+        accepted_reasoning_summary: str | None = None
         while True:
             request = ModelRequest(
                 task_name=f"{role}-loop",
@@ -230,6 +234,10 @@ def run_agent_loop(
 
                     # Re-prompt: render feedback (ADR-019 — all text in .j2)
                     reasoning_retries += 1
+                    # Record this rejection for audit (simplified ref — no ArtifactStore yet).
+                    reprompt_rejected_refs.append(
+                        f"rejected-reasoning:{failed_action.tool_name}:{iteration}:{reasoning_retries}"
+                    )
                     feedback = _render_vague_feedback(
                         failed_checks=list(failed_check_result.failed_checks),
                         detail=failed_check_result.detail,
@@ -239,7 +247,12 @@ def run_agent_loop(
                     history.append(ModelMessage(role="user", content=feedback))
                     continue  # re-prompt this turn (does NOT advance iteration)
 
-            # All proposed_actions passed the guard (or there were none)
+            # All proposed_actions passed the guard (or there were none).
+            # Capture the scrubbed hypothesis of the first accepted action.
+            if proposed_actions:
+                accepted_reasoning_summary = scrub(
+                    proposed_actions[0].reasoning.hypothesis
+                ).text
             break
         # ── End of reasoning re-prompt sub-loop ─────────────────────────────
 
@@ -261,6 +274,8 @@ def run_agent_loop(
                 tool_calls=step_tool_names,
                 model_invocation_id=str(uuid.uuid4()),
                 estimated_cost=cost_per_iteration,
+                rejected_reasoning_refs=reprompt_rejected_refs,
+                reasoning_summary=accepted_reasoning_summary,
             )
         )
 

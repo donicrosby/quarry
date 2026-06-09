@@ -42,12 +42,25 @@ claim:
 </target_content>
 
 <!-- QUARRY:PART:output_schema -->
-Return a JSON object with:
-  - verdict: one of "validated", "rejected", or "needs_proof"
-      - "validated": the code confirms the reported vulnerability
-      - "rejected": the code does not support the reported vulnerability
-      - "needs_proof": the vulnerability is plausible but static analysis is insufficient
-  - reasons: list of strings explaining your verdict (cite file/line evidence)
+Return a JSON object with these keys:
 
-If you need to read files first, include tool_calls before returning your verdict.
-Example final response: {"verdict": "validated", "reasons": ["Line 42 passes unsanitized req.query.cmd to exec()"], "tool_calls": []}
+"verdict": one of "validated", "rejected", or "needs_proof"
+  - "validated": the code confirms the reported vulnerability
+  - "rejected": the code does not support the reported vulnerability
+  - "needs_proof": the vulnerability is plausible but static analysis is insufficient
+
+"reasons": list of strings explaining your verdict (cite file/line evidence)
+
+"tool_calls": list of tool calls you want to make (empty list when done).
+
+"proposed_actions": list of proposed tool actions WITH structured reasoning. Each entry must have:
+  - kind: the action kind (e.g. "read_file", "grep")
+  - tool_name: the tool name (same as kind for most tools)
+  - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe and are testing RIGHT NOW (≥4 words, names the vuln class + location)
+      - target_ref: a CONCRETE locator — file like "src/auth.py:42" or param like "`cmd`"
+      - expected_evidence: the specific observable signal that confirms/denies (NOT "it works" or "confirmed")
+      - why_this_tool: why this tool advances the hypothesis (NOT "see what happens")
+
+Example final response: {"verdict": "validated", "reasons": ["Line 42 passes unsanitized req.query.cmd to exec()"], "tool_calls": [], "proposed_actions": []}
