@@ -16,6 +16,8 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError
 
+from quarry.schemas import CandidateFinding
+from quarry.schemas import ValidatorClaim as ValidatorClaim  # re-export
 from quarry_models.redaction import scrub
 
 # Action kinds each role may legitimately propose. Anything not listed is rejected
@@ -32,6 +34,9 @@ ROLE_ALLOWED_ACTION_KINDS: dict[str, frozenset[str]] = {
     "trace": frozenset({"read"}),
     "report": frozenset({"summarize"}),
     "integration": frozenset({"deliver_finalized"}),
+    # dynamic_validate: live HTTP corroboration (ADR-017). read_file + grep for
+    # static analysis; http_request for live corroboration against the target.
+    "dynamic_validate": frozenset({"http_request", "read_file", "grep"}),
 }
 
 
@@ -102,3 +107,57 @@ def _check_actions(payload: dict[str, Any], role: str) -> GuardRejection | None:
                 f"role '{role}' may not propose action kind '{action.kind}'",
             )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Validator-independence boundary (ADR-021)
+# ---------------------------------------------------------------------------
+
+
+def _parse_file_and_lines(
+    affected_component: str | None,
+) -> tuple[str | None, int | None, int | None]:
+    """Extract (file, line_start, line_end) from 'path/file.js:42-55' notation."""
+    if not affected_component:
+        return None, None, None
+
+    # Strip leading/trailing whitespace
+    component = affected_component.strip()
+
+    # Try 'file:start-end' or 'file:start'
+    import re  # noqa: PLC0415
+
+    m = re.match(r"^(.+?):(\d+)(?:-(\d+))?$", component)
+    if m:
+        file_path = m.group(1)
+        start = int(m.group(2))
+        end = int(m.group(3)) if m.group(3) else start
+        return file_path, start, end
+
+    # No line numbers — just a file path
+    return component, None, None
+
+
+def validate_claim_from_finding(finding: CandidateFinding) -> "ValidatorClaim":
+    """Build a ValidatorClaim from a CandidateFinding.
+
+    Only the claim fields defined in ADR-021 are included:
+      - file, line_start, line_end (parsed from affected_component)
+      - vuln_class
+      - description (= hypothesis)
+      - affected_code_snippet (None for now; populated when snippet is attached)
+
+    Deliberately excluded:
+      - reasoning / hunter tool trace
+      - hunter_provider / hunter model name
+      - any other CandidateFinding provenance field
+    """
+    file_path, line_start, line_end = _parse_file_and_lines(finding.affected_component)
+    return ValidatorClaim(
+        file=file_path,
+        line_start=line_start,
+        line_end=line_end,
+        vuln_class=finding.vuln_class,
+        description=finding.hypothesis,
+        affected_code_snippet=None,
+    )

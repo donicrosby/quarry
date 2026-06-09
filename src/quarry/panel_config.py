@@ -43,6 +43,9 @@ DEFAULT_PANEL: dict[str, RoleConfig] = {
     "prove": RoleConfig(provider="mock", model="mock-v1", rpm=30),
     "trace": RoleConfig(provider="mock", model="mock-v1", rpm=30),
     "report": RoleConfig(provider="mock", model="mock-v1", rpm=30),
+    # dynamic_validate: live corroboration role (ADR-017). Separate from static
+    # validate to keep the network-free adversarial-review boundary intact.
+    "dynamic_validate": RoleConfig(provider="mock", model="mock-v1", rpm=30),
 }
 
 

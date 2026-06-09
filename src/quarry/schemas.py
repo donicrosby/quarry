@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -333,6 +334,7 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    hunter_provider: str | None = None
     trigger_input: str | None = None
     scrubber_hits: int = 0
     triage_label: TriageLabel | None = None
@@ -871,6 +873,7 @@ class AgentStep(BaseModel):
         "prove",
         "trace",
         "gapfill",
+        "dynamic_validate",
     ]
     iteration: int
     tool_calls: list[str] = Field(default_factory=_empty_strings)
@@ -895,6 +898,91 @@ class AgentLoopResult(BaseModel):
         "budget_exceeded",
         "guard_triggered",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Validator-independence boundary (ADR-021 / Week 13)
+# ---------------------------------------------------------------------------
+
+class ValidatorClaim(BaseModel):
+    """The subset of a CandidateFinding the validator is allowed to receive.
+
+    Contains only claim fields: file location, vuln_class, and the finding
+    description. Hunter reasoning, provider, tool trace, and model name are
+    intentionally excluded to preserve the adversarial-review design.
+    """
+
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    vuln_class: VulnerabilityClass
+    description: str
+    affected_code_snippet: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Live-dynamic validation schemas (ADR-017 / Week 13 schema-only)
+# ---------------------------------------------------------------------------
+
+# Patterns that look like inline credentials; auth_profile must never carry them.
+_CREDENTIAL_RE = re.compile(
+    r"^(sk-[A-Za-z0-9\-_]{8,}|ghp_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]{10,})$"
+)
+
+
+class TargetEndpoint(BaseModel):
+    """The single host:port the egress policy permits for live dynamic validation."""
+
+    host: str
+    port: int
+    scheme: Literal["http", "https"] = "http"
+    base_path: str = "/"
+
+
+class HttpRequestSpec(BaseModel):
+    """The HTTP request a dynamic_validate or prove agent proposes.
+
+    Carries no inline secrets; auth_profile references a named credential from
+    Target.auth_config_ref, never an inline token.
+    """
+
+    method: Literal["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: str | None = None
+    auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("auth_profile")
+    @classmethod
+    def _reject_inline_credential(cls, v: str | None) -> str | None:
+        if v is not None and _CREDENTIAL_RE.match(v):
+            msg = (
+                f"auth_profile looks like an inline credential: '{v[:12]}…'. "
+                "Use a named credential reference, never an inline token."
+            )
+            raise ValueError(msg)
+        return v
+
+
+class HttpResponseCapture(BaseModel):
+    """Captured HTTP response; body stored as an artifact, not inline."""
+
+    status_code: int
+    headers: dict[str, str] = Field(default_factory=dict)
+    body_artifact_ref: str  # ArtifactRef id for the scrubbed, size-limited body
+    elapsed_ms: int
+    scrubber_hits: int = 0
+    redaction_status: RedactionStatus
+
+
+class DynamicEvidenceLink(BaseModel):
+    """Source-to-dynamic provenance chain: white-box anchor → HTTP round-trip → finding."""
+
+    source_ref: SourceRef
+    attack_surface_item_id: str | None = None
+    request_artifact_id: str
+    response_artifact_id: str
+    candidate_finding_id: str
 
 
 def local_scan_profile(
