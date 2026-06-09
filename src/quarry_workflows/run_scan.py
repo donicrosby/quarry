@@ -64,10 +64,13 @@ COMPLETED_STAGE_ORDER = {
     "RECON": 2,
     "HUNT": 3,
     "VALIDATION": 4,
-    "COVERAGE": 5,
-    "REPORT": 6,
-    "INTEGRATING": 7,
-    "COMPLETED": 8,
+    "AGENTIC_VALIDATE": 5,   # Week 13: adversarial validate stage
+    "GAPFILL": 6,            # Week 13: coverage floor + agentic gap detection
+    "DEDUP": 7,              # Week 13: deterministic + agentic dedup
+    "COVERAGE": 8,
+    "REPORT": 9,
+    "INTEGRATING": 10,
+    "COMPLETED": 11,
 }
 
 
@@ -422,6 +425,136 @@ class RunScanWorkflow:
                             )
 
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
+
+        # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
+        # Adversarial review of each CandidateFinding (ADR-021).
+        # Each finding is reviewed independently with the 'validate' role.
+        # The validator receives only ValidatorClaim fields — no hunter provenance.
+        if not _stage_completed(completed_stage, "AGENTIC_VALIDATE"):
+            self._current_stage = "AGENTIC_VALIDATE"
+            for candidate in list(candidate_findings):
+                if candidate.triage_label == "oos":
+                    continue  # skip OOS findings
+                await workflow.execute_activity(
+                    "validate-candidate-finding",
+                    args=[candidate.model_dump(mode="json"), scan_input.repo_path, None, None],
+                    start_to_close_timeout=timedelta(minutes=5),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=ACTIVITY_RETRY_POLICY,
+                )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "AGENTIC_VALIDATE")
+            await _append_workflow_event(
+                scan_input.db_path, scan.id, "agentic_validate.completed",
+                {"candidate_count": str(len(candidate_findings))},
+            )
+
+        # ── GAPFILL stage ────────────────────────────────────────────────────
+        # Coverage floor enforcement + agentic gap detection (ADR-021).
+        # Gapfill tasks re-enter the hunt stage as a second pass.
+        gapfill_tasks: list[AgentTask] = []
+        if not _stage_completed(completed_stage, "GAPFILL"):
+            self._current_stage = "GAPFILL"
+            focused_classes = [vc.value for vc in scan.profile.vuln_classes]
+
+            # Build a minimal coverage ledger for the gapfill stage.
+            # build_coverage_ledger is a pure function; safe to call in workflow code.
+            ledger = build_coverage_ledger(
+                scan_id=scan.id,
+                workspace_id="local",
+                requested_vuln_classes=scan.profile.vuln_classes,
+                completed_vuln_classes=[],
+                attack_surface_items_total=len(agent_tasks),
+                attack_surface_items_scanned=len(agent_tasks),
+                skipped_items=[],
+            )
+
+            gapfill_result: list[Any] = cast(
+                list[Any],
+                await workflow.execute_activity(
+                    "gapfill-coverage",
+                    args=[
+                        ledger.model_dump(mode="json"),
+                        [t.model_dump(mode="json") for t in agent_tasks],
+                        focused_classes,
+                        scan_input.repo_path,
+                        None,
+                    ],
+                    start_to_close_timeout=timedelta(minutes=5),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=ACTIVITY_RETRY_POLICY,
+                ),
+            )
+
+            for task_dict in cast(list[dict[str, Any]], gapfill_result):
+                task = AgentTask.model_validate(task_dict)
+                gapfill_tasks.append(task)
+
+            # Gapfill tasks re-enter the hunt stage (second pass)
+            if gapfill_tasks:
+                runnable_gapfill = [
+                    t for t in gapfill_tasks
+                    if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
+                ]
+                max_concurrent = scan_input.hunt_max_concurrent
+                semaphore_gf = asyncio.Semaphore(max_concurrent)
+
+                async def _run_one_gapfill_hunt(task: AgentTask) -> list[dict[str, Any]]:
+                    async with semaphore_gf:
+                        return cast(
+                            list[dict[str, Any]],
+                            await workflow.execute_activity(
+                                "hunt-vuln-class",
+                                args=[task, scan_input.repo_path, 8, None],
+                                start_to_close_timeout=timedelta(minutes=10),
+                                heartbeat_timeout=timedelta(seconds=60),
+                                retry_policy=ACTIVITY_RETRY_POLICY,
+                            ),
+                        )
+
+                gapfill_hunt_results = await asyncio.gather(
+                    *[_run_one_gapfill_hunt(t) for t in runnable_gapfill]
+                )
+                for task_findings in gapfill_hunt_results:
+                    for finding_dict in task_findings:
+                        candidate = CandidateFinding.model_validate(finding_dict)
+                        candidate_findings.append(candidate)
+
+            await _persist_scan_stage(scan_input.db_path, scan.id, "GAPFILL")
+            await _append_workflow_event(
+                scan_input.db_path, scan.id, "gapfill.completed",
+                {"gapfill_task_count": str(len(gapfill_tasks))},
+            )
+
+        # ── DEDUP stage ──────────────────────────────────────────────────────
+        # Deterministic clustering by root_cause_key + agentic merge for
+        # ambiguous clusters (plan: week-13.md algorithm).
+        if not _stage_completed(completed_stage, "DEDUP"):
+            self._current_stage = "DEDUP"
+            pre_dedup_count = len(candidate_findings)
+            dedup_result: list[Any] = cast(
+                list[Any],
+                await workflow.execute_activity(
+                    "deduplicate-findings",
+                    args=[
+                        [f.model_dump(mode="json") for f in candidate_findings],
+                        scan_input.repo_path,
+                        None,
+                    ],
+                    start_to_close_timeout=timedelta(minutes=5),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=ACTIVITY_RETRY_POLICY,
+                ),
+            )
+            deduped_dicts = cast(list[dict[str, Any]], dedup_result)
+            candidate_findings = [CandidateFinding.model_validate(d) for d in deduped_dicts]
+            await _persist_scan_stage(scan_input.db_path, scan.id, "DEDUP")
+            await _append_workflow_event(
+                scan_input.db_path, scan.id, "dedup.completed",
+                {
+                    "before": str(pre_dedup_count),
+                    "after": str(len(candidate_findings)),
+                },
+            )
 
         self._current_stage = "COVERAGE"
         coverage_ledger_json = await self._record_coverage(
