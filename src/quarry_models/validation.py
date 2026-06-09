@@ -17,6 +17,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ValidationError
 
 from quarry.schemas import CandidateFinding
+from quarry.schemas import ProposedAction as ProposedAction  # re-export (moved to schemas in ADR-020)
 from quarry.schemas import ValidatorClaim as ValidatorClaim  # re-export
 from quarry_models.redaction import scrub
 
@@ -40,13 +41,13 @@ ROLE_ALLOWED_ACTION_KINDS: dict[str, frozenset[str]] = {
 }
 
 
-class ProposedAction(BaseModel):
-    kind: str
-    tool: str | None = None
-    host: str | None = None
-    command: str | None = None
-    target_id: str | None = None
-    reason: str | None = None
+# ProposedAction was defined here through week 12. It moved to quarry.schemas in ADR-020
+# (week 13 addendum) to gain the mandatory ActionReasoning field. It is re-exported above
+# so existing callers `from quarry_models.validation import ProposedAction` keep working.
+#
+# The _check_actions guard below validates action kind from model output JSON, which uses
+# the old "kind" field name. The new ProposedAction in schemas.py also has "kind", so
+# the guard continues to work correctly.
 
 
 @dataclass
