@@ -7,6 +7,8 @@ in test/dev; LiteLLM in production).
 
 from __future__ import annotations
 
+import contextvars
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -14,11 +16,11 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity
 
-from quarry.panel_config import DEFAULT_PANEL, RoleConfig, resolve_panel
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec
+from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.builtins import BUILTIN_REGISTRY
@@ -52,9 +54,31 @@ def recon_subsystem_activity(
         ``build_model_client``.  Defaults to ``None`` which uses the mock
         provider, keeping tests and CI unaffected.
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=20):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _recon_subsystem_impl(assignment, repo_root, scan_id, budget_spec, panel_json)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _recon_subsystem_impl(
+    assignment: SubsystemAssignment | dict,  # type: ignore[type-arg]
+    repo_root: Path | str,
+    scan_id: str,
+    budget_spec: BudgetSpec | None,
+    panel_json: str | None,
+) -> Subsystem:
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
 
@@ -77,6 +101,7 @@ def recon_subsystem_activity(
         recon_role = DEFAULT_PANEL["recon"]
     provider = recon_role.provider
 
+    policy: ProviderPolicy | None = None
     if provider == Provider.MOCK:
         client = build_model_client(
             Provider.MOCK,
@@ -89,6 +114,7 @@ def recon_subsystem_activity(
         )
     else:
         client = build_model_client(provider)
+        policy = ProviderPolicy(provider=recon_role.provider.value, model=recon_role.model)
 
     registry = get_registry()
     rendered = build_prompt(
@@ -119,6 +145,7 @@ def recon_subsystem_activity(
         budget_spec=budget_spec,
         response_model=_SubsystemAnalysis,
         max_iterations=12,
+        provider_policy=policy,
     )
 
     # Parse entry points from the final answer

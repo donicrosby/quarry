@@ -18,29 +18,29 @@ hunt_max_concurrent = 2
 
 # --------------------------------------------------------------------------
 # Chutes panel — different model family per role for cross-vendor disagreement.
-# recon  : GLM-4.6  (ZAI / light reasoning model for architecture analysis)
-# hunt   : DeepSeek-V3  (strong code/security reasoning)
-# validate: Qwen3-235B  (different vendor family → cross_vendor_disagreement)
-# gapfill : Kimi-K2  (moonshotai, additive gap detection)
+# recon  : DeepSeek-V3.2  (reliable structured JSON output for architecture analysis)
+# hunt   : Qwen3-32B  (different vendor family from DeepSeek)
+# validate: Kimi-K2.6  (moonshotai family → cross_vendor_disagreement vs Qwen)
+# gapfill : DeepSeek-V3.2  (Qwen3-235B-Thinking gave ChutesException; back to DeepSeek)
 # dedup reuses the gapfill role config (same toolset, no separate entry needed)
 # --------------------------------------------------------------------------
 
 [panels.chutes.roles.recon]
 provider = "litellm"
-model    = "chutes/zai-org/GLM-4.6-FP8"
+model    = "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
 rpm      = 30
 
 [panels.chutes.roles.hunt]
 provider = "litellm"
-model    = "chutes/deepseek-ai/DeepSeek-V3-0324"
+model    = "chutes/Qwen/Qwen3-32B-TEE"
 rpm      = 20
 
 [panels.chutes.roles.validate]
 provider = "litellm"
-model    = "chutes/Qwen/Qwen3-235B-A22B"
+model    = "chutes/moonshotai/Kimi-K2.6-TEE"
 rpm      = 20
 
 [panels.chutes.roles.gapfill]
 provider = "litellm"
-model    = "chutes/moonshotai/Kimi-K2-Instruct"
+model    = "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
 rpm      = 20

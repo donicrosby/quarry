@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import DataTable, Header
+from textual.widgets import DataTable, Footer, Header
 
 from quarry.schemas import AttackSurfaceItem
 from quarry_client.client import QuarryClient
@@ -30,6 +30,7 @@ class AttackSurfaceScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield RouteTable([])
+        yield Footer()
 
     async def on_mount(self) -> None:
         try:

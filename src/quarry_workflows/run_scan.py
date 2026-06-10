@@ -274,8 +274,8 @@ class RunScanWorkflow:
                     workflow.execute_activity(
                         "recon-subsystem",
                         args=[a, scan_input.repo_path, scan.id, None, recon_panel_json],
-                        start_to_close_timeout=timedelta(minutes=5),
-                        heartbeat_timeout=timedelta(seconds=30),
+                        start_to_close_timeout=timedelta(minutes=15),
+                        heartbeat_timeout=timedelta(minutes=3),
                         retry_policy=ACTIVITY_RETRY_POLICY,
                     )
                     for a in assignments
@@ -373,8 +373,8 @@ class RunScanWorkflow:
                     return await workflow.execute_activity(
                         "hunt-vuln-class",
                         args=[task, scan_input.repo_path, 12, budget_cap, hunt_panel_json],
-                        start_to_close_timeout=timedelta(minutes=10),
-                        heartbeat_timeout=timedelta(seconds=60),
+                        start_to_close_timeout=timedelta(minutes=20),
+                        heartbeat_timeout=timedelta(minutes=3),
                         retry_policy=ACTIVITY_RETRY_POLICY,
                     )
 
@@ -463,8 +463,8 @@ class RunScanWorkflow:
                         None,
                         validate_panel_json,
                     ],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(minutes=15),
+                    heartbeat_timeout=timedelta(minutes=3),
                     retry_policy=ACTIVITY_RETRY_POLICY,
                 )
             await _persist_scan_stage(scan_input.db_path, scan.id, "AGENTIC_VALIDATE")
@@ -482,7 +482,7 @@ class RunScanWorkflow:
             focused_classes = [vc.value for vc in scan.profile.vuln_classes]
 
             # Build a minimal coverage ledger for the gapfill stage.
-            # build_coverage_ledger is a pure function; safe to call in workflow code.
+            # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
             ledger = build_coverage_ledger(
                 scan_id=scan.id,
                 workspace_id="local",
@@ -491,6 +491,8 @@ class RunScanWorkflow:
                 attack_surface_items_total=len(agent_tasks),
                 attack_surface_items_scanned=len(agent_tasks),
                 skipped_items=[],
+                id=str(workflow.uuid4()),
+                created_at=workflow.now(),
             )
 
             gapfill_panel_json = _panel_json_for_role(scan, "gapfill")
@@ -506,8 +508,8 @@ class RunScanWorkflow:
                         None,
                         gapfill_panel_json,
                     ],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(minutes=20),
+                    heartbeat_timeout=timedelta(minutes=3),
                     retry_policy=ACTIVITY_RETRY_POLICY,
                 ),
             )
@@ -533,7 +535,7 @@ class RunScanWorkflow:
                                 "hunt-vuln-class",
                                 args=[task, scan_input.repo_path, 8, None, hunt_panel_json],
                                 start_to_close_timeout=timedelta(minutes=10),
-                                heartbeat_timeout=timedelta(seconds=60),
+                                heartbeat_timeout=timedelta(minutes=3),
                                 retry_policy=ACTIVITY_RETRY_POLICY,
                             ),
                         )
@@ -570,8 +572,8 @@ class RunScanWorkflow:
                         None,
                         dedup_panel_json,
                     ],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(minutes=15),
+                    heartbeat_timeout=timedelta(minutes=3),
                     retry_policy=ACTIVITY_RETRY_POLICY,
                 ),
             )

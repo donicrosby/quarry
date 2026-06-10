@@ -233,6 +233,19 @@ def _exit_server_not_reachable(settings: QuarrySettings) -> NoReturn:
 
 @app.command("worker")
 def worker() -> None:
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-30s %(levelname)s %(message)s",
+        force=True,
+    )
+    # Suppress noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("temporalio").setLevel(logging.WARNING)
+
     from quarry_worker.main import main
 
     main()
@@ -252,6 +265,18 @@ def server(
     import uvicorn
 
     from quarry.config import QuarrySettings
+
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-30s %(levelname)s %(message)s",
+        force=True,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("temporalio").setLevel(logging.WARNING)
 
     settings = QuarrySettings()
     os.environ["QUARRY_SERVER_NO_WORKER"] = "1" if no_worker else "0"

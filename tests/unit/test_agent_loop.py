@@ -244,3 +244,97 @@ def test_no_provider_policy_leaves_default(tmp_path: Path) -> None:
     # Default ProviderPolicy has provider=None, model=None
     assert received_policies[0].provider is None
     assert received_policies[0].model is None
+
+
+# ---------------------------------------------------------------------------
+# ToolCallRequest normaliser — open models use varied field names
+# ---------------------------------------------------------------------------
+
+
+def test_tool_call_request_normalises_name_args() -> None:
+    """name/args (OpenAI-style) → tool/inputs."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate({"name": "list_dir", "args": {"path": "."}})
+    assert r.tool == "list_dir"
+    assert r.inputs == {"path": "."}
+
+
+def test_tool_call_request_normalises_kind_tool_name() -> None:
+    """kind/tool_name/inputs (DeepSeek/recon-prompt style) → tool/inputs."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate(
+        {"kind": "read_file", "tool_name": "read_file", "inputs": {"path": "app.py"}}
+    )
+    assert r.tool == "read_file"
+    assert r.inputs == {"path": "app.py"}
+
+
+def test_tool_call_request_normalises_function_parameters() -> None:
+    """function/parameters → tool/inputs."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate({"function": "grep", "parameters": {"pattern": "TODO"}})
+    assert r.tool == "grep"
+    assert r.inputs == {"pattern": "TODO"}
+
+
+def test_tool_call_request_canonical_form_unchanged() -> None:
+    """tool/inputs pass through without modification."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate({"tool": "list_dir", "inputs": {"path": "."}})
+    assert r.tool == "list_dir"
+    assert r.inputs == {"path": "."}
+
+
+def test_tool_call_request_bare_string() -> None:
+    """Bare string 'read_file' → {"tool": "read_file", "inputs": {}}."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate("read_file")
+    assert r.tool == "read_file"
+    assert r.inputs == {}
+
+
+def test_tool_call_request_missing_inputs_defaults_empty() -> None:
+    """Dict with tool but no inputs/args defaults inputs to {}."""
+    from quarry_models.loop import ToolCallRequest
+    r = ToolCallRequest.model_validate({"tool": "list_dir"})
+    assert r.tool == "list_dir"
+    assert r.inputs == {}
+
+
+# ---------------------------------------------------------------------------
+# Tool call error handling — KeyError/TypeError returns error string to model
+# ---------------------------------------------------------------------------
+
+
+def test_tool_call_error_continues_as_error_message(tmp_path: Path) -> None:
+    """When runner.run raises KeyError, loop returns error text and continues."""
+    from quarry_models.loop import ToolCallRequest
+
+    call_count = [0]
+
+    class _ErrorThenDoneClient:
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: request a tool call that will fail
+                return type("R", (), {"parsed": response_model(
+                    result="pending",
+                    tool_calls=[ToolCallRequest(tool="read_file", inputs={})],  # missing 'path'
+                )})()
+            # Second call: return final answer (model saw the error)
+            return type("R", (), {"parsed": response_model(result="done", tool_calls=[])})()
+
+    runner = _make_runner(tmp_path)
+    result = run_agent_loop(
+        client=_ErrorThenDoneClient(),  # type: ignore[arg-type]
+        role="recon",
+        agent_kind="subsystem",
+        system_prompt="analyze",
+        initial_user_message="go",
+        runner=runner,
+        budget_spec=BudgetSpec(max_cost_usd=10.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+    )
+    assert result.stop_reason == "final_answer"
+    assert call_count[0] == 2

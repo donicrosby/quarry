@@ -9,6 +9,8 @@ All model calls happen inside this Temporal activity, never in workflow code.
 
 from __future__ import annotations
 
+import contextvars
+import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -168,9 +170,31 @@ def validate_activity(
     is used unchanged; when provider is LITELLM a real ``LiteLLMModelClient`` is built
     and the ``provider_policy`` is threaded through the agent loop.
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=30):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _validate_activity_impl(finding, repo_path, panel, budget_cap_usd, panel_json)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _validate_activity_impl(
+    finding: CandidateFinding | dict[str, Any],
+    repo_path: str,
+    panel: dict[str, Any] | None,
+    budget_cap_usd: float | None,
+    panel_json: str | None,
+) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
 
@@ -199,8 +223,5 @@ def validate_activity(
         budget_spec=budget_spec,
         provider_policy=policy,
     )
-
-    with suppress(RuntimeError):
-        activity.heartbeat()
 
     return result.model_dump(mode="json")

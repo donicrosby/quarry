@@ -8,6 +8,8 @@ All model calls happen here (inside a Temporal activity), never in workflow code
 
 from __future__ import annotations
 
+import contextvars
+import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -185,9 +187,31 @@ def hunt_activity(
     ``provider_policy`` (provider + model) is threaded through the agent loop so
     that ``resolve_provider_model`` picks up the Chutes model string.
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=30):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _hunt_activity_impl(task, repo_path, max_iterations, budget_cap_usd, panel_json)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _hunt_activity_impl(
+    task: AgentTask | dict[str, Any],
+    repo_path: str,
+    max_iterations: int,
+    budget_cap_usd: float | None,
+    panel_json: str | None,
+) -> list[dict[str, Any]]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
 

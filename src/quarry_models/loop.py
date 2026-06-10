@@ -27,10 +27,13 @@ ADR-020 re-prompt sub-loop:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+_log = logging.getLogger(__name__)
 
 from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction
 from quarry_models.guards import check_leaked_secret, check_schema_mismatch, check_vague_reasoning
@@ -43,6 +46,33 @@ class ToolCallRequest(BaseModel):
 
     tool: str
     inputs: dict[str, Any]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_fields(cls, data: Any) -> Any:
+        """Accept open-model variants.
+
+        Handles: bare strings ("read_file"), name/kind/tool_name→tool,
+        args/arguments/parameters→inputs, and missing inputs defaults to {}.
+        """
+        if isinstance(data, str):
+            return {"tool": data, "inputs": {}}
+        if not isinstance(data, dict):
+            return data
+        d: dict[str, Any] = dict(data)
+        if "tool" not in d:
+            for alt in ("name", "tool_name", "kind", "function"):
+                if alt in d:
+                    d["tool"] = d[alt]
+                    break
+        if "inputs" not in d:
+            for alt in ("args", "arguments", "parameters", "input"):
+                if alt in d:
+                    d["inputs"] = d[alt]
+                    break
+        if "inputs" not in d:
+            d["inputs"] = {}
+        return d
 
 
 def _wrap_tool_result(tool_name: str, output: str) -> str:
@@ -168,8 +198,10 @@ def run_agent_loop(
             if provider_policy is not None:
                 req_kwargs["provider_policy"] = provider_policy
             request = ModelRequest(**req_kwargs)  # type: ignore[arg-type]
+            _log.info("[%s turn=%d] → model", agent_kind, iteration)
             response = client.complete_structured(request, response_model)
             parsed = response.parsed
+            _log.info("[%s turn=%d] ← %s", agent_kind, iteration, parsed.model_dump_json(exclude_none=True)[:400])
 
             # Guard: schema mismatch
             if check_schema_mismatch(parsed, response_model):
@@ -289,6 +321,7 @@ def run_agent_loop(
             total_cost += float(response.estimated_cost)
 
         if not tool_calls:
+            _log.info("[%s turn=%d] final answer", agent_kind, iteration)
             # No tool calls → final answer
             final_answer = parsed
             return AgentLoopResult(
@@ -300,10 +333,20 @@ def run_agent_loop(
             )
 
         # Execute tool calls and append results to history
+        _log.info("[%s turn=%d] tools: %s", agent_kind, iteration, step_tool_names)
         tool_results: list[str] = []
         for tc in tool_calls:
-            record = runner.run(tc.tool, tc.inputs)
-            output_text = record.output
+            try:
+                record = runner.run(tc.tool, tc.inputs)
+                output_text = record.output
+            except (KeyError, TypeError, ValueError, FileNotFoundError) as exc:
+                _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
+                # Return a descriptive error so the model can retry with correct args.
+                tool_results.append(
+                    f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
+                    f"Please retry with valid arguments."
+                )
+                continue
 
             # Guard: leaked secret in tool output
             if check_leaked_secret(output_text):
@@ -317,7 +360,9 @@ def run_agent_loop(
 
             tool_results.append(_wrap_tool_result(tc.tool, output_text))
 
-        history.append(ModelMessage(role="assistant", content=f"Tool calls: {step_tool_names}"))
+        # Record the model's actual JSON response so open models don't echo our
+        # synthetic summary string back on the next turn.
+        history.append(ModelMessage(role="assistant", content=parsed.model_dump_json()))
         history.append(ModelMessage(role="user", content="\n\n".join(tool_results)))
 
         # Budget check after executing tools

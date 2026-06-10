@@ -13,6 +13,8 @@ See ADR-021 and week-13.md for the coverage floor specification.
 
 from __future__ import annotations
 
+import contextvars
+import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -179,9 +181,32 @@ def gapfill_activity(
 
     Returns a list of AgentTask dicts (JSON-serialisable at the Temporal boundary).
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=30):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _gapfill_activity_impl(ledger, existing_tasks, vuln_classes, repo_path, budget_cap_usd, panel_json)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _gapfill_activity_impl(
+    ledger: CoverageLedger | dict[str, Any],
+    existing_tasks: list[dict[str, Any]] | None,
+    vuln_classes: list[str] | None,
+    repo_path: str,
+    budget_cap_usd: float | None,
+    panel_json: str | None,
+) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
 
@@ -231,8 +256,5 @@ def gapfill_activity(
         budget_spec=budget_spec,
         provider_policy=policy,
     )
-
-    with suppress(RuntimeError):
-        activity.heartbeat()
 
     return [t.model_dump(mode="json") for t in result]

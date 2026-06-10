@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.message import Message
 from textual.screen import Screen
-from textual.widgets import DataTable, Header
+from textual.widgets import DataTable, Footer, Header
 
 from quarry.schemas import CandidateFinding, FinalFinding
 from quarry_client.client import QuarryClient
@@ -34,6 +34,7 @@ class FindingsScreen(Screen[None]):
         table = DataTable[str](id="findings-table")
         table.add_columns("Severity", "Class", "Title", "Component", "Fingerprint")
         yield table
+        yield Footer()
 
     async def on_mount(self) -> None:
         table = self.query_one(DataTable[str])

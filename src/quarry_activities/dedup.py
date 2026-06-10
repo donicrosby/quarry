@@ -16,6 +16,8 @@ Findings with root_cause_key=None are each treated as their own singleton
 
 from __future__ import annotations
 
+import contextvars
+import threading
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -179,9 +181,30 @@ def deduplicate_activity(
 
     Returns a list of CandidateFinding dicts (JSON-serialisable at the Temporal boundary).
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=30):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _deduplicate_activity_impl(candidates, repo_path, budget_cap_usd, panel_json)
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _deduplicate_activity_impl(
+    candidates: list[dict[str, Any]] | None,
+    repo_path: str,
+    budget_cap_usd: float | None,
+    panel_json: str | None,
+) -> list[dict[str, Any]]:
     parsed: list[CandidateFinding] = []
     if candidates:
         for c in candidates:
@@ -216,8 +239,5 @@ def deduplicate_activity(
         scan_log=scan_log,
         provider_policy=policy,
     )
-
-    with suppress(RuntimeError):
-        activity.heartbeat()
 
     return [f.model_dump(mode="json") for f in result]

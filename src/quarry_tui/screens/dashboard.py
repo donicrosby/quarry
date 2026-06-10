@@ -2,7 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.message import Message
-from textual.widgets import DataTable, Header, Static
+from textual.widgets import DataTable, Footer, Header, Label, Static
 
 from quarry_client.client import QuarryClient
 
@@ -19,6 +19,7 @@ class Dashboard(Static):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        yield Label("↑/↓ navigate  Enter open  q quit  ? help", id="hint")
         table = DataTable[str](id="scan-table")
         table.add_columns("Scan ID", "Status", "Events", "Report", "Repository", "Error")
         yield table

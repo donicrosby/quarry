@@ -8,10 +8,13 @@ synchronous (`litellm.completion`) to match Quarry's sync-activity rule, run at
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, cast
 
 import litellm
+
+_log = logging.getLogger(__name__)
 from pydantic import BaseModel
 
 from quarry.schemas import ModelInvocation, RedactionStatus
@@ -43,6 +46,7 @@ class LiteLLMModelClient:
         )
 
         content = _content(completion)
+        _log.debug("raw response [%s/%s]: %s", provider, model, content[:600])
         parsed = response_model.model_validate_json(_extract_json(content))
         token_input, token_output, cached = normalize_usage(_usage_dict(completion))
         redaction_status = (
