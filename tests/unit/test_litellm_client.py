@@ -79,3 +79,62 @@ def test_normalize_usage_anthropic_shape() -> None:
         "cache_read_input_tokens": 128,
     }
     assert normalize_usage(usage) == (200, 40, 128)
+
+
+# ---------------------------------------------------------------------------
+# _extract_json — fence-tolerant JSON extraction (Change 1)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_bare() -> None:
+    from quarry_models.litellm_client import _extract_json
+
+    raw = json.dumps({"title": "bare", "hypothesis": "direct"})
+    assert _extract_json(raw) == raw
+
+
+def test_extract_json_fenced_json() -> None:
+    from quarry_models.litellm_client import _extract_json
+
+    inner = json.dumps({"title": "fenced", "hypothesis": "wrapped"})
+    fenced = f"```json\n{inner}\n```"
+    assert _extract_json(fenced) == inner
+
+
+def test_extract_json_fenced_no_lang() -> None:
+    from quarry_models.litellm_client import _extract_json
+
+    inner = json.dumps({"title": "nolang", "hypothesis": "also wrapped"})
+    fenced = f"```\n{inner}\n```"
+    assert _extract_json(fenced) == inner
+
+
+def test_extract_json_with_prose() -> None:
+    from quarry_models.litellm_client import _extract_json
+
+    inner = json.dumps({"title": "prose", "hypothesis": "surrounded"})
+    with_prose = f"Here is my analysis:\n{inner}\nPlease use this output."
+    result = _extract_json(with_prose)
+    # Should contain valid parseable JSON
+    assert json.loads(result) == {"title": "prose", "hypothesis": "surrounded"}
+
+
+def test_extract_json_junk_passes_through() -> None:
+    from quarry_models.litellm_client import _extract_json
+
+    junk = "this is not json at all"
+    # Returns original text; validation error happens downstream
+    assert _extract_json(junk) == junk
+
+
+def test_complete_structured_handles_fenced_json() -> None:
+    """complete_structured must parse JSON wrapped in a ```json fence."""
+    inner = json.dumps({"title": "Secret", "hypothesis": "hardcoded"})
+    fenced = f"```json\n{inner}\n```"
+    usage = {"prompt_tokens": 100, "completion_tokens": 20}
+    with patch("litellm.completion", return_value=_fake_completion(fenced, usage)):
+        client = LiteLLMModelClient()
+        response = client.complete_structured(_request(), HuntOutput)
+
+    assert response.parsed.title == "Secret"
+    assert response.parsed.hypothesis == "hardcoded"

@@ -18,13 +18,15 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity
 
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     CandidateFinding,
+    Provider,
     ValidationResult,
-    VulnerabilityClass,
 )
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec
+from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_models.validation import validate_claim_from_finding
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -48,6 +50,7 @@ def _validate_impl(
     max_iterations: int = 8,
     budget_spec: BudgetSpec | None = None,
     cost_per_iteration: float = 0.0,
+    provider_policy: ProviderPolicy | None = None,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -102,6 +105,7 @@ def _validate_impl(
         response_model=_ValidateResponse,
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
+        provider_policy=provider_policy,
     )
 
     # Parse the ternary verdict from the loop result
@@ -153,10 +157,16 @@ def validate_activity(
     repo_path: str,
     panel: dict[str, Any] | None = None,
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
     Returns a ValidationResult dict (JSON-serialisable at the Temporal boundary).
+
+    *panel_json*, if provided, is a serialised ``RoleConfig`` for the validate role
+    and takes priority over *panel*.  When provider is MOCK the existing mock client
+    is used unchanged; when provider is LITELLM a real ``LiteLLMModelClient`` is built
+    and the ``provider_policy`` is threaded through the agent loop.
     """
     with suppress(RuntimeError):
         activity.heartbeat()
@@ -164,12 +174,22 @@ def validate_activity(
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
 
-    from quarry.panel_config import DEFAULT_PANEL  # noqa: PLC0415
     from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
 
     active_panel: dict[str, Any] = panel if panel is not None else dict(DEFAULT_PANEL)
-    client = MockModelClient(default=_ValidateResponse())
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
+
+    if panel_json is not None:
+        role_cfg = RoleConfig.model_validate_json(panel_json)
+    else:
+        role_cfg = DEFAULT_PANEL["validate"]
+
+    if role_cfg.provider == Provider.MOCK:
+        client: Any = MockModelClient(default=_ValidateResponse())
+        policy: ProviderPolicy | None = None
+    else:
+        client = build_model_client(role_cfg.provider)
+        policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     result = _validate_impl(
         finding=finding,
@@ -177,6 +197,7 @@ def validate_activity(
         panel=active_panel,
         client=client,
         budget_spec=budget_spec,
+        provider_policy=policy,
     )
 
     with suppress(RuntimeError):

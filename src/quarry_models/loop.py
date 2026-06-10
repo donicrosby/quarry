@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction
 from quarry_models.guards import check_leaked_secret, check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
-from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest
+from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest, ProviderPolicy
 
 
 class ToolCallRequest(BaseModel):
@@ -63,7 +63,7 @@ def _render_vague_feedback(
     variables to the template renderer.
     """
     from quarry_prompts import get_registry  # noqa: PLC0415
-    from quarry_prompts.build_prompt import build_prompt, strip_provenance_header  # noqa: PLC0415
+    from quarry_prompts.build_prompt import build_prompt  # noqa: PLC0415
 
     registry = get_registry()
     try:
@@ -104,6 +104,7 @@ def run_agent_loop(
     cost_per_iteration: float = 0.0,
     reasoning_max_retries: int = 2,
     task_context: dict[str, Any] | None = None,
+    provider_policy: ProviderPolicy | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -158,12 +159,15 @@ def run_agent_loop(
         # Scrubbed hypothesis of the first accepted ProposedAction (if any).
         accepted_reasoning_summary: str | None = None
         while True:
-            request = ModelRequest(
-                task_name=f"{role}-loop",
-                scan_id="loop",
-                role=role,  # type: ignore[arg-type]
-                messages=list(history),
-            )
+            req_kwargs: dict[str, Any] = {
+                "task_name": f"{role}-loop",
+                "scan_id": "loop",
+                "role": role,
+                "messages": list(history),
+            }
+            if provider_policy is not None:
+                req_kwargs["provider_policy"] = provider_policy
+            request = ModelRequest(**req_kwargs)  # type: ignore[arg-type]
             response = client.complete_structured(request, response_model)
             parsed = response.parsed
 

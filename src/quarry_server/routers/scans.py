@@ -13,11 +13,13 @@ from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
 from quarry.config import QuarrySettings
+from quarry.panel_config import load_quarry_config, resolve_panel
 from quarry.schemas import (
     AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
+    ModelPanelEntry,
     Scan,
     ScanStatus,
 )
@@ -42,6 +44,23 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
     temporal_client = cast(Client, request.app.state.temporal_client)
     settings = _settings_from_request(request)
     scan_id = str(uuid4())
+
+    # Resolve the panel outside the workflow (sandboxed code cannot do I/O).
+    # load_quarry_config reads quarry.toml from cwd or ~/.config/quarry/quarry.toml.
+    quarry_config = load_quarry_config()
+    resolved = resolve_panel(quarry_config, settings.panel)
+    panel_entries = [
+        ModelPanelEntry(
+            id=str(uuid4()),
+            scan_id=scan_id,
+            role=role,
+            provider=cfg.provider.value,
+            model=cfg.model,
+            rate_limit_rpm=cfg.rpm,
+        )
+        for role, cfg in resolved.items()
+    ]
+
     await temporal_client.start_workflow(
         "RunScanWorkflow",
         RunScanInput(
@@ -51,6 +70,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             output_dir=body.output_dir,
             target_url=body.target_url,
             vuln_classes=list(body.vuln_classes),
+            panel_entries=panel_entries,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

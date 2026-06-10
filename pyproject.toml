@@ -9,6 +9,7 @@ description = "Local-first agentic vulnerability research harness."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "botocore>=1.43.26",
   "fastapi>=0.115.13",
   "httpx>=0.28.1",
   "jinja2>=3.1.6",
@@ -33,6 +34,7 @@ dev = [
   "pyright>=1.1.401",
   "pytest>=8.3.5",
   "pytest-asyncio>=0.26.0",
+  "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.0",
   "ruff>=0.11.12",
 ]
@@ -73,6 +75,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-n auto"
+timeout = 300
 filterwarnings = ["error::ResourceWarning"]
 
 [tool.pyright]

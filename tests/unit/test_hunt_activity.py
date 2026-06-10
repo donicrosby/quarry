@@ -30,7 +30,7 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
-from quarry_activities.hunt import _hunt_impl
+from quarry_activities.hunt import _hunt_impl, hunt_activity
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec
@@ -358,3 +358,72 @@ def test_hunt_activity_scrubbed_tool_output_reaches_model(
     second_request_text = "\n".join(m.content for m in captured_requests[1].messages)
     assert RAW_VALUE not in second_request_text, "Raw secret must not reach the model"
     assert "REDACTED_SECRET" in second_request_text, "Scrubbed marker must appear"
+
+
+# ---------------------------------------------------------------------------
+# Panel-aware client selection (Change 3)
+# ---------------------------------------------------------------------------
+
+
+def test_hunt_activity_mock_panel_uses_mock_client(tmp_path: Path) -> None:
+    """With provider=mock in panel_json, hunt_activity must use MockModelClient."""
+    import json
+    from unittest.mock import patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+
+    panel_json = RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30).model_dump_json()
+
+    task = _make_task()
+
+    with patch("quarry_activities.hunt.build_model_client") as mock_build:
+        # Ensure mock path is taken — build_model_client should NOT be called
+        hunt_activity(task.model_dump(mode="json"), str(tmp_path), 2, None, panel_json)
+
+    # build_model_client is NOT called when provider is MOCK (mock is built directly)
+    mock_build.assert_not_called()
+
+
+def test_hunt_activity_litellm_panel_builds_litellm_client(tmp_path: Path) -> None:
+    """With provider=litellm in panel_json, hunt_activity must call build_model_client."""
+    from unittest.mock import MagicMock, patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_models.types import ProviderPolicy
+
+    panel_json = RoleConfig(
+        provider=Provider.LITELLM,
+        model="chutes/deepseek-ai/DeepSeek-V3-0324",
+        rpm=20,
+    ).model_dump_json()
+
+    task = _make_task()
+    fake_client = MagicMock()
+    fake_client.complete_structured.return_value = MagicMock(
+        parsed=MagicMock(findings=[], tool_calls=[]),
+        estimated_cost=0.0,
+    )
+
+    received_policies: list[ProviderPolicy] = []
+
+    def _spy_loop(**kwargs: object) -> object:
+        p = kwargs.get("provider_policy")
+        if isinstance(p, ProviderPolicy):
+            received_policies.append(p)
+        from quarry.schemas import AgentLoopResult
+        return AgentLoopResult(
+            final_answer=None, steps=[], iterations_used=1, total_cost=0.0, stop_reason="final_answer"
+        )
+
+    with (
+        patch("quarry_activities.hunt.build_model_client", return_value=fake_client) as mock_build,
+        patch("quarry_activities.hunt.run_agent_loop", side_effect=_spy_loop),
+    ):
+        hunt_activity(task.model_dump(mode="json"), str(tmp_path), 2, None, panel_json)
+
+    mock_build.assert_called_once()
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/deepseek-ai/DeepSeek-V3-0324"

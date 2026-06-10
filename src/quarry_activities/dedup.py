@@ -16,20 +16,19 @@ Findings with root_cause_key=None are each treated as their own singleton
 
 from __future__ import annotations
 
-import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 from temporalio import activity
 
-from quarry.schemas import CandidateFinding
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
+from quarry.schemas import CandidateFinding, Provider
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec
+from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_prompts import get_registry
-from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.runner import ToolRunner
 
 _MAX_CLUSTER_SIZE = 5
@@ -71,6 +70,7 @@ def _dedup_impl(
     cost_per_iteration: float = 0.0,
     repo_path: str = "",
     scan_log: list[str] | None = None,
+    provider_policy: ProviderPolicy | None = None,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
@@ -154,6 +154,7 @@ def _dedup_impl(
             response_model=_DedupeResponse,
             max_iterations=max_iterations,
             cost_per_iteration=cost_per_iteration,
+            provider_policy=provider_policy,
         )
 
         if loop_result.final_answer and isinstance(loop_result.final_answer, _DedupeResponse):
@@ -172,6 +173,7 @@ def deduplicate_activity(
     candidates: list[dict[str, Any]] | None = None,
     repo_path: str = "",
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: deduplicate CandidateFindings by root_cause_key.
 
@@ -190,7 +192,19 @@ def deduplicate_activity(
 
     from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
 
-    client = MockModelClient(default=_DedupeResponse())
+    role_cfg = (
+        RoleConfig.model_validate_json(panel_json)
+        if panel_json is not None
+        else DEFAULT_PANEL["gapfill"]  # dedup reuses the gapfill toolset
+    )
+
+    if role_cfg.provider == Provider.MOCK:
+        client: Any = MockModelClient(default=_DedupeResponse())
+        policy: ProviderPolicy | None = None
+    else:
+        client = build_model_client(role_cfg.provider)
+        policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
     scan_log: list[str] = []
 
@@ -200,6 +214,7 @@ def deduplicate_activity(
         budget_spec=budget_spec,
         repo_path=repo_path,
         scan_log=scan_log,
+        provider_policy=policy,
     )
 
     with suppress(RuntimeError):

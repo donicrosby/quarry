@@ -171,3 +171,76 @@ def test_steps_are_recorded(tmp_path: Path) -> None:
     step = result.steps[0]
     assert isinstance(step, AgentStep)
     assert step.agent_kind == "synthesis"
+
+
+# ---------------------------------------------------------------------------
+# provider_policy threading (Change 2)
+# ---------------------------------------------------------------------------
+
+
+def test_provider_policy_reaches_model_request(tmp_path: Path) -> None:
+    """provider_policy passed to run_agent_loop must appear on each ModelRequest."""
+    from quarry_models.types import ProviderPolicy
+
+    received_policies: list[ProviderPolicy] = []
+
+    class _PolicySpyClient:
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            received_policies.append(request.provider_policy)
+            # Return final answer immediately
+            return type(
+                "Resp",
+                (),
+                {"parsed": response_model(result="done", tool_calls=[]), "estimated_cost": 0.0},
+            )()
+
+    policy = ProviderPolicy(provider="litellm", model="chutes/deepseek-ai/DeepSeek-V3-0324")
+    result = run_agent_loop(
+        client=_PolicySpyClient(),  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="analyze",
+        initial_user_message="go",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=10.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+        provider_policy=policy,
+    )
+    assert result.stop_reason == "final_answer"
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/deepseek-ai/DeepSeek-V3-0324"
+
+
+def test_no_provider_policy_leaves_default(tmp_path: Path) -> None:
+    """When provider_policy is omitted the ModelRequest uses the empty default."""
+    from quarry_models.types import ProviderPolicy
+
+    received_policies: list[ProviderPolicy] = []
+
+    class _DefaultPolicyClient:
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            received_policies.append(request.provider_policy)
+            return type(
+                "Resp",
+                (),
+                {"parsed": response_model(result="done", tool_calls=[]), "estimated_cost": 0.0},
+            )()
+
+    run_agent_loop(
+        client=_DefaultPolicyClient(),  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="analyze",
+        initial_user_message="go",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=10.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+        # provider_policy omitted
+    )
+    assert len(received_policies) == 1
+    # Default ProviderPolicy has provider=None, model=None
+    assert received_policies[0].provider is None
+    assert received_policies[0].model is None

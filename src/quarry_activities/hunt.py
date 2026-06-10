@@ -18,18 +18,21 @@ from pydantic import BaseModel
 from temporalio import activity
 
 from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     AgentTask,
     CandidateFinding,
     Confidence,
+    Provider,
     Severity,
     SourceRef,
     VulnerabilityClass,
 )
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
+from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
-from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolRunner
 
 
@@ -106,6 +109,7 @@ def _hunt_impl(
     budget_spec: BudgetSpec,
     client: Any,
     cost_per_iteration: float = 0.0,
+    provider_policy: ProviderPolicy | None = None,
 ) -> list[CandidateFinding]:
     """Core hunt implementation — callable from the activity and from tests."""
     from quarry_tools.registry import load_registry
@@ -149,6 +153,7 @@ def _hunt_impl(
         response_model=_HuntResponse,
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
+        provider_policy=provider_policy,
     )
 
     findings: list[CandidateFinding] = []
@@ -167,11 +172,18 @@ def hunt_activity(
     repo_path: str,
     max_iterations: int = 12,
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
     Returns a list of CandidateFinding dicts (JSON-serializable at the Temporal
     boundary).  The caller (workflow) converts them back to CandidateFinding objects.
+
+    *panel_json*, if provided, is a serialised ``RoleConfig`` for the hunt role.
+    When provider is MOCK (the default), the existing mock client is used unchanged.
+    When provider is LITELLM, a real ``LiteLLMModelClient`` is built and the
+    ``provider_policy`` (provider + model) is threaded through the agent loop so
+    that ``resolve_provider_model`` picks up the Chutes model string.
     """
     with suppress(RuntimeError):
         activity.heartbeat()
@@ -179,9 +191,21 @@ def hunt_activity(
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
 
-    from quarry_models.mock_client import MockModelClient
+    from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
 
-    client = MockModelClient(default=_HuntResponse())
+    role_cfg = (
+        RoleConfig.model_validate_json(panel_json)
+        if panel_json is not None
+        else DEFAULT_PANEL["hunt"]
+    )
+
+    if role_cfg.provider == Provider.MOCK:
+        client: Any = MockModelClient(default=_HuntResponse())
+        policy: ProviderPolicy | None = None
+    else:
+        client = build_model_client(role_cfg.provider)
+        policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
     findings = _hunt_impl(
@@ -190,6 +214,7 @@ def hunt_activity(
         max_iterations=max_iterations,
         budget_spec=budget_spec,
         client=client,
+        provider_policy=policy,
     )
 
     return [f.model_dump(mode="json") for f in findings]

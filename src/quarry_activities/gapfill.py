@@ -22,14 +22,17 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity
 
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     AgentTask,
     CoverageLedger,
+    Provider,
     VulnerabilityClass,
 )
 from quarry_models.coverage import enforce_coverage_floor
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec
+from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.runner import ToolRunner
@@ -80,6 +83,7 @@ def _gapfill_impl(
     max_iterations: int = 8,
     budget_spec: BudgetSpec | None = None,
     cost_per_iteration: float = 0.0,
+    provider_policy: ProviderPolicy | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -143,6 +147,7 @@ def _gapfill_impl(
         response_model=_GapfillResponse,
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
+        provider_policy=provider_policy,
     )
 
     # Step 3: Merge agent gaps with floor tasks, deduped by (vuln_class, scope).
@@ -168,6 +173,7 @@ def gapfill_activity(
     vuln_classes: list[str] | None = None,
     repo_path: str = "",
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -200,7 +206,19 @@ def gapfill_activity(
 
     from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
 
-    client = MockModelClient(default=_GapfillResponse())
+    role_cfg = (
+        RoleConfig.model_validate_json(panel_json)
+        if panel_json is not None
+        else DEFAULT_PANEL["gapfill"]
+    )
+
+    if role_cfg.provider == Provider.MOCK:
+        client: Any = MockModelClient(default=_GapfillResponse())
+        policy: ProviderPolicy | None = None
+    else:
+        client = build_model_client(role_cfg.provider)
+        policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
     result = _gapfill_impl(
@@ -211,6 +229,7 @@ def gapfill_activity(
         scan_id=ledger.scan_id,
         client=client,
         budget_spec=budget_spec,
+        provider_policy=policy,
     )
 
     with suppress(RuntimeError):

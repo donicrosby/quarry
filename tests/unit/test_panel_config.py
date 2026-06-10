@@ -160,7 +160,11 @@ def test_resolve_focus_empty_resolved_set_raises() -> None:
 
 
 def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
-    cfg = load_quarry_config(path=tmp_path / "nonexistent.toml")
+    # Pass an empty TOML (no scan_defaults section) so we get the code defaults,
+    # regardless of any quarry.toml in the working directory.
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
     assert cfg.scan_defaults.hunt_max_iterations == 12
     assert cfg.scan_defaults.hunt_max_concurrent == 8
 

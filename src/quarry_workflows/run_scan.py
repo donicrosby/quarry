@@ -16,14 +16,14 @@ from temporalio.exceptions import is_cancelled_exception
 
 from quarry.schemas import (
     AgentTask,
+    ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
-    ArchitectureDoc,
     CandidateFinding,
-    CoverageGap,
     FinalFinding,
     IntegrationRun,
     IntegrationStatus,
+    ModelPanelEntry,
     ProofArtifact,
     RedactionStatus,
     Report,
@@ -31,10 +31,8 @@ from quarry.schemas import (
     Scan,
     ScanManifest,
     ScanStatus,
-    Severity,
     SubsystemAssignment,
     Target,
-    ValidationResult,
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
@@ -78,6 +76,10 @@ def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
 
+def _empty_panel_entries() -> list[ModelPanelEntry]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -89,6 +91,7 @@ class RunScanInput(BaseModel):
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
 
 
 class RunScanResult(BaseModel):
@@ -142,6 +145,11 @@ class RunScanWorkflow:
                 allowed_hosts=["localhost", "127.0.0.1"] if scan_input.target_url else [],
                 created_at=created_at,
             )
+            # Stamp each panel entry with the actual scan_id now that we have it.
+            panel_entries = [
+                e.model_copy(update={"scan_id": scan_id})
+                for e in scan_input.panel_entries
+            ]
             scan = Scan(
                 id=scan_id,
                 workspace_id="local",
@@ -153,6 +161,7 @@ class RunScanWorkflow:
                 ),
                 status=ScanStatus.CREATED,
                 created_at=created_at,
+                panel_snapshot=panel_entries,
                 metadata={
                     "repo_path": scan_input.repo_path,
                     "target_url": scan_input.target_url,
@@ -248,9 +257,14 @@ class RunScanWorkflow:
             )
             recon_panel_json: str | None = None
             if recon_panel_entry is not None:
-                from quarry.panel_config import RoleConfig as _RoleConfig
+                from quarry.panel_config import RoleConfig as _RoleConfig  # noqa: PLC0415
+                from quarry.schemas import Provider as _Provider  # noqa: PLC0415
+                try:
+                    _prov = _Provider(recon_panel_entry.provider)
+                except ValueError:
+                    _prov = _Provider.MOCK
                 recon_panel_json = _RoleConfig(
-                    provider=recon_panel_entry.provider,
+                    provider=_prov,
                     model=recon_panel_entry.model,
                     rpm=recon_panel_entry.rate_limit_rpm,
                 ).model_dump_json()
@@ -321,6 +335,10 @@ class RunScanWorkflow:
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
         proof_artifacts: list[ProofArtifact] = []
+        # Hoist panel JSON before the HUNT conditional so that the gapfill
+        # re-hunt closure (which runs outside the HUNT else-branch) always has a
+        # valid binding regardless of whether HUNT was a fresh run or a resume.
+        hunt_panel_json: str | None = _panel_json_for_role(scan, "hunt")
         if _stage_completed(completed_stage, "HUNT"):
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
@@ -354,7 +372,7 @@ class RunScanWorkflow:
                     )
                     return await workflow.execute_activity(
                         "hunt-vuln-class",
-                        args=[task, scan_input.repo_path, 12, budget_cap],
+                        args=[task, scan_input.repo_path, 12, budget_cap, hunt_panel_json],
                         start_to_close_timeout=timedelta(minutes=10),
                         heartbeat_timeout=timedelta(seconds=60),
                         retry_policy=ACTIVITY_RETRY_POLICY,
@@ -432,12 +450,19 @@ class RunScanWorkflow:
         # The validator receives only ValidatorClaim fields — no hunter provenance.
         if not _stage_completed(completed_stage, "AGENTIC_VALIDATE"):
             self._current_stage = "AGENTIC_VALIDATE"
+            validate_panel_json = _panel_json_for_role(scan, "validate")
             for candidate in list(candidate_findings):
                 if candidate.triage_label == "oos":
                     continue  # skip OOS findings
                 await workflow.execute_activity(
                     "validate-candidate-finding",
-                    args=[candidate.model_dump(mode="json"), scan_input.repo_path, None, None],
+                    args=[
+                        candidate.model_dump(mode="json"),
+                        scan_input.repo_path,
+                        None,
+                        None,
+                        validate_panel_json,
+                    ],
                     start_to_close_timeout=timedelta(minutes=5),
                     heartbeat_timeout=timedelta(seconds=60),
                     retry_policy=ACTIVITY_RETRY_POLICY,
@@ -468,6 +493,7 @@ class RunScanWorkflow:
                 skipped_items=[],
             )
 
+            gapfill_panel_json = _panel_json_for_role(scan, "gapfill")
             gapfill_result: list[Any] = cast(
                 list[Any],
                 await workflow.execute_activity(
@@ -478,6 +504,7 @@ class RunScanWorkflow:
                         focused_classes,
                         scan_input.repo_path,
                         None,
+                        gapfill_panel_json,
                     ],
                     start_to_close_timeout=timedelta(minutes=5),
                     heartbeat_timeout=timedelta(seconds=60),
@@ -504,7 +531,7 @@ class RunScanWorkflow:
                             list[dict[str, Any]],
                             await workflow.execute_activity(
                                 "hunt-vuln-class",
-                                args=[task, scan_input.repo_path, 8, None],
+                                args=[task, scan_input.repo_path, 8, None, hunt_panel_json],
                                 start_to_close_timeout=timedelta(minutes=10),
                                 heartbeat_timeout=timedelta(seconds=60),
                                 retry_policy=ACTIVITY_RETRY_POLICY,
@@ -531,6 +558,8 @@ class RunScanWorkflow:
         if not _stage_completed(completed_stage, "DEDUP"):
             self._current_stage = "DEDUP"
             pre_dedup_count = len(candidate_findings)
+            # dedup reuses the gapfill role config (same toolset, same provider)
+            dedup_panel_json = _panel_json_for_role(scan, "gapfill")
             dedup_result: list[Any] = cast(
                 list[Any],
                 await workflow.execute_activity(
@@ -539,6 +568,7 @@ class RunScanWorkflow:
                         [f.model_dump(mode="json") for f in candidate_findings],
                         scan_input.repo_path,
                         None,
+                        dedup_panel_json,
                     ],
                     start_to_close_timeout=timedelta(minutes=5),
                     heartbeat_timeout=timedelta(seconds=60),
@@ -1083,6 +1113,28 @@ def _integration_runs_from_activity(payload: object) -> list[IntegrationRun]:
         item if isinstance(item, IntegrationRun) else IntegrationRun.model_validate(item)
         for item in items
     ]
+
+
+def _panel_json_for_role(scan: Scan, role: str) -> str | None:
+    """Return a serialised ``RoleConfig`` JSON for *role* from the scan's panel snapshot.
+
+    Returns ``None`` when the snapshot is empty (e.g. in tests that do not pass
+    panel_entries), which causes each activity to fall back to its own DEFAULT_PANEL.
+    """
+    entry = next((e for e in scan.panel_snapshot if e.role == role), None)
+    if entry is None:
+        return None
+    from quarry.panel_config import RoleConfig as _RoleConfig  # noqa: PLC0415
+    from quarry.schemas import Provider as _Provider  # noqa: PLC0415
+    try:
+        provider = _Provider(entry.provider)
+    except ValueError:
+        return None
+    return _RoleConfig(
+        provider=provider,
+        model=entry.model,
+        rpm=entry.rate_limit_rpm,
+    ).model_dump_json()
 
 
 def _persisted_stage(scan: Scan | None) -> str | None:

@@ -8,6 +8,7 @@ synchronous (`litellm.completion`) to match Quarry's sync-activity rule, run at
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 
 import litellm
@@ -42,7 +43,7 @@ class LiteLLMModelClient:
         )
 
         content = _content(completion)
-        parsed = response_model.model_validate_json(content)
+        parsed = response_model.model_validate_json(_extract_json(content))
         token_input, token_output, cached = normalize_usage(_usage_dict(completion))
         redaction_status = (
             RedactionStatus.REDACTED
@@ -76,6 +77,27 @@ class LiteLLMModelClient:
             finish_reason=_finish_reason(completion),
             redaction_status=redaction_status,
         )
+
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
+
+
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences and leading/trailing prose from *text*.
+
+    Tries, in order:
+    1. A ```json ... ``` or ``` ... ``` fence — returns the fence body.
+    2. Braces scan — returns from the first '{' to the last '}'.
+    3. Falls back to the original text unchanged (ValidationError propagates downstream).
+    """
+    m = _FENCE_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
 
 
 def _content(completion: Any) -> str:

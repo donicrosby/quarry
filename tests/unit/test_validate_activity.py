@@ -266,3 +266,67 @@ class TestValidatorIndependenceBoundary:
 
         assert result.candidate_finding_id == finding.id
         assert result.scan_id == finding.scan_id
+
+
+# ---------------------------------------------------------------------------
+# Panel-aware client selection for validate_activity (Change 3)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_activity_mock_panel_does_not_call_build(tmp_path: Path) -> None:
+    """validate_activity with provider=mock must not call build_model_client."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+
+    mock_panel_json = RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30).model_dump_json()
+    finding = _make_finding()
+
+    with patch("quarry_activities.validate.build_model_client") as mock_build:
+        from quarry_activities.validate import validate_activity
+        validate_activity(finding.model_dump(mode="json"), str(tmp_path), None, None, mock_panel_json)
+
+    mock_build.assert_not_called()
+
+
+def test_validate_activity_litellm_panel_builds_litellm_client(tmp_path: Path) -> None:
+    """validate_activity with provider=litellm must call build_model_client and pass policy."""
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_models.types import ProviderPolicy
+
+    litellm_panel_json = RoleConfig(
+        provider=Provider.LITELLM,
+        model="chutes/Qwen/Qwen3-235B-A22B",
+        rpm=20,
+    ).model_dump_json()
+    finding = _make_finding()
+
+    fake_client = MagicMock()
+    received_policies: list[ProviderPolicy] = []
+
+    def _spy_loop(**kwargs: object) -> object:
+        p = kwargs.get("provider_policy")
+        if isinstance(p, ProviderPolicy):
+            received_policies.append(p)
+        from quarry.schemas import AgentLoopResult
+        return AgentLoopResult(
+            final_answer=None, steps=[], iterations_used=1, total_cost=0.0, stop_reason="final_answer"
+        )
+
+    with (
+        patch("quarry_activities.validate.build_model_client", return_value=fake_client) as mock_build,
+        patch("quarry_activities.validate.run_agent_loop", side_effect=_spy_loop),
+    ):
+        from quarry_activities.validate import validate_activity
+        validate_activity(finding.model_dump(mode="json"), str(tmp_path), None, None, litellm_panel_json)
+
+    mock_build.assert_called_once()
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/Qwen/Qwen3-235B-A22B"

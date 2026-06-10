@@ -1,0 +1,46 @@
+# quarry.toml — Chutes multi-model panel
+# Drives the agentic pipeline (recon → hunt → validate → gapfill → dedup)
+# through LiteLLM's native Chutes support: model = "chutes/<model-id>".
+#
+# Required env var (never put in this file — the parser rejects *_KEY keys):
+#   export CHUTES_API_KEY=<your-key>
+#   export QUARRY_PANEL=chutes
+#
+# Model IDs: verify against your Chutes account before running.
+# LiteLLM passes everything after "chutes/" verbatim to the Chutes endpoint.
+
+# --------------------------------------------------------------------------
+# Keep the proof run cheap: 4 iterations per agent, 2 hunters in parallel.
+# --------------------------------------------------------------------------
+[scan_defaults]
+hunt_max_iterations = 4
+hunt_max_concurrent = 2
+
+# --------------------------------------------------------------------------
+# Chutes panel — different model family per role for cross-vendor disagreement.
+# recon  : GLM-4.6  (ZAI / light reasoning model for architecture analysis)
+# hunt   : DeepSeek-V3  (strong code/security reasoning)
+# validate: Qwen3-235B  (different vendor family → cross_vendor_disagreement)
+# gapfill : Kimi-K2  (moonshotai, additive gap detection)
+# dedup reuses the gapfill role config (same toolset, no separate entry needed)
+# --------------------------------------------------------------------------
+
+[panels.chutes.roles.recon]
+provider = "litellm"
+model    = "chutes/zai-org/GLM-4.6-FP8"
+rpm      = 30
+
+[panels.chutes.roles.hunt]
+provider = "litellm"
+model    = "chutes/deepseek-ai/DeepSeek-V3-0324"
+rpm      = 20
+
+[panels.chutes.roles.validate]
+provider = "litellm"
+model    = "chutes/Qwen/Qwen3-235B-A22B"
+rpm      = 20
+
+[panels.chutes.roles.gapfill]
+provider = "litellm"
+model    = "chutes/moonshotai/Kimi-K2-Instruct"
+rpm      = 20

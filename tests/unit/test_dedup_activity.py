@@ -181,3 +181,74 @@ class TestDedupNullRootCauseKey:
         result = _dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Panel-aware client selection for deduplicate_activity (Change 3)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_activity_mock_panel_does_not_call_build() -> None:
+    """deduplicate_activity with provider=mock must not call build_model_client."""
+    from unittest.mock import patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.dedup import deduplicate_activity
+
+    mock_panel_json = RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30).model_dump_json()
+
+    with patch("quarry_activities.dedup.build_model_client") as mock_build:
+        deduplicate_activity([], "/tmp/repo", None, mock_panel_json)
+
+    mock_build.assert_not_called()
+
+
+def test_dedup_activity_litellm_panel_builds_litellm_client() -> None:
+    """deduplicate_activity with provider=litellm must call build_model_client and pass policy."""
+    from unittest.mock import MagicMock, patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.dedup import deduplicate_activity
+    from quarry_models.types import ProviderPolicy
+
+    litellm_panel_json = RoleConfig(
+        provider=Provider.LITELLM,
+        model="chutes/moonshotai/Kimi-K2-Instruct",
+        rpm=20,
+    ).model_dump_json()
+
+    fake_client = MagicMock()
+    received_policies: list[ProviderPolicy] = []
+
+    def _spy_loop(**kwargs: object) -> object:
+        p = kwargs.get("provider_policy")
+        if isinstance(p, ProviderPolicy):
+            received_policies.append(p)
+        from quarry.schemas import AgentLoopResult
+        return AgentLoopResult(
+            final_answer=None, steps=[], iterations_used=1, total_cost=0.0, stop_reason="final_answer"
+        )
+
+    # Two findings with same root_cause_key so the agent loop fires.
+    findings = [
+        _make_finding(id="cf-1", root_cause_key="same-key"),
+        _make_finding(id="cf-2", root_cause_key="same-key"),
+    ]
+
+    with (
+        patch("quarry_activities.dedup.build_model_client", return_value=fake_client) as mock_build,
+        patch("quarry_activities.dedup.run_agent_loop", side_effect=_spy_loop),
+    ):
+        deduplicate_activity(
+            [f.model_dump(mode="json") for f in findings],
+            "/tmp/repo",
+            None,
+            litellm_panel_json,
+        )
+
+    mock_build.assert_called_once()
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/moonshotai/Kimi-K2-Instruct"
