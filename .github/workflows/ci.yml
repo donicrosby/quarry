@@ -48,6 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ripgrep backs the `grep` tool; installing it lets the grep tool tests run
+      # for real instead of skipping (the only binary any test is gated on).
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ env.UV_VERSION }}
