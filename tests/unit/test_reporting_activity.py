@@ -67,7 +67,8 @@ def test_render_markdown_report_with_minimal_fixture() -> None:
     assert "Status: `created`" in report
     assert "Profile: `local-fast`" in report
     assert "## Summary" in report
-    assert "Quarry produced 0 validated finding(s) and 0 candidate finding(s)" in report
+    assert "Quarry produced 0 validated finding(s)" in report
+    assert "0 candidate finding(s)" in report
     assert "## Attack surface" in report
     assert "No routes mapped" in report
     assert "## Candidate findings" in report

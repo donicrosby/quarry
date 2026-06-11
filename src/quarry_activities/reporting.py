@@ -135,6 +135,28 @@ Full coverage: no items were skipped.
 {% endfor %}
 {% endif -%}
 
+{% if needs_proof_findings -%}
+## Unverified — needs proof
+
+> These findings were flagged by the validator as requiring further proof.
+> They are **not confirmed vulnerabilities**. A future proof stage will attempt
+> to verify them. Do not treat these as validated findings.
+
+{% for finding in needs_proof_findings -%}
+### {{ finding.title }}
+
+- Class: `{{ finding.vuln_class.value }}`
+- Confidence: `{{ finding.confidence.value }}`
+- Status: `{{ finding.status.value }}`
+- Component: `{{ finding.affected_component or "unknown" }}`
+{% if finding.cross_vendor_disagreement -%}
+- Note: cross-vendor disagreement (credibility signal)
+{% endif %}
+{{ finding.hypothesis }}
+
+{% endfor %}
+{% endif -%}
+
 ## Candidate findings
 
 {% for finding in findings -%}
@@ -258,6 +280,11 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         if input.model_invocations_json is not None
         else None
     )
+    needs_proof_findings = (
+        _candidate_findings_from_json(input.needs_proof_findings_json)
+        if input.needs_proof_findings_json is not None
+        else None
+    )
     report_text = _render_markdown_report_impl(
         scan,
         findings,
@@ -268,6 +295,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         proof_artifacts,
         manifest,
         model_invocations,
+        needs_proof_findings,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -292,9 +320,12 @@ def _render_markdown_report_impl(
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
+    needs_proof_findings: list[CandidateFinding] | None = None,
 ) -> str:
+    np_findings = needs_proof_findings or []
     summary = (
-        f"Quarry produced {len(final_findings or [])} validated finding(s) "
+        f"Quarry produced {len(final_findings or [])} validated finding(s), "
+        f"{len(np_findings)} unverified finding(s) needing proof, "
         f"and {len(findings)} candidate finding(s) for the local scan."
     )
     cost = summarize_model_cost(model_invocations) if model_invocations else None
@@ -305,6 +336,7 @@ def _render_markdown_report_impl(
         snapshot=snapshot,
         attack_surface=attack_surface or [],
         final_findings=final_findings or [],
+        needs_proof_findings=np_findings,
         coverage=coverage,
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
         manifest=manifest,

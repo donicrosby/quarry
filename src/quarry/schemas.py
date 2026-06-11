@@ -35,6 +35,10 @@ class FindingStatus(StrEnum):
     VALIDATING = "validating"
     REJECTED = "rejected"
     VALIDATED = "validated"
+    # Retained pending proof: validator returned needs_proof or inconclusive.
+    # This is the carry-forward status the future prove stage consumes —
+    # filter by status == NEEDS_PROOF to find the candidates prove should run on.
+    NEEDS_PROOF = "needs_proof"
     PROVING = "proving"
     PROVED = "proved"
     FINAL = "final"

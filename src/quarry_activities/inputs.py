@@ -149,6 +149,8 @@ class RenderReportInput(BaseModel):
     proof_artifacts_json: str | None = None
     manifest_json: str | None = None
     model_invocations_json: str | None = None
+    # Findings retained pending proof (status=NEEDS_PROOF); rendered as Unverified section.
+    needs_proof_findings_json: str | None = None
 
 
 class DeliverIntegrationsInput(BaseModel):
