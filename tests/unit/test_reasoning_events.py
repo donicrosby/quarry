@@ -181,6 +181,7 @@ class TestLoopEventEmission:
         from quarry_models.types import BudgetSpec
         from quarry_tools.builtins import BUILTIN_REGISTRY
         from quarry_tools.runner import ToolRunner
+
         return ToolRunner(
             repo_root=tmp_path,
             role="hunt",
@@ -188,12 +189,11 @@ class TestLoopEventEmission:
             budget_spec=BudgetSpec(max_cost_usd=10.0),
         )
 
-    def test_accepted_action_emits_action_proposed_event(
-        self, tmp_path: Any
-    ) -> None:
+    def test_accepted_action_emits_action_proposed_event(self, tmp_path: Any) -> None:
         """Loop calls event_sink with agent.action_proposed after accepting an action."""
         from pydantic import BaseModel
-        from quarry.schemas import ProposedAction, ActionReasoning
+
+        from quarry.schemas import ActionReasoning, ProposedAction
         from quarry_models.loop import run_agent_loop
         from quarry_models.types import BudgetSpec
 
@@ -222,27 +222,35 @@ class TestLoopEventEmission:
                             why_this_tool="grep finds the exact exec call site",
                         ),
                     )
-                    return type("R", (), {
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "parsed": response_model(
+                                proposed_actions=[action],
+                                tool_calls=[],
+                                final_answer="",
+                            )
+                        },
+                    )()
+                return type(
+                    "R",
+                    (),
+                    {
                         "parsed": response_model(
-                            proposed_actions=[action],
+                            proposed_actions=[],
                             tool_calls=[],
-                            final_answer="",
+                            final_answer="done",
                         )
-                    })()
-                return type("R", (), {
-                    "parsed": response_model(
-                        proposed_actions=[],
-                        tool_calls=[],
-                        final_answer="done",
-                    )
-                })()
+                    },
+                )()
 
-        emitted: list[tuple[str, dict]] = []
+        emitted: list[tuple[str, dict[str, Any]]] = []
 
-        def sink(event_type: str, payload: dict) -> None:
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
             emitted.append((event_type, payload))
 
-        result = run_agent_loop(
+        _result = run_agent_loop(
             client=_AcceptedClient(),  # type: ignore[arg-type]
             role="hunt",
             agent_kind="hunt",
@@ -260,16 +268,15 @@ class TestLoopEventEmission:
         assert len(proposed_events) >= 1, (
             "No agent.action_proposed events emitted — event_sink not wired"
         )
-        event_type, payload = proposed_events[0]
+        _event_type, payload = proposed_events[0]
         assert "reasoning_summary" in payload
         assert "args" not in payload, "Raw args must not appear in event payload"
 
-    def test_rejected_reasoning_emits_reasoning_rejected_event(
-        self, tmp_path: Any
-    ) -> None:
+    def test_rejected_reasoning_emits_reasoning_rejected_event(self, tmp_path: Any) -> None:
         """Loop calls event_sink with agent.reasoning_rejected on vague reasoning."""
         from pydantic import BaseModel
-        from quarry.schemas import ProposedAction, ActionReasoning
+
+        from quarry.schemas import ActionReasoning, ProposedAction
         from quarry_models.loop import run_agent_loop
         from quarry_models.types import BudgetSpec
 
@@ -296,20 +303,24 @@ class TestLoopEventEmission:
                         why_this_tool="check endpoint",
                     ),
                 )
-                return type("R", (), {
-                    "parsed": response_model(
-                        proposed_actions=[action],
-                        tool_calls=[],
-                        final_answer="",
-                    )
-                })()
+                return type(
+                    "R",
+                    (),
+                    {
+                        "parsed": response_model(
+                            proposed_actions=[action],
+                            tool_calls=[],
+                            final_answer="",
+                        )
+                    },
+                )()
 
-        emitted: list[tuple[str, dict]] = []
+        emitted: list[tuple[str, dict[str, Any]]] = []
 
-        def sink(event_type: str, payload: dict) -> None:
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
             emitted.append((event_type, payload))
 
-        result = run_agent_loop(
+        _result = run_agent_loop(
             client=_VagueClient(),  # type: ignore[arg-type]
             role="hunt",
             agent_kind="hunt",
@@ -331,12 +342,11 @@ class TestLoopEventEmission:
         _, payload = rejected_events[0]
         assert "failed_checks" in payload
 
-    def test_event_payload_has_no_secret_values(
-        self, tmp_path: Any
-    ) -> None:
+    def test_event_payload_has_no_secret_values(self, tmp_path: Any) -> None:
         """agent.action_proposed payload must not contain raw QUARRY_SECRET_* values."""
         from pydantic import BaseModel
-        from quarry.schemas import ProposedAction, ActionReasoning
+
+        from quarry.schemas import ActionReasoning, ProposedAction
         from quarry_models.loop import run_agent_loop
         from quarry_models.types import BudgetSpec
 
@@ -358,24 +368,38 @@ class TestLoopEventEmission:
                         args={"pattern": "exec"},
                         reasoning=ActionReasoning(
                             # Hypothesis contains a recognizable secret (AWS key format)
-                            hypothesis="Found key AKIAIOSFODNN7EXAMPLE in exec path at src/admin.js:31",
+                            hypothesis=(
+                                "Found key AKIAIOSFODNN7EXAMPLE in exec path at src/admin.js:31"
+                            ),
                             target_ref="src/admin.js:31",
                             expected_evidence="exec call with user input found",
                             why_this_tool="grep finds the exec call site",
                         ),
                     )
-                    return type("R", (), {
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "parsed": response_model(
+                                proposed_actions=[action],
+                                tool_calls=[],
+                                final_answer="",
+                            )
+                        },
+                    )()
+                return type(
+                    "R",
+                    (),
+                    {
                         "parsed": response_model(
-                            proposed_actions=[action], tool_calls=[], final_answer="",
+                            proposed_actions=[], tool_calls=[], final_answer="done"
                         )
-                    })()
-                return type("R", (), {
-                    "parsed": response_model(proposed_actions=[], tool_calls=[], final_answer="done")
-                })()
+                    },
+                )()
 
-        emitted: list[tuple[str, dict]] = []
+        emitted: list[tuple[str, dict[str, Any]]] = []
 
-        def sink(event_type: str, payload: dict) -> None:
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
             emitted.append((event_type, payload))
 
         run_agent_loop(

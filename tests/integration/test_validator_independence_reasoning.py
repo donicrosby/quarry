@@ -77,23 +77,23 @@ def test_validator_claim_excludes_model_name() -> None:
     claim = validate_claim_from_finding(finding)
 
     for forbidden in ("model", "model_name", "provider", "hunter_provider", "tool_calls"):
-        assert not hasattr(claim, forbidden), (
-            f"ValidatorClaim must not have field '{forbidden}'"
-        )
+        assert not hasattr(claim, forbidden), f"ValidatorClaim must not have field '{forbidden}'"
 
 
 def test_validator_claim_allowed_fields_only() -> None:
     """ValidatorClaim has exactly the ADR-021-allowed fields (no extras)."""
     from quarry.schemas import ValidatorClaim
 
-    allowed = frozenset({
-        "file",
-        "line_start",
-        "line_end",
-        "vuln_class",
-        "description",
-        "affected_code_snippet",
-    })
+    allowed = frozenset(
+        {
+            "file",
+            "line_start",
+            "line_end",
+            "vuln_class",
+            "description",
+            "affected_code_snippet",
+        }
+    )
     actual = frozenset(ValidatorClaim.model_fields.keys())
     assert actual == allowed, (
         f"ValidatorClaim field mismatch.\n"
@@ -131,7 +131,7 @@ def test_validator_prompt_template_uses_claim_fields_only() -> None:
     """
     from quarry_models.validation import validate_claim_from_finding
     from quarry_prompts import get_registry
-    from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
+    from quarry_prompts.build_prompt import build_prompt
 
     finding = _make_finding()
     claim = validate_claim_from_finding(finding)
@@ -172,9 +172,7 @@ def test_validate_impl_respects_independence_boundary() -> None:
     Uses a spy client to capture what messages reach the model and confirms
     none of them contain the hunter's provider or model name.
     """
-    from pydantic import BaseModel
 
-    from quarry.schemas import ActionReasoning, ProposedAction
     from quarry_activities.validate import ValidateResponse, validate_impl
     from quarry_models.types import BudgetSpec
 
@@ -183,9 +181,15 @@ def test_validate_impl_respects_independence_boundary() -> None:
     class _SpyClient:
         def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
             messages_seen.extend(request.messages)
-            return type("R", (), {
-                "parsed": ValidateResponse(verdict="validated", reasons=["direct object reference confirmed"])
-            })()
+            return type(
+                "R",
+                (),
+                {
+                    "parsed": ValidateResponse(
+                        verdict="validated", reasons=["direct object reference confirmed"]
+                    )
+                },
+            )()
 
     finding = _make_finding()
 
@@ -200,9 +204,5 @@ def test_validate_impl_respects_independence_boundary() -> None:
     combined = " ".join(str(m) for m in messages_seen)
 
     # The hunter's internal provider must not reach the model
-    assert _HUNTER_PROVIDER not in combined, (
-        "Hunter provider leaked into validate model messages"
-    )
-    assert _HUNTER_MODEL not in combined, (
-        "Hunter model name leaked into validate model messages"
-    )
+    assert _HUNTER_PROVIDER not in combined, "Hunter provider leaked into validate model messages"
+    assert _HUNTER_MODEL not in combined, "Hunter model name leaked into validate model messages"

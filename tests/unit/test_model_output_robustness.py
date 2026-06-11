@@ -18,14 +18,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from quarry.schemas import AgentLoopResult
 from quarry_models.loop import run_agent_loop
 from quarry_models.types import BudgetSpec
 from quarry_tools.builtins import BUILTIN_REGISTRY
 from quarry_tools.runner import ToolRunner
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,7 +59,11 @@ def test_prose_wrapped_json_recovered_by_lenient_parser() -> None:
     """extract_json + parse_model_json recover JSON wrapped in prose or fences."""
     from quarry_models.litellm_client import extract_json, parse_model_json
 
-    prose = 'Sure, here is the result:\n```json\n{"result": "found", "tool_calls": []}\n```\nHope that helps.'
+    prose = (
+        "Sure, here is the result:\n"
+        '```json\n{"result": "found", "tool_calls": []}\n```\n'
+        "Hope that helps."
+    )
     extracted = extract_json(prose)
     obj = parse_model_json(extracted, _DummyAnswer)
     assert obj.result == "found"
@@ -159,9 +162,7 @@ def test_malformed_json_every_attempt_halts_cleanly(tmp_path: Path) -> None:
     )
     assert result.final_answer is None
     # 3 calls: initial attempt + 2 retries (all in iteration 1)
-    assert client.calls == 3, (
-        f"Expected 3 calls (1 initial + 2 retries) but got {client.calls}"
-    )
+    assert client.calls == 3, f"Expected 3 calls (1 initial + 2 retries) but got {client.calls}"
 
 
 def test_schema_rejected_is_valid_stop_reason() -> None:

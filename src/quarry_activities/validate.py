@@ -165,6 +165,8 @@ def validate_activity(
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
@@ -188,7 +190,14 @@ def validate_activity(
 
     try:
         return _validate_activity_impl(
-            finding, repo_path, panel, budget_cap_usd, panel_json, db_path
+            finding,
+            repo_path,
+            panel,
+            budget_cap_usd,
+            panel_json,
+            db_path,
+            max_iterations,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -202,6 +211,8 @@ def _validate_activity_impl(
     budget_cap_usd: float | None,
     panel_json: str | None,
     db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -218,7 +229,7 @@ def _validate_activity_impl(
         client: Any = MockModelClient(default=ValidateResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     result = validate_impl(
@@ -226,6 +237,7 @@ def _validate_activity_impl(
         repo_path=repo_path,
         panel=active_panel,
         client=client,
+        max_iterations=max_iterations,
         budget_spec=budget_spec,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),

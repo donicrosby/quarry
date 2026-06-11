@@ -25,6 +25,7 @@ from quarry.schemas import (
 )
 from quarry_activities.inputs import RenderReportInput, RunDiffScanInput
 from quarry_activities.reporting import render_markdown_report_activity
+from quarry_activities.seed import resolve_seed as _resolve_scan_seed
 from quarry_persistence import QuarryRepository, ScanSummary
 from quarry_server.schemas import DiffScanRequest, ScanResponse, StartScanRequest
 from quarry_workflows.run_scan import RunScanInput
@@ -79,6 +80,11 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
             hunt_max_iterations=quarry_config.scan_defaults.hunt_max_iterations,
             hunt_max_concurrent=quarry_config.scan_defaults.hunt_max_concurrent,
+            validate_max_iterations=quarry_config.scan_defaults.validate_max_iterations,
+            gapfill_max_iterations=quarry_config.scan_defaults.gapfill_max_iterations,
+            recon_max_iterations=quarry_config.scan_defaults.recon_max_iterations,
+            dedup_max_iterations=quarry_config.scan_defaults.dedup_max_iterations,
+            scan_seed=_resolve_scan_seed(pinned=quarry_config.scan_defaults.seed, scan_id=scan_id),
         ),
         id=scan_id,
         task_queue=settings.task_queue,

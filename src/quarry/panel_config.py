@@ -68,6 +68,13 @@ class ScanDefaultsConfig(BaseModel):
     focus_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     hunt_max_iterations: int = 12
     hunt_max_concurrent: int = 8
+    validate_max_iterations: int = 20
+    gapfill_max_iterations: int = 20
+    recon_max_iterations: int = 40
+    dedup_max_iterations: int = 8
+    # Optional fixed seed. When None, each scan derives a deterministic seed
+    # from its scan_id UUID so runs are reproducible without pinning a global value.
+    seed: int | None = None
 
 
 class RetryConfig(BaseModel):

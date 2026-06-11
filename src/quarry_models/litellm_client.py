@@ -25,8 +25,9 @@ _log = logging.getLogger(__name__)
 class LiteLLMModelClient:
     """A `ModelClient` that dispatches to providers through LiteLLM."""
 
-    def __init__(self, *, temperature: float = 0.0) -> None:
+    def __init__(self, *, temperature: float = 0.0, seed: int | None = None) -> None:
         self.temperature = temperature
+        self.seed = seed
         self.invocations: list[ModelInvocation] = []
 
     def complete_structured[T: BaseModel](
@@ -50,6 +51,7 @@ class LiteLLMModelClient:
                 "strict": False,
             },
         }
+        _seed_kwargs: dict[str, Any] = {"seed": self.seed} if self.seed is not None else {}
         try:
             completion = litellm.completion(
                 model=model_string,
@@ -57,6 +59,7 @@ class LiteLLMModelClient:
                 temperature=self.temperature,
                 timeout=request.timeout_seconds,
                 response_format=_response_format,
+                **_seed_kwargs,
             )
         except Exception:
             # Provider doesn't support response_format — fall back to unstructured.
@@ -65,6 +68,7 @@ class LiteLLMModelClient:
                 messages=messages,
                 temperature=self.temperature,
                 timeout=request.timeout_seconds,
+                **_seed_kwargs,
             )
 
         content = _content(completion)

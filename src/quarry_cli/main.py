@@ -178,11 +178,13 @@ async def _run_scan_command(
             if verbose:
                 # Poll for new agent.* events and print them as structured log lines.
                 events = await client.poll_events(
-                    scan_id, event_types=["agent.action_proposed", "agent.reasoning_rejected"],
+                    scan_id,
+                    event_types=["agent.action_proposed", "agent.reasoning_rejected"],
                     after_id=last_event_id,
                 )
                 for event in events:
                     import json as _json
+
                     typer.echo(
                         _json.dumps(
                             {

@@ -24,8 +24,8 @@ from quarry.schemas import (
     ArtifactKind,
     ArtifactRef,
     CandidateFinding,
-    FindingStatus,
     FinalFinding,
+    FindingStatus,
     IntegrationRun,
     IntegrationStatus,
     ModelPanelEntry,
@@ -108,6 +108,10 @@ class RunScanInput(BaseModel):
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
     hunt_max_iterations: int = 12
+    validate_max_iterations: int = 20
+    gapfill_max_iterations: int = 20
+    recon_max_iterations: int = 40
+    dedup_max_iterations: int = 8
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -116,6 +120,8 @@ class RunScanInput(BaseModel):
     # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
     # None disables budget gating.
     budget_cap_usd: float | None = None
+    # Seed for model calls. None means derive from scan_id at activity time.
+    scan_seed: int | None = None
 
 
 class RunScanResult(BaseModel):
@@ -348,6 +354,8 @@ class RunScanWorkflow:
                             None,
                             recon_panel_json,
                             scan_input.db_path,
+                            scan_input.recon_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -498,6 +506,7 @@ class RunScanWorkflow:
                             budget_cap,
                             hunt_panel_json,
                             scan_input.db_path,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -622,6 +631,8 @@ class RunScanWorkflow:
                             val_budget_remaining,
                             validate_panel_json,
                             scan_input.db_path,
+                            scan_input.validate_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -661,9 +672,7 @@ class RunScanWorkflow:
                 elif verdict in ("needs_proof", "inconclusive"):
                     # Retain as unverified — never drop. Persist with NEEDS_PROOF status
                     # so the future prove stage can filter on status == NEEDS_PROOF.
-                    retained = candidate.model_copy(
-                        update={"status": FindingStatus.NEEDS_PROOF}
-                    )
+                    retained = candidate.model_copy(update={"status": FindingStatus.NEEDS_PROOF})
                     await _persist_scan_state(
                         scan_input.db_path,
                         "save_candidate_finding",
@@ -765,6 +774,8 @@ class RunScanWorkflow:
                             hunter_gaps,
                             scan_input.db_path,
                             existing_findings_summary,
+                            scan_input.gapfill_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -807,6 +818,7 @@ class RunScanWorkflow:
                                     gf_budget_remaining,
                                     hunt_panel_json,
                                     scan_input.db_path,
+                                    scan_input.scan_seed,
                                 ],
                                 start_to_close_timeout=timedelta(hours=4),
                                 heartbeat_timeout=timedelta(minutes=3),
@@ -874,6 +886,8 @@ class RunScanWorkflow:
                             dd_budget_remaining,
                             dedup_panel_json,
                             scan_input.db_path,
+                            scan_input.dedup_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),

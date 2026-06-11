@@ -180,6 +180,8 @@ def deduplicate_activity(
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 8,
+    scan_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: deduplicate CandidateFindings by root_cause_key.
 
@@ -198,7 +200,13 @@ def deduplicate_activity(
 
     try:
         return _deduplicate_activity_impl(
-            candidates, repo_path, budget_cap_usd, panel_json, db_path
+            candidates,
+            repo_path,
+            budget_cap_usd,
+            panel_json,
+            db_path,
+            max_iterations,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -213,6 +221,8 @@ def _deduplicate_activity_impl(
     budget_cap_usd: float | None,
     panel_json: str | None,
     db_path: str | None = None,
+    max_iterations: int = 8,
+    scan_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     parsed: list[CandidateFinding] = []
     if candidates:
@@ -232,7 +242,7 @@ def _deduplicate_activity_impl(
         client: Any = MockModelClient(default=DedupeResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
@@ -245,6 +255,7 @@ def _deduplicate_activity_impl(
     result = dedup_impl(
         candidates=parsed,
         client=client,
+        max_iterations=max_iterations,
         budget_spec=budget_spec,
         repo_path=repo_path,
         scan_log=scan_log,

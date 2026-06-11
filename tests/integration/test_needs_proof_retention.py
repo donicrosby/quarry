@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from quarry.schemas import (
     CandidateFinding,
@@ -23,10 +22,9 @@ from quarry.schemas import (
     ScanProfile,
     ScanStatus,
     Severity,
-    ValidationResult,
     VulnerabilityClass,
 )
-from quarry_activities.reporting import _render_markdown_report_impl
+from quarry_activities.reporting import render_markdown_report as _render_markdown_report_impl
 
 
 def _make_scan() -> Scan:
@@ -44,6 +42,7 @@ def _make_scan() -> Scan:
         status=ScanStatus.COMPLETED,
         created_at=_NOW,
     )
+
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
@@ -77,24 +76,6 @@ def _make_finding(
     )
 
 
-def _make_validation_result(
-    verdict: str,
-    cross_vendor_disagreement: bool = False,
-) -> ValidationResult:
-    return ValidationResult(
-        id="vr-1",
-        scan_id="scan-1",
-        finding_id="cf-1",
-        verdict=verdict,  # type: ignore[arg-type]
-        reasons=["reason"],
-        model="test-model",
-        provider="anthropic",
-        cross_vendor=False,
-        cross_vendor_disagreement=cross_vendor_disagreement,
-        created_at=_NOW,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Test 1: FindingStatus.NEEDS_PROOF exists
 # ---------------------------------------------------------------------------
@@ -103,8 +84,7 @@ def _make_validation_result(
 def test_finding_status_has_needs_proof_member() -> None:
     """FindingStatus.NEEDS_PROOF must exist as an enum member."""
     assert hasattr(FindingStatus, "NEEDS_PROOF"), (
-        "FindingStatus is missing NEEDS_PROOF; "
-        "add NEEDS_PROOF = 'needs_proof' to the enum"
+        "FindingStatus is missing NEEDS_PROOF; add NEEDS_PROOF = 'needs_proof' to the enum"
     )
     assert FindingStatus.NEEDS_PROOF.value == "needs_proof"
 
@@ -171,11 +151,10 @@ def test_needs_proof_finding_appears_in_unverified_report_section() -> None:
     assert finding.title in report, f"Finding title {finding.title!r} missing from report"
 
     # It must NOT appear as a validated final finding.
-    assert "## Final findings" not in report or finding.title not in report.split(
-        "## Final findings"
-    )[-1].split("## Unverified")[0], (
-        "needs_proof finding incorrectly appeared in Final findings section"
-    )
+    assert (
+        "## Final findings" not in report
+        or finding.title not in report.split("## Final findings")[-1].split("## Unverified")[0]
+    ), "needs_proof finding incorrectly appeared in Final findings section"
 
 
 # ---------------------------------------------------------------------------

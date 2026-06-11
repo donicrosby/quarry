@@ -223,10 +223,11 @@ def hunt_impl(
 def hunt_activity(
     task: AgentTask | dict[str, Any],
     repo_path: str,
-    max_iterations: int = 40,
+    max_iterations: int = 12,
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
@@ -253,7 +254,13 @@ def hunt_activity(
 
     try:
         return _hunt_activity_impl(
-            task, repo_path, max_iterations, budget_cap_usd, panel_json, db_path
+            task,
+            repo_path,
+            max_iterations,
+            budget_cap_usd,
+            panel_json,
+            db_path,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -267,6 +274,7 @@ def _hunt_activity_impl(
     budget_cap_usd: float | None,
     panel_json: str | None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -281,7 +289,7 @@ def _hunt_activity_impl(
         client: Any = MockModelClient(default=_HuntResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)

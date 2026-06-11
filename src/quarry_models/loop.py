@@ -244,6 +244,7 @@ def run_agent_loop(
     ]
     final_answer: BaseModel | None = None
     ctx = task_context or {}
+    parsed: Any = None  # last parsed model response; referenced after loop exhaustion
 
     for iteration in range(1, max_iterations + 1):
         # ── Re-prompt sub-loop (reasoning + schema repair) ──────────────────

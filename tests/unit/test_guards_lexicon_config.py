@@ -12,8 +12,6 @@ check_vague_reasoning accepts banned_phrases/banned_evidence kwargs.
 
 from __future__ import annotations
 
-import pytest
-
 from quarry.schemas import ActionReasoning, ProposedAction
 
 

@@ -228,6 +228,7 @@ def render_markdown_report(
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
+    needs_proof_findings: list[CandidateFinding] | None = None,
 ) -> str:
     return _render_markdown_report_impl(
         scan,
@@ -239,6 +240,7 @@ def render_markdown_report(
         proof_artifacts,
         manifest,
         model_invocations,
+        needs_proof_findings,
     )
 
 
