@@ -14,16 +14,20 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import is_cancelled_exception
 
+# Imported at workflow-module load (not lazily inside functions) so the Temporal
+# sandbox loads it before freezing — avoids the "imported after initial workflow
+# load" determinism warning.
+from quarry.panel_config import RoleConfig as _RoleConfig
 from quarry.schemas import (
     AgentTask,
+    ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
-    ArchitectureDoc,
     CandidateFinding,
-    CoverageGap,
     FinalFinding,
     IntegrationRun,
     IntegrationStatus,
+    ModelPanelEntry,
     ProofArtifact,
     RedactionStatus,
     Report,
@@ -31,20 +35,23 @@ from quarry.schemas import (
     Scan,
     ScanManifest,
     ScanStatus,
-    Severity,
     SubsystemAssignment,
     Target,
-    ValidationResult,
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
     utc_now,
+)
+from quarry.schemas import (
+    Provider as _Provider,
 )
 from quarry_activities.coverage import build_coverage_ledger, write_coverage_artifact
 from quarry_activities.inputs import (
     BuildCoverageLedgerInput,
     BuildCoverageLedgerOutput,
     BuildScanManifestInput,
+    CloneRepoInput,
+    CloneRepoResult,
     CreateSnapshotInput,
     DeliverIntegrationsInput,
     PersistScanStateInput,
@@ -57,16 +64,19 @@ from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
 
+# Default orchestration retry policy (overridden per-run from RunScanInput at the
+# start of the workflow). State-persistence writes keep their own fixed policy.
 ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
+_PERSIST_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 COMPLETED_STAGE_ORDER = {
     "CREATED": 0,
     "SNAPSHOT": 1,
     "RECON": 2,
     "HUNT": 3,
     "VALIDATION": 4,
-    "AGENTIC_VALIDATE": 5,   # Week 13: adversarial validate stage
-    "GAPFILL": 6,            # Week 13: coverage floor + agentic gap detection
-    "DEDUP": 7,              # Week 13: deterministic + agentic dedup
+    "AGENTIC_VALIDATE": 5,  # Week 13: adversarial validate stage
+    "GAPFILL": 6,  # Week 13: coverage floor + agentic gap detection
+    "DEDUP": 7,  # Week 13: deterministic + agentic dedup
     "COVERAGE": 8,
     "REPORT": 9,
     "INTEGRATING": 10,
@@ -78,6 +88,10 @@ def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
 
+def _empty_panel_entries() -> list[ModelPanelEntry]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -86,9 +100,20 @@ class RunScanInput(BaseModel):
     db_path: str = ".quarry/quarry.db"
     output_dir: str = ".quarry"
     target_url: str | None = None
+    # When set, the repo is cloned from this git URL into the scan workspace and
+    # the clone path becomes the effective repo_path for all downstream stages.
+    repo_url: str | None = None
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
+    # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
+    # preserves the historical fail-fast behaviour for direct/test construction;
+    # the CLI/client resolves the configured value (3–5) and passes it explicitly.
+    activity_max_attempts: int = 1
+    # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
+    # None disables budget gating.
+    budget_cap_usd: float | None = None
 
 
 class RunScanResult(BaseModel):
@@ -104,6 +129,8 @@ class RunScanResult(BaseModel):
 class RunScanWorkflow:
     def __init__(self) -> None:
         self._current_stage = "CREATED"
+        # Overridden per-run in _run() from RunScanInput.activity_max_attempts.
+        self._retry_policy = ACTIVITY_RETRY_POLICY
 
     @workflow.query
     def get_stage(self) -> str:
@@ -125,6 +152,7 @@ class RunScanWorkflow:
             raise
 
     async def _run(self, scan_input: RunScanInput, scan_id: str) -> RunScanResult:
+        self._retry_policy = RetryPolicy(maximum_attempts=max(1, scan_input.activity_max_attempts))
         created_at = workflow.now()
         artifact_root = _join_path(scan_input.output_dir, "artifacts")
         report_path = _join_path(scan_input.output_dir, "reports", f"{scan_id}.md")
@@ -132,16 +160,53 @@ class RunScanWorkflow:
             await _load_scan(scan_input.db_path, scan_id) if scan_input.resume else None
         )
         completed_stage = _persisted_stage(persisted_scan) if persisted_scan is not None else None
+
+        # ── CLONE stage ──────────────────────────────────────────────────────
+        # When scanning a remote git URL, clone it into the scan workspace and use
+        # that local working copy as the repo path for every downstream stage. The
+        # resolved SHA is pinned so a resume re-checks-out the exact same revision.
+        repo_path = scan_input.repo_path
+        origin_url: str | None = None
+        origin_commit_sha: str | None = None
+        if scan_input.repo_url:
+            self._current_stage = "CLONE"
+            pinned_sha = (
+                str(persisted_scan.metadata.get("origin_commit_sha") or "") or None
+                if persisted_scan is not None
+                else None
+            )
+            clone_payload = await workflow.execute_activity(
+                "clone-repository",
+                CloneRepoInput(
+                    repo_url=scan_input.repo_url,
+                    dest_dir=_join_path(scan_input.output_dir, "clones", scan_id),
+                    pinned_sha=pinned_sha,
+                ),
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(minutes=2),
+                retry_policy=self._retry_policy,
+            )
+            clone_result = _clone_result_from_activity(clone_payload)
+            repo_path = clone_result.local_path
+            origin_url = scan_input.repo_url
+            origin_commit_sha = clone_result.commit_sha
+
         if persisted_scan is None:
             target = Target(
                 id=str(workflow.uuid4()),
                 workspace_id="local",
-                repo_path=scan_input.repo_path,
+                repo_path=repo_path,
                 target_url=scan_input.target_url,
                 target_kind="local_repo" if scan_input.target_url is None else "local_web_app",
                 allowed_hosts=["localhost", "127.0.0.1"] if scan_input.target_url else [],
+                origin_url=origin_url,
+                origin_commit_sha=origin_commit_sha,
                 created_at=created_at,
             )
+            # Stamp each panel entry with the actual scan_id now that we have it.
+            panel_entries = [
+                e.model_copy(update={"scan_id": scan_id}) for e in scan_input.panel_entries
+            ]
             scan = Scan(
                 id=scan_id,
                 workspace_id="local",
@@ -153,10 +218,14 @@ class RunScanWorkflow:
                 ),
                 status=ScanStatus.CREATED,
                 created_at=created_at,
+                budget_cap_usd=scan_input.budget_cap_usd,
+                panel_snapshot=panel_entries,
                 metadata={
-                    "repo_path": scan_input.repo_path,
+                    "repo_path": repo_path,
                     "target_url": scan_input.target_url,
                     "output_dir": scan_input.output_dir,
+                    "origin_url": origin_url or "",
+                    "origin_commit_sha": origin_commit_sha or "",
                     "current_stage": "CREATED",
                 },
             )
@@ -184,8 +253,15 @@ class RunScanWorkflow:
             scan_input.db_path,
             scan.id,
             "scan.resumed" if scan_input.resume and persisted_scan is not None else "scan.started",
-            {"repo_path": scan_input.repo_path},
+            {"repo_path": repo_path},
         )
+        if origin_commit_sha is not None:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "repo.cloned",
+                {"commit_sha": origin_commit_sha},
+            )
 
         scan_manifest = await self._record_manifest(scan_input, scan)
 
@@ -195,14 +271,14 @@ class RunScanWorkflow:
             snapshot_payload = await workflow.execute_activity(
                 "create-repository-snapshot",
                 CreateSnapshotInput(
-                    repo_path=scan_input.repo_path,
+                    repo_path=repo_path,
                     scan_id=scan.id,
                     artifact_root=artifact_root,
                 ),
                 start_to_close_timeout=timedelta(minutes=5),
                 heartbeat_timeout=timedelta(seconds=30),
                 cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                retry_policy=ACTIVITY_RETRY_POLICY,
+                retry_policy=self._retry_policy,
             )
             snapshot = _repository_snapshot_from_activity(snapshot_payload)
             await _persist_scan_state(
@@ -234,43 +310,56 @@ class RunScanWorkflow:
             # Step 1: orchestrate subsystem assignments
             assignments_payload = await workflow.execute_activity(
                 "recon-orchestrator",
-                args=[scan_input.repo_path, scan.id],
+                args=[repo_path, scan.id],
                 start_to_close_timeout=timedelta(minutes=3),
-                retry_policy=ACTIVITY_RETRY_POLICY,
+                retry_policy=self._retry_policy,
             )
             assignments = _subsystem_assignments_from_activity(assignments_payload)
 
             # Step 2: analyse each subsystem in parallel.
             # Pass the serialised recon RoleConfig so the activity can select the
             # correct model client (mock vs. real) based on the panel config.
-            recon_panel_entry = next(
-                (e for e in scan.panel_snapshot if e.role == "recon"), None
-            )
+            recon_panel_entry = next((e for e in scan.panel_snapshot if e.role == "recon"), None)
             recon_panel_json: str | None = None
             if recon_panel_entry is not None:
-                from quarry.panel_config import RoleConfig as _RoleConfig
+                try:
+                    _prov = _Provider(recon_panel_entry.provider)
+                except ValueError:
+                    _prov = _Provider.MOCK
                 recon_panel_json = _RoleConfig(
-                    provider=recon_panel_entry.provider,
+                    provider=_prov,
                     model=recon_panel_entry.model,
                     rpm=recon_panel_entry.rate_limit_rpm,
                 ).model_dump_json()
 
+            # return_exceptions=True: a subsystem recon failing must not fail the
+            # scan — the synthesis loop below skips any non-Subsystem payload, so
+            # recon proceeds with whatever subsystems succeeded.
             subsystem_payloads = await asyncio.gather(
                 *[
                     workflow.execute_activity(
                         "recon-subsystem",
-                        args=[a, scan_input.repo_path, scan.id, None, recon_panel_json],
-                        start_to_close_timeout=timedelta(minutes=5),
-                        heartbeat_timeout=timedelta(seconds=30),
-                        retry_policy=ACTIVITY_RETRY_POLICY,
+                        args=[
+                            a,
+                            repo_path,
+                            scan.id,
+                            None,
+                            recon_panel_json,
+                            scan_input.db_path,
+                        ],
+                        start_to_close_timeout=timedelta(hours=4),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
                     )
                     for a in assignments
-                ]
+                ],
+                return_exceptions=True,
             )
 
             # Step 3: synthesise into ArchitectureDoc
             # Build typed Subsystem list from payloads for synthesis activity
             from quarry.schemas import Subsystem as _Subsystem
+
             subsystems: list[_Subsystem] = []
             for sp in subsystem_payloads:
                 if isinstance(sp, _Subsystem):
@@ -278,14 +367,28 @@ class RunScanWorkflow:
                 elif isinstance(sp, dict):
                     try:
                         subsystems.append(_Subsystem.model_validate(sp))
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "recon.subsystem_invalid",
+                            {"error": _describe_failure(exc)},
+                        )
+                elif isinstance(sp, BaseException):
+                    # A subsystem recon activity failed; record it and carry on
+                    # with the subsystems that succeeded.
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "recon.subsystem_failed",
+                        {"error": _describe_failure(sp)},
+                    )
 
             synthesis_payload = await workflow.execute_activity(
                 "recon-synthesis",
-                args=[subsystems, scan_input.repo_path, scan.id],
+                args=[subsystems, repo_path, scan.id, scan_input.output_dir],
                 start_to_close_timeout=timedelta(minutes=2),
-                retry_policy=ACTIVITY_RETRY_POLICY,
+                retry_policy=self._retry_policy,
             )
             arch_doc = _architecture_doc_from_activity(synthesis_payload)
             await _persist_scan_state(
@@ -297,9 +400,13 @@ class RunScanWorkflow:
             # Emit one AgentTask per (vuln_class, scope)
             emit_payload = await workflow.execute_activity(
                 "emit-agent-tasks",
-                args=[scan.id, arch_doc.model_dump_json(), [vc.value for vc in scan.profile.vuln_classes]],
+                args=[
+                    scan.id,
+                    arch_doc.model_dump_json(),
+                    [vc.value for vc in scan.profile.vuln_classes],
+                ],
                 start_to_close_timeout=timedelta(minutes=1),
-                retry_policy=ACTIVITY_RETRY_POLICY,
+                retry_policy=self._retry_policy,
             )
             agent_tasks = _agent_tasks_from_activity(emit_payload)
             for task in agent_tasks:
@@ -321,50 +428,96 @@ class RunScanWorkflow:
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
         proof_artifacts: list[ProofArtifact] = []
+        # Coverage gaps the hunters self-reported (areas they didn't fully cover);
+        # gapfill turns these into a targeted re-hunt round.
+        hunter_gaps: list[dict[str, Any]] = []
+        # Hoist panel JSON before the HUNT conditional so that the gapfill
+        # re-hunt closure (which runs outside the HUNT else-branch) always has a
+        # valid binding regardless of whether HUNT was a fresh run or a resume.
+        hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
+        hunt_spent = (
+            await _scan_cost_so_far(scan_input.db_path, scan.id)
+            if scan.budget_cap_usd is not None
+            else 0.0
+        )
+        hunt_over_budget, hunt_budget_remaining = budget_decision(scan.budget_cap_usd, hunt_spent)
         if _stage_completed(completed_stage, "HUNT"):
             candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
             final_findings = await _load_final_findings(scan_input.db_path, scan.id)
+        elif hunt_over_budget:
+            # Budget already exhausted before this stage: skip hunting, mark the
+            # stage budget-overrun, and let the scan continue to the next stage.
+            self._current_stage = "HUNT"
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "stage.budget_exceeded",
+                {"stage": "HUNT", "cap": str(scan.budget_cap_usd), "spent": str(hunt_spent)},
+            )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
         else:
             self._current_stage = "HUNT"
             # Drop 1: focus guard (structural enforcement of --focus)
             focused_tasks = [
-                t for t in agent_tasks
+                t
+                for t in agent_tasks
                 if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
             ]
             # Drop 2: exclusion guard (always wins over focus)
             excluded_classes = {
-                exc.value
-                for exc in scan.profile.scope_exclusions
-                if exc.kind == "vuln_class"
+                exc.value for exc in scan.profile.scope_exclusions if exc.kind == "vuln_class"
             }
             runnable_tasks = [
-                t for t in focused_tasks
+                t
+                for t in focused_tasks
                 if t.vuln_class is not None and t.vuln_class.value not in excluded_classes
             ]
 
             max_concurrent = scan_input.hunt_max_concurrent
             semaphore = asyncio.Semaphore(max_concurrent)
 
-            async def _run_one_hunt(task: AgentTask) -> list[dict]:  # type: ignore[type-arg]
+            async def _run_one_hunt(task: AgentTask) -> Any:
                 async with semaphore:
                     budget_cap = (
-                        scan.budget_cap_usd / len(runnable_tasks)
-                        if scan.budget_cap_usd and runnable_tasks
+                        hunt_budget_remaining / len(runnable_tasks)
+                        if hunt_budget_remaining is not None and runnable_tasks
                         else None
                     )
                     return await workflow.execute_activity(
                         "hunt-vuln-class",
-                        args=[task, scan_input.repo_path, 12, budget_cap],
-                        start_to_close_timeout=timedelta(minutes=10),
-                        heartbeat_timeout=timedelta(seconds=60),
-                        retry_policy=ACTIVITY_RETRY_POLICY,
+                        args=[
+                            task,
+                            repo_path,
+                            40,
+                            budget_cap,
+                            hunt_panel_json,
+                            scan_input.db_path,
+                        ],
+                        start_to_close_timeout=timedelta(hours=4),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
                     )
 
+            # return_exceptions=True: one hunter timing out or crashing must not
+            # fail the whole scan — split_hunt_result yields ([], []) for an
+            # Exception result, so the surviving hunters' findings still land.
             hunt_results = await asyncio.gather(
-                *[_run_one_hunt(t) for t in runnable_tasks]
+                *[_run_one_hunt(t) for t in runnable_tasks],
+                return_exceptions=True,
             )
 
-            for task_findings in hunt_results:
+            for task_result in hunt_results:
+                if isinstance(task_result, BaseException):
+                    # A hunter failed (timeout, crash); record it and keep the rest.
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "hunt.task_failed",
+                        {"error": _describe_failure(task_result)},
+                    )
+                    continue
+                task_findings, task_gaps = split_hunt_result(task_result)
+                hunter_gaps.extend(task_gaps)
                 for finding_dict in task_findings:
                     candidate = CandidateFinding.model_validate(finding_dict)
                     # Post-hunt: label OOS findings, skip from final promotion
@@ -381,46 +534,44 @@ class RunScanWorkflow:
                     )
                     candidate_findings.append(candidate)
                     await _append_workflow_event(
-                        scan_input.db_path, scan.id, "finding.candidate_created",
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.candidate_created",
                         {"finding_id": candidate.id},
                     )
 
-                    if not is_oos:
+                    # The deterministic secret validator only applies to deterministic
+                    # secret findings (those carry key_name metadata). Agentic findings
+                    # have no key_name and are promoted by the AGENTIC_VALIDATE stage
+                    # below, so do not run/reject them here.
+                    if not is_oos and candidate.metadata.get("key_name"):
                         self._current_stage = "VALIDATION"
                         validation_payload = await workflow.execute_activity(
                             "validate-secret-candidate",
                             ValidateCandidateInput(finding_json=candidate.model_dump_json()),
                             start_to_close_timeout=timedelta(seconds=30),
-                            retry_policy=ACTIVITY_RETRY_POLICY,
+                            retry_policy=self._retry_policy,
                         )
                         validation = _validation_result_from_activity(validation_payload)
                         if validation.is_valid:
-                            final = FinalFinding(
-                                id=candidate.id,
-                                scan_id=scan.id,
-                                workspace_id="local",
-                                fingerprint=candidate.metadata.get("fingerprint", candidate.id),
-                                vuln_class=candidate.vuln_class,
-                                severity=candidate.severity,
-                                title=candidate.title,
-                                summary=candidate.hypothesis,
-                                affected_component=candidate.affected_component,
-                                source_refs=candidate.source_refs,
-                                validation_result_id=f"{candidate.id}-validation",
-                                created_at=workflow.now(),
-                            )
+                            final = _final_from_candidate(candidate, scan.id, workflow.now())
                             await _persist_scan_state(
-                                scan_input.db_path, "save_final_finding",
+                                scan_input.db_path,
+                                "save_final_finding",
                                 {"finding": _model_json_dict(final)},
                             )
                             final_findings.append(final)
                             await _append_workflow_event(
-                                scan_input.db_path, scan.id, "finding.validated",
+                                scan_input.db_path,
+                                scan.id,
+                                "finding.validated",
                                 {"finding_id": final.id},
                             )
                         else:
                             await _append_workflow_event(
-                                scan_input.db_path, scan.id, "finding.rejected",
+                                scan_input.db_path,
+                                scan.id,
+                                "finding.rejected",
                                 {"finding_id": candidate.id},
                             )
 
@@ -432,19 +583,85 @@ class RunScanWorkflow:
         # The validator receives only ValidatorClaim fields — no hunter provenance.
         if not _stage_completed(completed_stage, "AGENTIC_VALIDATE"):
             self._current_stage = "AGENTIC_VALIDATE"
+            val_spent = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
+            )
+            val_over_budget, val_budget_remaining = budget_decision(scan.budget_cap_usd, val_spent)
+            if val_over_budget:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "stage.budget_exceeded",
+                    {"stage": "AGENTIC_VALIDATE", "cap": str(scan.budget_cap_usd)},
+                )
+            validate_panel_json = panel_json_for_role(scan, "validate")
+            # Candidates already promoted by the deterministic secret gate above.
+            already_final = {f.id for f in final_findings}
             for candidate in list(candidate_findings):
+                if val_over_budget:
+                    break  # budget exhausted: stop validating, continue the scan
                 if candidate.triage_label == "oos":
                     continue  # skip OOS findings
-                await workflow.execute_activity(
-                    "validate-candidate-finding",
-                    args=[candidate.model_dump(mode="json"), scan_input.repo_path, None, None],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
-                    retry_policy=ACTIVITY_RETRY_POLICY,
-                )
+                if candidate.id in already_final:
+                    continue  # already promoted deterministically
+                try:
+                    validate_payload = await workflow.execute_activity(
+                        "validate-candidate-finding",
+                        args=[
+                            candidate.model_dump(mode="json"),
+                            repo_path,
+                            None,
+                            val_budget_remaining,
+                            validate_panel_json,
+                            scan_input.db_path,
+                        ],
+                        start_to_close_timeout=timedelta(hours=4),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
+                    )
+                except Exception as exc:
+                    # One finding's validation failing must not fail the scan —
+                    # but record it so the degradation is visible, not silent.
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "validate.failed",
+                        {"finding_id": candidate.id, "error": _describe_failure(exc)},
+                    )
+                    continue
+                # Promote on a 'validated' verdict from the adversarial validator.
+                verdict = ""
+                if isinstance(validate_payload, dict):
+                    payload_dict = cast("dict[str, Any]", validate_payload)
+                    verdict = str(payload_dict.get("verdict", "")).lower()
+                if verdict == "validated":
+                    final = _final_from_candidate(candidate, scan.id, workflow.now())
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    final_findings.append(final)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.validated",
+                        {"finding_id": final.id},
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.rejected",
+                        {"finding_id": candidate.id, "verdict": verdict or "unknown"},
+                    )
             await _persist_scan_stage(scan_input.db_path, scan.id, "AGENTIC_VALIDATE")
             await _append_workflow_event(
-                scan_input.db_path, scan.id, "agentic_validate.completed",
+                scan_input.db_path,
+                scan.id,
+                "agentic_validate.completed",
                 {"candidate_count": str(len(candidate_findings))},
             )
 
@@ -452,12 +669,25 @@ class RunScanWorkflow:
         # Coverage floor enforcement + agentic gap detection (ADR-021).
         # Gapfill tasks re-enter the hunt stage as a second pass.
         gapfill_tasks: list[AgentTask] = []
+        gf_spent = (
+            await _scan_cost_so_far(scan_input.db_path, scan.id)
+            if scan.budget_cap_usd is not None
+            else 0.0
+        )
+        gf_over_budget, gf_budget_remaining = budget_decision(scan.budget_cap_usd, gf_spent)
         if not _stage_completed(completed_stage, "GAPFILL"):
             self._current_stage = "GAPFILL"
+            if gf_over_budget:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "stage.budget_exceeded",
+                    {"stage": "GAPFILL", "cap": str(scan.budget_cap_usd)},
+                )
             focused_classes = [vc.value for vc in scan.profile.vuln_classes]
 
             # Build a minimal coverage ledger for the gapfill stage.
-            # build_coverage_ledger is a pure function; safe to call in workflow code.
+            # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
             ledger = build_coverage_ledger(
                 scan_id=scan.id,
                 workspace_id="local",
@@ -466,24 +696,54 @@ class RunScanWorkflow:
                 attack_surface_items_total=len(agent_tasks),
                 attack_surface_items_scanned=len(agent_tasks),
                 skipped_items=[],
+                id=str(workflow.uuid4()),
+                created_at=workflow.now(),
             )
 
-            gapfill_result: list[Any] = cast(
-                list[Any],
-                await workflow.execute_activity(
-                    "gapfill-coverage",
-                    args=[
-                        ledger.model_dump(mode="json"),
-                        [t.model_dump(mode="json") for t in agent_tasks],
-                        focused_classes,
-                        scan_input.repo_path,
-                        None,
-                    ],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
-                    retry_policy=ACTIVITY_RETRY_POLICY,
-                ),
-            )
+            gapfill_panel_json = panel_json_for_role(scan, "gapfill")
+            # Compact summary of findings discovered so far, so gapfill avoids
+            # re-hunting (and re-reporting) vectors that are already covered.
+            existing_findings_summary = [
+                {
+                    "vuln_class": f.vuln_class.value,
+                    "title": f.title,
+                    "affected_component": f.affected_component or "",
+                    "root_cause_key": f.root_cause_key or "",
+                }
+                for f in candidate_findings
+            ]
+            # Gapfill is optional: if it fails, the scan keeps its first-pass
+            # findings rather than dying.
+            gapfill_result: list[Any] = []
+            try:
+                gapfill_result = cast(
+                    list[Any],
+                    await workflow.execute_activity(
+                        "gapfill-coverage",
+                        args=[
+                            ledger.model_dump(mode="json"),
+                            [t.model_dump(mode="json") for t in agent_tasks],
+                            focused_classes,
+                            repo_path,
+                            gf_budget_remaining,
+                            gapfill_panel_json,
+                            hunter_gaps,
+                            scan_input.db_path,
+                            existing_findings_summary,
+                        ],
+                        start_to_close_timeout=timedelta(hours=4),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
+                    ),
+                )
+            except Exception as exc:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "gapfill.failed",
+                    {"error": _describe_failure(exc)},
+                )
+                gapfill_result = []
 
             for task_dict in cast(list[dict[str, Any]], gapfill_result):
                 task = AgentTask.model_validate(task_dict)
@@ -492,7 +752,8 @@ class RunScanWorkflow:
             # Gapfill tasks re-enter the hunt stage (second pass)
             if gapfill_tasks:
                 runnable_gapfill = [
-                    t for t in gapfill_tasks
+                    t
+                    for t in gapfill_tasks
                     if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
                 ]
                 max_concurrent = scan_input.hunt_max_concurrent
@@ -504,24 +765,43 @@ class RunScanWorkflow:
                             list[dict[str, Any]],
                             await workflow.execute_activity(
                                 "hunt-vuln-class",
-                                args=[task, scan_input.repo_path, 8, None],
-                                start_to_close_timeout=timedelta(minutes=10),
-                                heartbeat_timeout=timedelta(seconds=60),
-                                retry_policy=ACTIVITY_RETRY_POLICY,
+                                args=[
+                                    task,
+                                    repo_path,
+                                    40,
+                                    gf_budget_remaining,
+                                    hunt_panel_json,
+                                    scan_input.db_path,
+                                ],
+                                start_to_close_timeout=timedelta(hours=4),
+                                heartbeat_timeout=timedelta(minutes=3),
+                                retry_policy=self._retry_policy,
                             ),
                         )
 
                 gapfill_hunt_results = await asyncio.gather(
-                    *[_run_one_gapfill_hunt(t) for t in runnable_gapfill]
+                    *[_run_one_gapfill_hunt(t) for t in runnable_gapfill],
+                    return_exceptions=True,
                 )
-                for task_findings in gapfill_hunt_results:
+                for task_result in gapfill_hunt_results:
+                    if isinstance(task_result, BaseException):
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "gapfill.rehunt_failed",
+                            {"error": _describe_failure(task_result)},
+                        )
+                        continue
+                    task_findings, _ = split_hunt_result(task_result)
                     for finding_dict in task_findings:
                         candidate = CandidateFinding.model_validate(finding_dict)
                         candidate_findings.append(candidate)
 
             await _persist_scan_stage(scan_input.db_path, scan.id, "GAPFILL")
             await _append_workflow_event(
-                scan_input.db_path, scan.id, "gapfill.completed",
+                scan_input.db_path,
+                scan.id,
+                "gapfill.completed",
                 {"gapfill_task_count": str(len(gapfill_tasks))},
             )
 
@@ -530,26 +810,56 @@ class RunScanWorkflow:
         # ambiguous clusters (plan: week-13.md algorithm).
         if not _stage_completed(completed_stage, "DEDUP"):
             self._current_stage = "DEDUP"
-            pre_dedup_count = len(candidate_findings)
-            dedup_result: list[Any] = cast(
-                list[Any],
-                await workflow.execute_activity(
-                    "deduplicate-findings",
-                    args=[
-                        [f.model_dump(mode="json") for f in candidate_findings],
-                        scan_input.repo_path,
-                        None,
-                    ],
-                    start_to_close_timeout=timedelta(minutes=5),
-                    heartbeat_timeout=timedelta(seconds=60),
-                    retry_policy=ACTIVITY_RETRY_POLICY,
-                ),
+            dd_spent = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
             )
-            deduped_dicts = cast(list[dict[str, Any]], dedup_result)
-            candidate_findings = [CandidateFinding.model_validate(d) for d in deduped_dicts]
+            dd_over_budget, dd_budget_remaining = budget_decision(scan.budget_cap_usd, dd_spent)
+            if dd_over_budget:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "stage.budget_exceeded",
+                    {"stage": "DEDUP", "cap": str(scan.budget_cap_usd)},
+                )
+            pre_dedup_count = len(candidate_findings)
+            # dedup reuses the gapfill role config (same toolset, same provider)
+            dedup_panel_json = panel_json_for_role(scan, "gapfill")
+            # Dedup is best-effort: on failure keep the (un-deduped) candidates
+            # rather than failing the scan.
+            try:
+                dedup_result: list[Any] = cast(
+                    list[Any],
+                    await workflow.execute_activity(
+                        "deduplicate-findings",
+                        args=[
+                            [f.model_dump(mode="json") for f in candidate_findings],
+                            repo_path,
+                            dd_budget_remaining,
+                            dedup_panel_json,
+                            scan_input.db_path,
+                        ],
+                        start_to_close_timeout=timedelta(hours=4),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
+                    ),
+                )
+                deduped_dicts = cast(list[dict[str, Any]], dedup_result)
+                candidate_findings = [CandidateFinding.model_validate(d) for d in deduped_dicts]
+            except Exception as exc:
+                # Keep candidate_findings as-is (un-deduped), but record the failure.
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "dedup.failed",
+                    {"error": _describe_failure(exc)},
+                )
             await _persist_scan_stage(scan_input.db_path, scan.id, "DEDUP")
             await _append_workflow_event(
-                scan_input.db_path, scan.id, "dedup.completed",
+                scan_input.db_path,
+                scan.id,
+                "dedup.completed",
                 {
                     "before": str(pre_dedup_count),
                     "after": str(len(candidate_findings)),
@@ -569,6 +879,7 @@ class RunScanWorkflow:
         reporting_scan = scan.model_copy(
             update={"status": ScanStatus.COMPLETED, "started_at": started_at}
         )
+        model_invocations_json = await _load_model_invocations_json(scan_input.db_path, scan.id)
         rendered_report_payload = await workflow.execute_activity(
             "render-markdown-report",
             RenderReportInput(
@@ -583,9 +894,10 @@ class RunScanWorkflow:
                     _model_list_json(proof_artifacts) if proof_artifacts else None
                 ),
                 manifest_json=scan_manifest.model_dump_json(),
+                model_invocations_json=model_invocations_json,
             ),
             start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=ACTIVITY_RETRY_POLICY,
+            retry_policy=self._retry_policy,
         )
         rendered_report = _render_report_output_from_activity(rendered_report_payload)
 
@@ -654,8 +966,6 @@ class RunScanWorkflow:
             final_finding_count=len(final_findings),
         )
 
-
-
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
             "build-scan-manifest",
@@ -667,7 +977,7 @@ class RunScanWorkflow:
                 plugins_active=tuple(scan.profile.plugins_active),
             ),
             start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=ACTIVITY_RETRY_POLICY,
+            retry_policy=self._retry_policy,
         )
         manifest = _scan_manifest_from_activity(payload)
         await _persist_scan_state(
@@ -689,7 +999,6 @@ class RunScanWorkflow:
         requested = tuple(vc.value for vc in scan.profile.vuln_classes)
         completed_classes = tuple(sorted({f.vuln_class.value for f in final_findings}))
         # Skipped = tasks that ran but produced no finding
-        finding_components = {f.affected_component for f in final_findings if f.affected_component}
         skipped: list[dict[str, str]] = [
             {
                 "task_id": t.id,
@@ -698,9 +1007,7 @@ class RunScanWorkflow:
                 "reason": "no finding from hunt agent",
             }
             for t in agent_tasks
-            if not any(
-                f.vuln_class == t.vuln_class for f in final_findings
-            )
+            if not any(f.vuln_class == t.vuln_class for f in final_findings)
         ]
         payload = await workflow.execute_activity(
             "build-coverage-ledger",
@@ -715,7 +1022,7 @@ class RunScanWorkflow:
                 skipped_json=json.dumps(skipped, sort_keys=True),
             ),
             start_to_close_timeout=timedelta(minutes=1),
-            retry_policy=ACTIVITY_RETRY_POLICY,
+            retry_policy=self._retry_policy,
         )
         output = _coverage_output_from_activity(payload)
         artifact_ref = ArtifactRef.model_validate_json(output.artifact_ref_json)
@@ -757,7 +1064,7 @@ class RunScanWorkflow:
                 existing_keys=existing_keys,
             ),
             start_to_close_timeout=timedelta(minutes=2),
-            retry_policy=ACTIVITY_RETRY_POLICY,
+            retry_policy=self._retry_policy,
         )
         for run in _integration_runs_from_activity(payload):
             if run.status is IntegrationStatus.SKIPPED:
@@ -906,7 +1213,9 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         coverage_ledger, Path(scan_input.output_dir) / "artifacts"
     )
     repository.save_artifact_ref(scan.id, coverage_ref)
-    _append_event(repository, scan.id, "coverage.recorded", {"agent_tasks_total": "0", "skipped": "0"})
+    _append_event(
+        repository, scan.id, "coverage.recorded", {"agent_tasks_total": "0", "skipped": "0"}
+    )
 
     reporting_scan = scan.model_copy(
         update={"status": ScanStatus.COMPLETED, "started_at": started_at}
@@ -1020,7 +1329,7 @@ async def _persist_scan_state(
             payload_json=json.dumps(payload, sort_keys=True),
         ),
         start_to_close_timeout=timedelta(minutes=1),
-        retry_policy=ACTIVITY_RETRY_POLICY,
+        retry_policy=_PERSIST_RETRY_POLICY,
         cancellation_type=cancellation_type,
     )
 
@@ -1066,6 +1375,51 @@ async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]
     return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
 
 
+def budget_decision(cap: float | None, spent: float) -> tuple[bool, float | None]:
+    """Decide whether a scan is over budget and how much remains.
+
+    Returns ``(over_budget, remaining)``. ``cap=None`` disables gating →
+    ``(False, None)``. Otherwise ``remaining`` is the (non-negative) headroom and
+    ``over_budget`` is True once spend has reached or passed the cap. The workflow
+    checks this before each agentic stage: if over budget the stage is skipped and
+    marked budget-overrun, but the scan continues to the next stage.
+    """
+    if cap is None:
+        return (False, None)
+    remaining = cap - spent
+    return (remaining <= 0.0, max(remaining, 0.0))
+
+
+async def _scan_cost_so_far(db_path: str, scan_id: str) -> float:
+    """Sum persisted per-call ``estimated_cost`` for a scan (unpriced rows count 0).
+
+    This is the cumulative spend that persists across runs — a resumed scan
+    re-reads it, so a stage with no remaining budget overruns immediately.
+    """
+    payload = await _persist_scan_state(db_path, "load_model_invocations", {"scan_id": scan_id})
+    if not isinstance(payload, list):
+        return 0.0
+    total = 0.0
+    for item in cast(list[object], payload):
+        if isinstance(item, dict):
+            cost = cast("dict[str, Any]", item).get("estimated_cost")
+            if isinstance(cost, int | float):
+                total += float(cost)
+    return total
+
+
+async def _load_model_invocations_json(db_path: str, scan_id: str) -> str | None:
+    """Return persisted model invocations for a scan as a JSON-array string.
+
+    Returns ``None`` when there are no invocations (mock-backed runs record none),
+    so the report omits the Cost & usage section entirely.
+    """
+    payload = await _persist_scan_state(db_path, "load_model_invocations", {"scan_id": scan_id})
+    if not isinstance(payload, list) or not payload:
+        return None
+    return json.dumps(payload)
+
+
 async def _load_integration_runs(db_path: str, scan_id: str) -> list[IntegrationRun]:
     payload = await _persist_scan_state(db_path, "load_integration_runs", {"scan_id": scan_id})
     if not isinstance(payload, list):
@@ -1083,6 +1437,26 @@ def _integration_runs_from_activity(payload: object) -> list[IntegrationRun]:
         item if isinstance(item, IntegrationRun) else IntegrationRun.model_validate(item)
         for item in items
     ]
+
+
+def panel_json_for_role(scan: Scan, role: str) -> str | None:
+    """Return a serialised ``RoleConfig`` JSON for *role* from the scan's panel snapshot.
+
+    Returns ``None`` when the snapshot is empty (e.g. in tests that do not pass
+    panel_entries), which causes each activity to fall back to its own DEFAULT_PANEL.
+    """
+    entry = next((e for e in scan.panel_snapshot if e.role == role), None)
+    if entry is None:
+        return None
+    try:
+        provider = _Provider(entry.provider)
+    except ValueError:
+        return None
+    return _RoleConfig(
+        provider=provider,
+        model=entry.model,
+        rpm=entry.rate_limit_rpm,
+    ).model_dump_json()
 
 
 def _persisted_stage(scan: Scan | None) -> str | None:
@@ -1104,15 +1478,50 @@ def _model_json_dict(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
+def _final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -> FinalFinding:
+    """Build a FinalFinding from a validated CandidateFinding.
+
+    ``now`` is passed in (workflow.now()) so this stays usable from workflow code
+    under the Temporal sandbox.
+    """
+    return FinalFinding(
+        id=candidate.id,
+        scan_id=scan_id,
+        workspace_id="local",
+        fingerprint=candidate.metadata.get("fingerprint", candidate.id),
+        vuln_class=candidate.vuln_class,
+        severity=candidate.severity,
+        title=candidate.title,
+        summary=candidate.hypothesis,
+        affected_component=candidate.affected_component,
+        source_refs=candidate.source_refs,
+        validation_result_id=f"{candidate.id}-validation",
+        created_at=now,
+    )
+
+
+def split_hunt_result(result: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a hunt activity result into (findings, coverage_gaps).
+
+    The real hunt activity returns ``{"findings": [...], "coverage_gaps": [...]}``.
+    Legacy/mock activities may return a bare list of finding dicts; treat that as
+    findings with no gaps so older mocks keep working.
+    """
+    if isinstance(result, dict):
+        findings = cast(list[dict[str, Any]], result.get("findings", []))
+        gaps = cast(list[dict[str, Any]], result.get("coverage_gaps", []))
+        return findings, gaps
+    if isinstance(result, list):
+        return cast(list[dict[str, Any]], result), []
+    return [], []
+
+
 def _join_path(root: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), *parts])
 
 
 def _model_list_json(
-    items: list[CandidateFinding]
-    | list[FinalFinding]
-    | list[ProofArtifact]
-    | list[AgentTask],
+    items: list[CandidateFinding] | list[FinalFinding] | list[ProofArtifact] | list[AgentTask],
 ) -> str:
     return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 
@@ -1203,25 +1612,23 @@ def _render_report_output_from_activity(payload: object) -> RenderReportOutput:
     raise TypeError(msg)
 
 
-def _dict_payload(payload: object) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        msg = f"Expected dict payload, got {type(payload).__name__}"
-        raise TypeError(msg)
-    return cast(dict[str, Any], payload)
+def _clone_result_from_activity(payload: object) -> CloneRepoResult:
+    if isinstance(payload, CloneRepoResult):
+        return payload
+    if isinstance(payload, dict):
+        values = cast(dict[str, Any], payload)
+        return CloneRepoResult(
+            local_path=_required_str(values, "local_path"),
+            commit_sha=_required_str(values, "commit_sha"),
+        )
+    msg = f"Unexpected clone payload: {type(payload).__name__}"
+    raise TypeError(msg)
 
 
 def _required_str(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str):
         msg = f"{key} must be a string"
-        raise TypeError(msg)
-    return value
-
-
-def _required_int(payload: dict[str, Any], key: str) -> int:
-    value = payload.get(key)
-    if not isinstance(value, int):
-        msg = f"{key} must be an integer"
         raise TypeError(msg)
     return value
 
@@ -1236,8 +1643,6 @@ def _required_str_list(payload: dict[str, Any], key: str) -> list[str]:
         msg = f"{key} must be a list of strings"
         raise TypeError(msg)
     return [item for item in items if isinstance(item, str)]
-
-
 
 
 def _report_artifact_ref(report_path: Path) -> ArtifactRef:

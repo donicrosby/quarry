@@ -7,8 +7,10 @@ but use build_prompt() + PromptRegistry instead of the deleted build_hunt_prompt
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from quarry.schemas import EntryPoint, ScopeExclusion, VulnerabilityClass
+from quarry_models.types import ModelMessage
 from quarry_prompts.build_prompt import build_prompt
 from quarry_prompts.registry import PromptRegistry
 
@@ -19,16 +21,19 @@ def _registry() -> PromptRegistry:
     return PromptRegistry(prompts_root=PROMPTS_ROOT)
 
 
-def _render(vuln_class: VulnerabilityClass, **kw) -> list:
+def _render(vuln_class: VulnerabilityClass, **kw: Any) -> list[ModelMessage]:
+    # Route to the per-class hunt template (mirrors hunt.py); every known class
+    # now has its own prompts/hunt/<vuln_class>.1.0.0.j2.
     return build_prompt(
         registry=_registry(),
         role="hunt",
-        name="hunt",
+        name=kw.get("name", vuln_class.value),
         version="1.0.0",
         variables={
             "vuln_class": vuln_class.value,
             "scope": kw.get("scope", "src/"),
             "entry_points": kw.get("entry_points", []),
+            "recon_notes": kw.get("recon_notes", ""),
             "focus_classes": [c.value for c in kw.get("focused_classes", [])],
             "scope_exclusions": kw.get("scope_exclusions", []),
             "task_prompt": kw.get("task_prompt", "Look for sinks."),
@@ -106,45 +111,37 @@ def test_hunt_prompt_evidence_wrapped_in_target_content() -> None:
     assert "handlers/admin.go" in user_content
 
 
-def test_hunt_prompt_no_class_specific_python_branching() -> None:
-    """Each vuln class produces a different prompt hash — driven by data."""
+def test_hunt_per_class_templates_are_distinct() -> None:
+    """Per-class hunt templates are distinct files → distinct template shas.
+
+    Routing is still data-driven (by vuln_class name), not Python branching:
+    hunt.py picks the template name from the task's vuln_class.
+    """
     from quarry_prompts.build_prompt import build_prompt as _bp
 
-    r1 = _bp(
-        registry=_registry(),
-        role="hunt",
-        name="hunt",
-        version="1.0.0",
-        variables={
-            "vuln_class": VulnerabilityClass.COMMAND_INJECTION.value,
-            "scope": "src/",
-            "entry_points": [],
-            "focus_classes": [],
-            "scope_exclusions": [],
-            "task_prompt": "cmdi prompt",
-            "evidence_chunks": [],
-        },
-    )
-    r2 = _bp(
-        registry=_registry(),
-        role="hunt",
-        name="hunt",
-        version="1.0.0",
-        variables={
-            "vuln_class": VulnerabilityClass.IDOR.value,
-            "scope": "src/",
-            "entry_points": [],
-            "focus_classes": [],
-            "scope_exclusions": [],
-            "task_prompt": "idor prompt",
-            "evidence_chunks": [],
-        },
-    )
-    # Different vuln_class and task_prompt → different rendered output → different hashes
-    assert r1.ref.sha256 == r2.ref.sha256  # same template sha
-    system_hash_1 = r1.part_hashes.get("system", "")
-    system_hash_2 = r2.part_hashes.get("system", "")
-    developer_hash_1 = r1.part_hashes.get("developer", "")
-    developer_hash_2 = r2.part_hashes.get("developer", "")
-    # developer part contains vuln_class and task_prompt so must differ
-    assert developer_hash_1 != developer_hash_2
+    def _r(vc: VulnerabilityClass):
+        return _bp(
+            registry=_registry(),
+            role="hunt",
+            name=vc.value,
+            version="1.0.0",
+            variables={
+                "vuln_class": vc.value,
+                "scope": "src/",
+                "entry_points": [],
+                "recon_notes": "",
+                "focus_classes": [],
+                "scope_exclusions": [],
+                "task_prompt": f"{vc.value} prompt",
+                "evidence_chunks": [],
+            },
+        )
+
+    r1 = _r(VulnerabilityClass.COMMAND_INJECTION)
+    r2 = _r(VulnerabilityClass.IDOR)
+    # Different per-class template files → different template shas.
+    assert r1.ref.sha256 != r2.ref.sha256
+    assert r1.ref.id == "hunt/command_injection"
+    assert r2.ref.id == "hunt/idor"
+    # Same class twice is deterministic.
+    assert _r(VulnerabilityClass.SSRF).ref.sha256 == _r(VulnerabilityClass.SSRF).ref.sha256

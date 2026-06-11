@@ -9,13 +9,13 @@ Tests:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from quarry.schemas import WorkflowEvent
 from quarry_models.redaction import scrub
-
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
@@ -121,7 +121,6 @@ class TestReasoningRejectedEvent:
 
     def test_payload_is_json_serialisable(self) -> None:
         """All event payloads must be JSON-serialisable."""
-        import json  # noqa: PLC0415
 
         event = _make_event(
             "agent.reasoning_rejected",

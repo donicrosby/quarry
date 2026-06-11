@@ -7,13 +7,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 PROMPTS_ROOT = Path(__file__).parent.parent.parent / "prompts"
 
 
 def _get_registry():
     from quarry_prompts.registry import PromptRegistry
+
     return PromptRegistry(prompts_root=PROMPTS_ROOT)
 
 
@@ -48,8 +47,9 @@ def test_build_prompt_returns_rendered_prompt_with_hashes() -> None:
 
 def test_build_prompt_round_trip_hash_invariant() -> None:
     """Strip provenance header, re-hash parts, get the same hashes back."""
-    from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
     from hashlib import sha256
+
+    from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 
     registry = _get_registry()
     rendered = build_prompt(
@@ -137,10 +137,16 @@ def test_build_prompt_evidence_is_scrubbed_before_hashing() -> None:
 def test_build_prompt_ssti_fixture_file_is_safe() -> None:
     """The SSTI fixture file appears literal inside <target_content>, never evaluated."""
     from pathlib import Path
+
     from quarry_prompts.build_prompt import build_prompt
 
     registry = _get_registry()
-    fixture = Path(__file__).parent.parent / "fixtures" / "prompt-injection" / "malicious_http_response.html"
+    fixture = (
+        Path(__file__).parent.parent
+        / "fixtures"
+        / "prompt-injection"
+        / "malicious_http_response.html"
+    )
     html_content = fixture.read_text(encoding="utf-8")
 
     rendered = build_prompt(

@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for XML external entity (XXE) injection. Sources: user-supplied XML. Sinks: XML parsers configured to resolve external entities/DTDs (lxml resolve_entities, DocumentBuilderFactory without disallow-doctype, XMLReader, SAX/DOM with entity expansion). Report any parse of untrusted XML where external-entity/DTD processing is not explicitly disabled.

@@ -103,4 +103,9 @@ def _finding_file_path(item: FinalFinding) -> str:
 
 
 def _normalize_path(file_path: str) -> str:
-    return file_path.replace("\\", "/").strip("/")
+    # Ground truth is file-level (e.g. "ssrf:app.py"). Findings often carry the
+    # location appended to the path — "app.py:78", "app.py:60-66",
+    # "app.py::ping (lines 58-66)" — so key on the file alone by dropping anything
+    # from the first ":" onward, then normalise separators.
+    file_only = file_path.split(":", 1)[0].strip()
+    return file_only.replace("\\", "/").strip("/")

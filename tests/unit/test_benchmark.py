@@ -12,7 +12,7 @@ from quarry.schemas import (
     utc_now,
 )
 
-GROUND_TRUTH_PATH = Path("examples/vulnerable-fastapi/ground_truth.json")
+GROUND_TRUTH_PATH = Path("tests/golden/ground_truth/vulnerable-fastapi.json")
 
 
 def _secret_finding() -> FinalFinding:
@@ -106,3 +106,23 @@ def test_idor_found() -> None:
 
     assert "idor:app.py" in result.matched
     assert result.expected >= 4  # secrets, idor, command_injection, ssrf
+
+
+def test_ground_truth_inside_repo_is_detected() -> None:
+    """The benchmark guard flags an answer key sitting inside the scanned repo."""
+    from quarry_cli.main import ground_truth_is_inside_repo
+
+    # Inside the repo tree → cheat condition.
+    assert (
+        ground_truth_is_inside_repo(
+            "examples/vulnerable-fastapi", "examples/vulnerable-fastapi/ground_truth.json"
+        )
+        is True
+    )
+    # Outside the repo tree (current layout) → fine.
+    assert (
+        ground_truth_is_inside_repo(
+            "examples/vulnerable-fastapi", "tests/golden/ground_truth/vulnerable-fastapi.json"
+        )
+        is False
+    )

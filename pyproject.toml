@@ -9,6 +9,7 @@ description = "Local-first agentic vulnerability research harness."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "botocore>=1.43.26",
   "fastapi>=0.115.13",
   "httpx>=0.28.1",
   "jinja2>=3.1.6",
@@ -33,6 +34,7 @@ dev = [
   "pyright>=1.1.401",
   "pytest>=8.3.5",
   "pytest-asyncio>=0.26.0",
+  "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.0",
   "ruff>=0.11.12",
 ]
@@ -64,23 +66,33 @@ module-name = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = ["tests/fixtures"]
+# examples/ are intentional vulnerability fixtures (scan targets) — never lint or
+# reformat them (it would alter seeded code and shift golden line numbers).
+extend-exclude = ["tests/fixtures", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Query/Path/Depends in argument defaults is the framework's intended
+# idiom, not the mutable-default-argument bug B008 guards against.
+extend-immutable-calls = ["fastapi.Query", "fastapi.Path", "fastapi.Depends", "fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-n auto"
-filterwarnings = ["error::ResourceWarning"]
+timeout = 300
+filterwarnings = [
+    "error::ResourceWarning",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
 exclude = ["**/__pycache__", "tests/fixtures"]
-extraPaths = ["src"]
+extraPaths = ["src", "scripts"]
 venv = ".venv"
 venvPath = "."
 reportUnknownMemberType = "none"

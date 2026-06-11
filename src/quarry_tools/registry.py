@@ -23,7 +23,7 @@ def load_registry() -> ToolRegistry:
 
     try:
         eps = importlib.metadata.entry_points(group="quarry.tools")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _log.warning("Could not load quarry.tools entry points: %s", exc)
         return registry
 
@@ -33,7 +33,7 @@ def load_registry() -> ToolRegistry:
             registry[tool.name] = tool
         except ToolUnavailableError as exc:
             _log.info("Tool %r unavailable (binary missing?): %s", ep.name, exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _log.warning("Failed to load tool %r: %s", ep.name, exc)
 
     return registry

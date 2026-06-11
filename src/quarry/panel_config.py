@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from quarry.schemas import Provider, VulnerabilityClass
 
@@ -36,16 +36,16 @@ class RoleConfig(BaseModel):
 
 # The default built-in panel.  All roles fall back here if not overridden.
 DEFAULT_PANEL: dict[str, RoleConfig] = {
-    "recon": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "hunt": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "validate": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "gapfill": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "prove": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "trace": RoleConfig(provider="mock", model="mock-v1", rpm=30),
-    "report": RoleConfig(provider="mock", model="mock-v1", rpm=30),
+    "recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "hunt": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "gapfill": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "prove": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "trace": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "report": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     # dynamic_validate: live corroboration role (ADR-017). Separate from static
     # validate to keep the network-free adversarial-review boundary intact.
-    "dynamic_validate": RoleConfig(provider="mock", model="mock-v1", rpm=30),
+    "dynamic_validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
 }
 
 
@@ -70,12 +70,29 @@ class ScanDefaultsConfig(BaseModel):
     hunt_max_concurrent: int = 8
 
 
+class RetryConfig(BaseModel):
+    """How many times each Temporal activity is attempted before giving up.
+
+    ``max_attempts`` counts the initial try plus retries (Temporal semantics):
+    e.g. ``4`` means one attempt + three retries. The default sits in the
+    recommended 3–5 range; values below 1 are clamped to 1 (at least one try).
+    """
+
+    max_attempts: int = 4
+
+    @field_validator("max_attempts")
+    @classmethod
+    def _clamp_min_one(cls, v: int) -> int:
+        return max(1, v)
+
+
 class QuarryConfig(BaseModel):
     """Top-level parsed quarry.toml configuration."""
 
     panels: dict[str, NamedPanel] = Field(default_factory=dict)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     scan_defaults: ScanDefaultsConfig = Field(default_factory=ScanDefaultsConfig)
+    retry: RetryConfig = Field(default_factory=RetryConfig)
 
 
 def _check_for_credentials(raw: dict[str, Any]) -> None:

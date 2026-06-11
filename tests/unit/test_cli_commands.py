@@ -45,14 +45,17 @@ class FakeQuarryClient:
         repo_path: str,
         target_url: str | None = None,
         vuln_classes: list[VulnerabilityClass] | None = None,
+        repo_url: str | None = None,
     ) -> dict[str, str]:
         if self.connect_error_on == "start":
             raise httpx.ConnectError("server unavailable")
         self.started_scans.append((repo_path, target_url))
         type(self).last_vuln_classes = vuln_classes
+        type(self).last_repo_url = repo_url
         return self.start_response
 
     last_vuln_classes: ClassVar[list[VulnerabilityClass] | None] = None
+    last_repo_url: ClassVar[str | None] = None
 
     async def start_diff_scan(
         self,

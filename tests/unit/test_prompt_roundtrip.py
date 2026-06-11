@@ -42,15 +42,14 @@ def test_round_trip_system_hash() -> None:
 
     assert stored, "system hash must be non-empty"
     assert recomputed == stored, (
-        f"Round-trip invariant failed:\n"
-        f"  recomputed: {recomputed}\n"
-        f"  stored:     {stored}"
+        f"Round-trip invariant failed:\n  recomputed: {recomputed}\n  stored:     {stored}"
     )
 
 
 def test_round_trip_evidence_hashes() -> None:
     """evidence_hashes stored in RenderedPrompt match sha256 of scrubbed chunks."""
     from hashlib import sha256 as _sha256
+
     from quarry_models.redaction import scrub
     from quarry_prompts.build_prompt import build_prompt
     from quarry_prompts.registry import PromptRegistry
@@ -74,9 +73,7 @@ def test_round_trip_evidence_hashes() -> None:
     )
 
     assert len(rendered.evidence_hashes) == len(raw_chunks)
-    for raw, stored_hash in zip(raw_chunks, rendered.evidence_hashes):
+    for raw, stored_hash in zip(raw_chunks, rendered.evidence_hashes, strict=False):
         scrubbed = scrub(raw).text
         expected = _sha256(scrubbed.encode("utf-8")).hexdigest()
-        assert expected == stored_hash, (
-            f"Evidence hash mismatch for chunk {raw!r}"
-        )
+        assert expected == stored_hash, f"Evidence hash mismatch for chunk {raw!r}"

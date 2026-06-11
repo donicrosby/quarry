@@ -10,6 +10,7 @@ from __future__ import annotations
 
 def test_load_registry_contains_builtin_tools() -> None:
     from quarry_tools.registry import load_registry
+
     registry = load_registry()
     assert "read_file" in registry
     assert "grep" in registry
@@ -20,6 +21,7 @@ def test_load_registry_contains_builtin_tools() -> None:
 def test_load_registry_contains_extension_tools() -> None:
     """opengrep and treesitter_query must appear after entry-point loading."""
     from quarry_tools.registry import load_registry
+
     registry = load_registry()
     assert "opengrep" in registry, "opengrep must be registered via entry-points"
     assert "treesitter_query" in registry, "treesitter_query must be registered via entry-points"
@@ -27,11 +29,13 @@ def test_load_registry_contains_extension_tools() -> None:
 
 def test_opengrep_registered_for_hunt_role() -> None:
     from quarry_tools.registry import load_registry
+
     registry = load_registry()
     assert "hunt" in registry["opengrep"].roles
 
 
 def test_treesitter_registered_for_hunt_role() -> None:
     from quarry_tools.registry import load_registry
+
     registry = load_registry()
     assert "hunt" in registry["treesitter_query"].roles

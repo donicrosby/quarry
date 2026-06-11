@@ -7,9 +7,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from jinja2 import TemplateSyntaxError, UndefinedError
-from jinja2.sandbox import SandboxedEnvironment
 from jinja2 import FileSystemLoader, StrictUndefined
+from jinja2.sandbox import SandboxedEnvironment
 
 
 class TemplateNotFoundError(FileNotFoundError):
@@ -20,7 +19,7 @@ class TemplateNotFoundError(FileNotFoundError):
 class PromptTemplateRef:
     """Immutable reference to a loaded template."""
 
-    id: str      # "{role}/{name}"
+    id: str  # "{role}/{name}"
     version: str
     sha256: str  # hex-encoded SHA-256 of the raw template bytes
 

@@ -83,7 +83,7 @@ class _Grep:
         scope_path = _safe_resolve(str(inputs.get("scope", ".")), repo_root)
         pattern = str(inputs["pattern"])
         try:
-            result = subprocess.run(  # noqa: S603
+            result = subprocess.run(
                 ["rg", "--json", pattern, str(scope_path)],
                 capture_output=True,
                 text=True,
@@ -129,7 +129,7 @@ class _SearchCode:
         scope = str(inputs.get("scope", "."))
         scope_path = _safe_resolve(scope, repo_root)
         try:
-            result = subprocess.run(  # noqa: S603
+            result = subprocess.run(
                 [
                     "ast-grep",
                     "run",

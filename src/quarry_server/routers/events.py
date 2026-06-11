@@ -61,6 +61,7 @@ async def get_scan_events(
 
     # Apply event_types filter
     if event_types:
+
         def _matches(event: WorkflowEvent) -> bool:
             for pattern in event_types:
                 if pattern.endswith(".*"):

@@ -123,13 +123,14 @@ async def test_start_scan_posts_scan_request(client_context: ClientTestContext) 
     started_workflow = client_context.temporal_client.started_workflows[0]
     assert started_workflow.workflow == "RunScanWorkflow"
     assert started_workflow.workflow_id == response["scan_id"]
-    assert started_workflow.scan_input == RunScanInput(
-        repo_path="/tmp/example-repo",
-        scan_id=response["scan_id"],
-        target_url="http://localhost:8000",
-        output_dir=".quarry",
-        db_path=".quarry/quarry.db",
-    )
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    assert scan_input.repo_path == "/tmp/example-repo"
+    assert scan_input.scan_id == response["scan_id"]
+    assert scan_input.target_url == "http://localhost:8000"
+    assert scan_input.output_dir == ".quarry"
+    # panel_entries is now populated by the router from the resolved panel config
+    assert isinstance(scan_input.panel_entries, list)
 
 
 async def test_start_scan_with_vuln_classes_threads_them_to_workflow(
@@ -250,12 +251,16 @@ async def test_resume_scan_posts_resume_request(client_context: ClientTestContex
     assert len(client_context.temporal_client.started_workflows) == 1
     started_workflow = client_context.temporal_client.started_workflows[0]
     assert started_workflow.workflow == "RunScanWorkflow"
-    assert started_workflow.scan_input == RunScanInput(
-        repo_path="/tmp/example-repo",
-        scan_id="scan-1",
-        db_path=str(client_context.db_path),
-        resume=True,
-    )
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    assert scan_input.repo_path == "/tmp/example-repo"
+    assert scan_input.scan_id == "scan-1"
+    assert scan_input.db_path == str(client_context.db_path)
+    assert scan_input.resume is True
+    # Resume threads the configured retry attempts (quarry.toml [retry], default 4).
+    from quarry.panel_config import load_quarry_config
+
+    assert scan_input.activity_max_attempts == load_quarry_config().retry.max_attempts
 
 
 async def test_get_findings_returns_finding_models(client_context: ClientTestContext) -> None:

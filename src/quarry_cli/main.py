@@ -14,6 +14,7 @@ from quarry.benchmark import compare, load_ground_truth
 from quarry.config import QuarrySettings
 from quarry.panel_config import resolve_focus
 from quarry.schemas import FinalFinding, ScanSummary, VulnerabilityClass
+from quarry_activities.clone import is_git_url
 from quarry_activities.target import start_local_target, terminate_local_target
 from quarry_client.client import QuarryClient
 
@@ -153,9 +154,12 @@ async def _run_scan_command(
     async_mode: bool,
     focus_classes: list[VulnerabilityClass] | None = None,
 ) -> list[str]:
+    # A git URL (--repo https://… / git@… / ssh://…) is cloned by the workflow;
+    # a local path is scanned in place.
+    repo_url = repo if is_git_url(repo) else None
     async with QuarryClient(base_url=settings.server_url) as client:
         result = await client.start_scan(
-            repo_path=repo, target_url=target, vuln_classes=focus_classes
+            repo_path=repo, target_url=target, vuln_classes=focus_classes, repo_url=repo_url
         )
         scan_id = result["scan_id"]
         if async_mode:
@@ -233,6 +237,19 @@ def _exit_server_not_reachable(settings: QuarrySettings) -> NoReturn:
 
 @app.command("worker")
 def worker() -> None:
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-30s %(levelname)s %(message)s",
+        force=True,
+    )
+    # Suppress noisy third-party loggers
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("temporalio").setLevel(logging.WARNING)
+
     from quarry_worker.main import main
 
     main()
@@ -247,11 +264,22 @@ def server(
     ] = False,
 ) -> None:
     """Start the Quarry API server with Temporal worker."""
+    import logging
     import os
 
     import uvicorn
 
     from quarry.config import QuarrySettings
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-30s %(levelname)s %(message)s",
+        force=True,
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("temporalio").setLevel(logging.WARNING)
 
     settings = QuarrySettings()
     os.environ["QUARRY_SERVER_NO_WORKER"] = "1" if no_worker else "0"
@@ -312,7 +340,7 @@ def benchmark_local(
     ] = "examples/vulnerable-fastapi",
     ground_truth: Annotated[
         str, typer.Option("--ground-truth", help="Path to ground truth JSON")
-    ] = "examples/vulnerable-fastapi/ground_truth.json",
+    ] = "tests/golden/ground_truth/vulnerable-fastapi.json",
     target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
 ) -> None:
     """Scan the demo app via the server and compare findings to ground truth."""
@@ -324,7 +352,23 @@ def benchmark_local(
     except FileNotFoundError:
         typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
         raise typer.Exit(1) from None
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
     _echo_lines(lines)
+
+
+def ground_truth_is_inside_repo(repo: str, ground_truth: str) -> bool:
+    """True if the ground-truth file lives inside the scanned repo tree.
+
+    An answer key inside the scanned repo lets recon/hunters read it and "cheat",
+    invalidating the benchmark. The fix is to keep ground-truth files outside the
+    repo; this guard makes a regression fail loudly instead of silently inflating
+    recall.
+    """
+    repo_root = Path(repo).resolve()
+    gt = Path(ground_truth).resolve()
+    return repo_root == gt or repo_root in gt.parents
 
 
 async def _benchmark_local_command(
@@ -333,10 +377,21 @@ async def _benchmark_local_command(
     ground_truth: str,
     target: str | None,
 ) -> list[str]:
+    if ground_truth_is_inside_repo(repo, ground_truth):
+        raise ValueError(
+            f"Ground-truth file {ground_truth!r} is inside the scanned repo {repo!r}; "
+            "the agents could read the answer key. Move it outside the repo tree."
+        )
     truth = load_ground_truth(ground_truth)
+    # Scan exactly the vuln classes present in the ground truth, so recall is
+    # measured against what we actually hunt for (the default profile omits
+    # ssrf/xss/sql_injection, which would otherwise always read as "missed").
+    truth_classes = sorted({item.vuln_class for item in truth}, key=lambda c: c.value)
     async with QuarryClient(base_url=settings.server_url) as client:
         started = time.monotonic()
-        result = await client.start_scan(repo_path=repo, target_url=target)
+        result = await client.start_scan(
+            repo_path=repo, target_url=target, vuln_classes=truth_classes
+        )
         scan_id = result["scan_id"]
         while True:
             status = await client.get_scan_status(scan_id)

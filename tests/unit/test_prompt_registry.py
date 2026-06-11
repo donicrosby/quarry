@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 PROMPTS_ROOT = Path(__file__).parent.parent.parent / "prompts"
 
 
@@ -46,6 +45,7 @@ def test_registry_raises_on_missing_template() -> None:
 def test_registry_raises_on_jinja_syntax_error(tmp_path: Path) -> None:
     """A template with a Jinja syntax error raises TemplateSyntaxError on load."""
     from jinja2 import TemplateSyntaxError
+
     from quarry_prompts.registry import PromptRegistry
 
     bad_template_dir = tmp_path / "test_role"
@@ -60,13 +60,12 @@ def test_registry_raises_on_jinja_syntax_error(tmp_path: Path) -> None:
 def test_registry_strict_undefined_raises_on_missing_variable(tmp_path: Path) -> None:
     """Rendering a template with a missing variable raises UndefinedError."""
     from jinja2 import UndefinedError
+
     from quarry_prompts.registry import PromptRegistry
 
     role_dir = tmp_path / "myrole"
     role_dir.mkdir()
-    (role_dir / "mytemplate.1.0.0.j2").write_text(
-        "Hello {{ required_var }}", encoding="utf-8"
-    )
+    (role_dir / "mytemplate.1.0.0.j2").write_text("Hello {{ required_var }}", encoding="utf-8")
 
     registry = PromptRegistry(prompts_root=tmp_path)
     template = registry.load("myrole", "mytemplate", "1.0.0")

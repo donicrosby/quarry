@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for broken authentication. Look for: missing auth checks on protected routes, weak or guessable session/token generation, credentials compared non-constant-time, JWTs accepted with alg=none or unverified signatures, password reset/OTP flows without rate limiting or with predictable tokens, and hardcoded/bypass credentials. Report any path that authenticates a caller without a sound, enforced check.

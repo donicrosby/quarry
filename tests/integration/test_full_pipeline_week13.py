@@ -16,8 +16,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     AgentTask,
@@ -29,9 +27,9 @@ from quarry.schemas import (
     ValidationResult,
     VulnerabilityClass,
 )
-from quarry_activities.dedup import _DedupeResponse, _dedup_impl
-from quarry_activities.gapfill import _GapfillResponse, _gapfill_impl
-from quarry_activities.validate import _ValidateResponse, _validate_impl
+from quarry_activities.dedup import DedupeResponse, dedup_impl
+from quarry_activities.gapfill import GapfillResponse, gapfill_impl
+from quarry_activities.validate import ValidateResponse, validate_impl
 from quarry_models.mock_client import MockModelClient
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
@@ -123,9 +121,9 @@ HUNT_TASKS = [
 
 class TestValidateStageWeek13:
     def test_all_findings_validated(self) -> None:
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
         results = [
-            _validate_impl(
+            validate_impl(
                 finding=f,
                 repo_path="examples/vulnerable-express",
                 panel=_CROSS_VENDOR_PANEL,
@@ -139,9 +137,9 @@ class TestValidateStageWeek13:
 
     def test_cross_vendor_disagreement_fires(self) -> None:
         """Findings with hunter_provider='litellm', validate panel='mock' → disagreement."""
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
         results = [
-            _validate_impl(
+            validate_impl(
                 finding=f,
                 repo_path="examples/vulnerable-express",
                 panel=_CROSS_VENDOR_PANEL,
@@ -156,9 +154,9 @@ class TestValidateStageWeek13:
         )
 
     def test_all_results_have_candidate_ids(self) -> None:
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
         results = [
-            _validate_impl(
+            validate_impl(
                 finding=f,
                 repo_path="examples/vulnerable-express",
                 panel=_CROSS_VENDOR_PANEL,
@@ -177,12 +175,12 @@ class TestValidateStageWeek13:
 
 
 class TestGapfillStageWeek13:
-    def test_floor_satisfied_for_all_focused_classes(self) -> None:
-        """After gapfill, every focused vuln_class has ≥2 tasks."""
-        client = MockModelClient(default=_GapfillResponse())
+    def test_no_tasks_when_agent_finds_no_gaps(self) -> None:
+        """No coverage floor: empty agent output + no hunter gaps → no re-hunt tasks."""
+        client = MockModelClient(default=GapfillResponse())
         ledger = _ledger(FOCUSED)
 
-        new_tasks = _gapfill_impl(
+        new_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=HUNT_TASKS,
             vuln_classes=FOCUSED,
@@ -191,20 +189,17 @@ class TestGapfillStageWeek13:
             client=client,
         )
 
-        # Merge existing + gapfill tasks
-        all_tasks = list(HUNT_TASKS) + new_tasks
-
-        for vc in FOCUSED:
-            count = sum(1 for t in all_tasks if t.vuln_class == vc)
-            assert count >= 2, (
-                f"Expected ≥2 tasks for {vc.value} after gapfill; got {count}"
-            )
+        assert new_tasks == []
 
     def test_gapfill_tasks_have_gapfill_source(self) -> None:
-        client = MockModelClient(default=_GapfillResponse())
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "xss", "scope": "routes/", "reason": "templates untraced"}]
+            )
+        )
         ledger = _ledger(FOCUSED)
 
-        new_tasks = _gapfill_impl(
+        new_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=HUNT_TASKS,
             vuln_classes=FOCUSED,
@@ -213,14 +208,21 @@ class TestGapfillStageWeek13:
             client=client,
         )
 
+        assert new_tasks, "expected at least one gap task"
         assert all(t.source == "gapfill" for t in new_tasks)
 
-    def test_xss_gets_floor_task_added(self) -> None:
-        """XSS has 1 existing task (below the floor of 2) → gapfill adds ≥1."""
-        client = MockModelClient(default=_GapfillResponse())
+    def test_agent_reported_xss_gap_becomes_task(self) -> None:
+        """A gap the gapfill agent reports for XSS becomes one re-hunt task."""
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[
+                    {"vuln_class": "xss", "scope": "routes/", "reason": "reflected param untraced"}
+                ]
+            )
+        )
         ledger = _ledger(FOCUSED)
 
-        new_tasks = _gapfill_impl(
+        new_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=HUNT_TASKS,
             vuln_classes=FOCUSED,
@@ -230,9 +232,7 @@ class TestGapfillStageWeek13:
         )
 
         xss_new = [t for t in new_tasks if t.vuln_class == VulnerabilityClass.XSS]
-        assert len(xss_new) >= 1, (
-            f"Expected ≥1 new XSS gapfill task (floor enforcement); got {len(xss_new)}"
-        )
+        assert len(xss_new) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +243,8 @@ class TestGapfillStageWeek13:
 class TestDedupStageWeek13:
     def test_duplicate_ci_pair_collapses(self) -> None:
         """cf-1 and cf-2 share root_cause_key='ci-dup-root'; they collapse to one."""
-        client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
-        result = _dedup_impl(candidates=HUNT_FINDINGS, client=client)
+        client = MockModelClient(default=DedupeResponse(decision="keep_first"))
+        result = dedup_impl(candidates=HUNT_FINDINGS, client=client)
 
         ids = {f.id for f in result}
         assert "cf-1" in ids, "Winner (cf-1) should be kept after keep_first"
@@ -254,8 +254,8 @@ class TestDedupStageWeek13:
 
     def test_net_dedup_count_two(self) -> None:
         """3 findings → dedup → 2 findings (1 unique CI + 1 XSS)."""
-        client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
-        result = _dedup_impl(candidates=HUNT_FINDINGS, client=client)
+        client = MockModelClient(default=DedupeResponse(decision="keep_first"))
+        result = dedup_impl(candidates=HUNT_FINDINGS, client=client)
         assert len(result) == 2
 
 
@@ -268,9 +268,9 @@ class TestFullPipelineWeek13:
     def test_five_stage_pipeline_coherent_output(self) -> None:
         """Run all five stages and verify the combined invariants hold."""
         # Stage 3: validate
-        validate_client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        validate_client = MockModelClient(default=ValidateResponse(verdict="validated"))
         validation_results = [
-            _validate_impl(
+            validate_impl(
                 finding=f,
                 repo_path="examples/vulnerable-express",
                 panel=_CROSS_VENDOR_PANEL,
@@ -283,8 +283,8 @@ class TestFullPipelineWeek13:
 
         # Stage 4: gapfill
         ledger = _ledger(FOCUSED)
-        gapfill_client = MockModelClient(default=_GapfillResponse())
-        gapfill_tasks = _gapfill_impl(
+        gapfill_client = MockModelClient(default=GapfillResponse())
+        gapfill_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=HUNT_TASKS,
             vuln_classes=FOCUSED,
@@ -293,13 +293,11 @@ class TestFullPipelineWeek13:
             client=gapfill_client,
         )
 
-        all_tasks = list(HUNT_TASKS) + gapfill_tasks
-        for vc in FOCUSED:
-            count = sum(1 for t in all_tasks if t.vuln_class == vc)
-            assert count >= 2, f"Floor not satisfied for {vc.value}"
+        # No coverage floor: with no real gaps the gapfill stage adds nothing.
+        assert gapfill_tasks == []
 
         # Stage 5: dedup
-        dedup_client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
-        deduped = _dedup_impl(candidates=HUNT_FINDINGS, client=dedup_client)
+        dedup_client = MockModelClient(default=DedupeResponse(decision="keep_first"))
+        deduped = dedup_impl(candidates=HUNT_FINDINGS, client=dedup_client)
         assert len(deduped) == 2
         assert {f.id for f in deduped} == {"cf-1", "cf-3"}

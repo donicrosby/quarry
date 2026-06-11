@@ -4,12 +4,7 @@ const { exec } = require('child_process');
 const express = require('express');
 const router = express.Router();
 
-// POST /admin/exec — run a system command from the request body
-//
-// Body: { "cmd": "<command to run>" }
-//
-// This endpoint passes the request body field directly to the shell without
-// sanitization. Only intended for use in controlled local development.
+// POST /admin/exec — run a system command from the request body. Body: { "cmd": "..." }
 router.post('/exec', (req, res) => {
   const { cmd } = req.body;
   if (!cmd || typeof cmd !== 'string') {
@@ -24,7 +19,7 @@ router.post('/exec', (req, res) => {
   });
 });
 
-// GET /admin/status — basic admin status check (no auth required for simplicity)
+// GET /admin/status — basic admin status check
 router.get('/status', (req, res) => {
   return res.json({ admin: true, uptime: process.uptime() });
 });

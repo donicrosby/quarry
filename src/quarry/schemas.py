@@ -69,6 +69,18 @@ class VulnerabilityClass(StrEnum):
     SQL_INJECTION = "sql_injection"
     XSS = "xss"
     FILE_UPLOAD = "file_upload"
+    # OWASP-aligned + common taint-friendly classes (Week 13+ expansion).
+    PATH_TRAVERSAL = "path_traversal"
+    OPEN_REDIRECT = "open_redirect"
+    SSTI = "ssti"
+    INSECURE_DESERIALIZATION = "insecure_deserialization"
+    XXE = "xxe"
+    LDAP_INJECTION = "ldap_injection"
+    MASS_ASSIGNMENT = "mass_assignment"
+    AUTH = "auth"
+    SECURITY_MISCONFIGURATION = "security_misconfiguration"
+    INSECURE_DESIGN = "insecure_design"
+    WEAK_CRYPTO = "weak_crypto"
 
 
 class TriageLabel(StrEnum):
@@ -132,6 +144,10 @@ def _empty_vuln_classes() -> list[VulnerabilityClass]:
 
 
 def _empty_coverage_gaps() -> list[CoverageGap]:
+    return []
+
+
+def _empty_entry_points() -> list[EntryPoint]:
     return []
 
 
@@ -232,6 +248,10 @@ class Target(BaseModel):
     target_kind: Literal["local_repo", "local_web_app", "remote_web_app"] = "local_repo"
     allowed_hosts: list[str] = Field(default_factory=list)
     auth_config_ref: str | None = None
+    # Git URL the repo was cloned from (audit trail), when scanning a remote repo.
+    origin_url: str | None = None
+    # Commit SHA the clone was pinned to (deterministic re-clone on resume).
+    origin_commit_sha: str | None = None
     created_at: datetime
 
 
@@ -421,6 +441,13 @@ class AgentTask(BaseModel):
     task_prompt: str = ""
     vuln_class: VulnerabilityClass | None = None
     scope: str | None = None
+    # Entry points recon mapped for this scope, threaded through so the hunter
+    # receives concrete leads instead of "(none identified)". Forward-ref to
+    # EntryPoint (defined later in this module); resolved via model_rebuild().
+    entry_points: list[EntryPoint] = Field(default_factory=_empty_entry_points)
+    # Recon's free-text notes for this scope (per-class sink/source buckets),
+    # carried so the hunter can seed backward-taint from recon's leads.
+    recon_notes: str = ""
     source: Literal["recon", "gapfill", "feedback"] = "recon"
     gapfill_pass: int = 0
     input_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
@@ -481,6 +508,22 @@ class CoverageGap(BaseModel):
     reason: str
     recommended_next_task: str | None = None
     severity_hint: str | None = None
+
+
+class HunterGap(BaseModel):
+    """A coverage gap a hunter self-reports at the end of its pass.
+
+    It names an area (a path, directory, file, or input vector) the hunter did
+    NOT fully investigate or deliberately skipped, plus why. Gapfill turns these
+    into a fresh round of targeted re-hunt tasks. Fields are lenient (all have
+    defaults) so a flaky open-model response can't fail validation on this field.
+    ``vuln_class`` is filled in by the hunt activity from the task's class; the
+    model only needs to emit ``area`` and ``reason``.
+    """
+
+    area: str = ""
+    reason: str = ""
+    vuln_class: VulnerabilityClass | None = None
 
 
 class CoverageLedger(BaseModel):
@@ -729,10 +772,6 @@ def _empty_impacted_regions() -> list[ImpactedCodeRegion]:
     return []
 
 
-def _empty_entry_points() -> list[EntryPoint]:
-    return []
-
-
 def _empty_call_edges() -> list[CallEdge]:
     return []
 
@@ -754,6 +793,11 @@ class EntryPoint(BaseModel):
         "message_handler",
         "unknown",
     ]
+
+
+# AgentTask references EntryPoint in a forward annotation but is defined above
+# it; rebuild now that EntryPoint exists so the field type resolves.
+AgentTask.model_rebuild()
 
 
 class CallEdge(BaseModel):
@@ -1003,7 +1047,7 @@ class ReasoningCheckResult(BaseModel):
 
     passed: bool
     failed_checks: list[str] = Field(default_factory=list)
-    """Names of sub-checks that failed: 'presence', 'context_reference', 'lexicon', 'args_coherence'."""
+    """Names of failed sub-checks: 'presence', 'context_reference', 'lexicon', 'args_coherence'."""
 
     detail: str = ""
     """Human-readable feedback rendered into the re-prompt (via the vague_reasoning.j2 template)."""
@@ -1012,6 +1056,7 @@ class ReasoningCheckResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Validator-independence boundary (ADR-021 / Week 13)
 # ---------------------------------------------------------------------------
+
 
 class ValidatorClaim(BaseModel):
     """The subset of a CandidateFinding the validator is allowed to receive.

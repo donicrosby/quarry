@@ -7,7 +7,6 @@ These tests exercise the complete pipeline:
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 import sqlite3
 import subprocess
@@ -28,11 +27,9 @@ from quarry.schemas import (
     Scan,
     ScanStatus,
     Target,
-    VulnerabilityClass,
     local_scan_profile,
 )
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
-from quarry_activities.hunt import hunt_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
@@ -144,6 +141,8 @@ def slow_hunt_activity(
     repo_path: str | None = None,
     max_iterations: int = 12,
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> list[object]:
     for index in range(200):
         with suppress(RuntimeError):
@@ -161,8 +160,10 @@ def _pass_through_recon_subsystem(
     scan_id: str | None = None,
     budget_spec: object = None,
     panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
+
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
     return {

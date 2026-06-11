@@ -16,26 +16,29 @@ Findings with root_cause_key=None are each treated as their own singleton
 
 from __future__ import annotations
 
-import uuid
+import contextvars
+import threading
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 from temporalio import activity
 
-from quarry.schemas import CandidateFinding
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
+from quarry.schemas import CandidateFinding, Provider
+from quarry_activities.model_cost import persist_model_invocations
+from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec
-from quarry_prompts import get_registry
-from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
+from quarry_models.mock_client import MockModelClient
+from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
 
 _MAX_CLUSTER_SIZE = 5
 
 
-class _DedupeResponse(BaseModel):
+class DedupeResponse(BaseModel):
     """Model output schema for the dedup agent loop."""
 
     decision: str = "keep_all"  # keep_all | keep_first | keep_by_index
@@ -43,7 +46,9 @@ class _DedupeResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = []
 
 
-def _apply_decision(cluster: list[CandidateFinding], response: _DedupeResponse) -> list[CandidateFinding]:
+def _apply_decision(
+    cluster: list[CandidateFinding], response: DedupeResponse
+) -> list[CandidateFinding]:
     """Apply the agent's dedup decision to a cluster of findings."""
     decision = response.decision.lower().strip()
 
@@ -62,23 +67,22 @@ def _apply_decision(cluster: list[CandidateFinding], response: _DedupeResponse) 
         return list(cluster)
 
 
-def _dedup_impl(
+def dedup_impl(
     *,
     candidates: list[CandidateFinding],
     client: Any,
-    max_iterations: int = 4,
+    max_iterations: int = 8,
     budget_spec: BudgetSpec | None = None,
     cost_per_iteration: float = 0.0,
     repo_path: str = "",
     scan_log: list[str] | None = None,
+    provider_policy: ProviderPolicy | None = None,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
     Groups by root_cause_key; None keys each get their own singleton bucket
     (None is not a valid grouping key — each null-key finding stands alone).
     """
-    from quarry_tools.registry import load_registry  # noqa: PLC0415
-
     if budget_spec is None:
         budget_spec = BudgetSpec()
 
@@ -102,8 +106,6 @@ def _dedup_impl(
         registry=load_registry(),
         budget_spec=budget_spec,
     )
-
-    registry = get_registry()
 
     for key, cluster in keyed.items():
         if len(cluster) == 1:
@@ -151,12 +153,13 @@ def _dedup_impl(
             initial_user_message=initial_message,
             runner=runner,
             budget_spec=budget_spec,
-            response_model=_DedupeResponse,
+            response_model=DedupeResponse,
             max_iterations=max_iterations,
             cost_per_iteration=cost_per_iteration,
+            provider_policy=provider_policy,
         )
 
-        if loop_result.final_answer and isinstance(loop_result.final_answer, _DedupeResponse):
+        if loop_result.final_answer and isinstance(loop_result.final_answer, DedupeResponse):
             kept = _apply_decision(cluster, loop_result.final_answer)
         else:
             # Loop didn't return a clean answer → keep all (permissive default)
@@ -172,14 +175,42 @@ def deduplicate_activity(
     candidates: list[dict[str, Any]] | None = None,
     repo_path: str = "",
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: deduplicate CandidateFindings by root_cause_key.
 
     Returns a list of CandidateFinding dicts (JSON-serialisable at the Temporal boundary).
     """
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    stop_heartbeat = threading.Event()
+    _ctx = contextvars.copy_context()
 
+    def _heartbeat_loop() -> None:
+        while not stop_heartbeat.wait(timeout=30):
+            with suppress(Exception):
+                _ctx.run(activity.heartbeat)
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    heartbeat_thread.start()
+
+    try:
+        return _deduplicate_activity_impl(
+            candidates, repo_path, budget_cap_usd, panel_json, db_path
+        )
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=5)
+
+
+def _deduplicate_activity_impl(
+    # list[Any]: the Temporal pydantic converter may deliver dicts OR already-parsed
+    # CandidateFinding models, so both isinstance branches below are load-bearing.
+    candidates: list[Any] | None,
+    repo_path: str,
+    budget_cap_usd: float | None,
+    panel_json: str | None,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
     parsed: list[CandidateFinding] = []
     if candidates:
         for c in candidates:
@@ -188,21 +219,32 @@ def deduplicate_activity(
             elif isinstance(c, CandidateFinding):
                 parsed.append(c)
 
-    from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
+    role_cfg = (
+        RoleConfig.model_validate_json(panel_json)
+        if panel_json is not None
+        else DEFAULT_PANEL["gapfill"]  # dedup reuses the gapfill toolset
+    )
 
-    client = MockModelClient(default=_DedupeResponse())
+    if role_cfg.provider == Provider.MOCK:
+        client: Any = MockModelClient(default=DedupeResponse())
+        policy: ProviderPolicy | None = None
+    else:
+        client = build_model_client(role_cfg.provider)
+        policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
     scan_log: list[str] = []
 
-    result = _dedup_impl(
+    result = dedup_impl(
         candidates=parsed,
         client=client,
         budget_spec=budget_spec,
         repo_path=repo_path,
         scan_log=scan_log,
+        provider_policy=policy,
     )
 
-    with suppress(RuntimeError):
-        activity.heartbeat()
+    scan_id = parsed[0].scan_id if parsed else ""
+    persist_model_invocations(db_path, scan_id, client)
 
     return [f.model_dump(mode="json") for f in result]

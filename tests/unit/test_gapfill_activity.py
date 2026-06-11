@@ -1,14 +1,9 @@
-"""Tests for GapfillActivity (Week 13 / Part 1C).
+"""Tests for GapfillActivity.
 
-Written RED first — these fail until gapfill_activity is implemented.
-
-The activity:
-1. Calls enforce_coverage_floor to get mandatory synthetic tasks.
-2. Calls run_agent_loop with role='gapfill' to find additional gaps from the ledger.
-3. Merges synthetic + agent output, deduped by (vuln_class, scope).
-
-Key invariant: the coverage floor must fire even when the model returns no gaps.
-This is tested explicitly — the floor is a correctness invariant, not a hint.
+Gapfill builds re-hunt tasks from REAL gaps only — hunter-reported coverage gaps
+and gaps the gapfill agent genuinely finds — deduped by (vuln_class, scope). There
+is no synthetic coverage floor: when there are no real gaps, gapfill returns no
+tasks (it must not send hunters after every vuln class for nothing).
 """
 
 from __future__ import annotations
@@ -16,16 +11,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
 from quarry.schemas import (
     AgentTask,
     CoverageLedger,
-    GapfillTask,
     VulnerabilityClass,
 )
-from quarry_activities.gapfill import _gapfill_impl
+from quarry_activities.gapfill import gapfill_impl
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 
@@ -37,7 +30,7 @@ _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 # ---------------------------------------------------------------------------
 
 
-class _GapfillResponse(BaseModel):
+class GapfillResponse(BaseModel):
     """Mock response schema for the gapfill agent loop."""
 
     gaps: list[dict[str, Any]] = []
@@ -57,135 +50,165 @@ def _make_ledger(scan_id: str = "scan-1") -> CoverageLedger:
     )
 
 
-def _make_task(vuln_class: VulnerabilityClass, scope: str = "src/", source: str = "recon") -> AgentTask:
-    return AgentTask(
-        id=f"task-{vuln_class.value}",
-        scan_id="scan-1",
-        role="hunt",
-        task_name=f"hunt-{vuln_class.value}",
-        vuln_class=vuln_class,
-        scope=scope,
-        source=source,  # type: ignore[arg-type]
-        status="pending",
-        created_at=_NOW,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 class TestGapfillActivityGapIdentified:
-    def test_gap_identified_for_zero_candidate_class(self) -> None:
-        """Gapfill activity returns tasks for a focused class with no prior tasks."""
+    def test_gap_identified_when_agent_reports_one(self) -> None:
+        """A gap the gapfill agent reports becomes one re-hunt task for that class."""
         ledger = _make_ledger()
-        existing_tasks: list[AgentTask] = [
-            _make_task(VulnerabilityClass.XSS),
-            _make_task(VulnerabilityClass.XSS),
-        ]
-        focused = [VulnerabilityClass.XSS, VulnerabilityClass.COMMAND_INJECTION]
-        # COMMAND_INJECTION has 0 tasks → floor adds 2 tasks
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[
+                    {"vuln_class": "command_injection", "scope": "src/", "reason": "sink untraced"}
+                ]
+            )
+        )
 
-        client = MockModelClient(default=_GapfillResponse(gaps=[]))
-
-        result = _gapfill_impl(
+        result = gapfill_impl(
             ledger=ledger,
-            existing_tasks=existing_tasks,
-            vuln_classes=focused,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.COMMAND_INJECTION],
             repo_path="/tmp/repo",
             scan_id="scan-1",
             client=client,
         )
 
         ci_tasks = [t for t in result if t.vuln_class == VulnerabilityClass.COMMAND_INJECTION]
-        assert len(ci_tasks) >= 2, (
-            f"Expected at least 2 COMMAND_INJECTION gap tasks, got {len(ci_tasks)}"
-        )
+        assert len(ci_tasks) == 1
 
 
-class TestGapfillFloorInvariant:
-    def test_floor_adds_tasks_when_model_returns_empty(self) -> None:
-        """The coverage floor fires even when the model outputs no gaps.
+class TestGapfillNoFloor:
+    def test_no_tasks_when_no_real_gaps(self) -> None:
+        """No coverage floor: empty agent output + no hunter gaps → no re-hunt tasks.
 
-        This is the critical invariant: floor is in Python, not the prompt.
+        Previously a synthetic floor forced ≥2 re-hunts per class even with nothing
+        to find, sending hunters on a wild goose chase. That is gone.
         """
         ledger = _make_ledger()
-        existing_tasks: list[AgentTask] = []
-        focused = [VulnerabilityClass.IDOR]
+        client = MockModelClient(default=GapfillResponse(gaps=[]))
 
-        # Model returns no gaps
-        client = MockModelClient(default=_GapfillResponse(gaps=[]))
-
-        result = _gapfill_impl(
+        result = gapfill_impl(
             ledger=ledger,
-            existing_tasks=existing_tasks,
-            vuln_classes=focused,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.IDOR],
             repo_path="/tmp/repo",
             scan_id="scan-1",
             client=client,
         )
 
-        idor_tasks = [t for t in result if t.vuln_class == VulnerabilityClass.IDOR]
-        assert len(idor_tasks) >= 2, (
-            f"Floor must add IDOR tasks even when model returns empty; got {len(idor_tasks)}"
-        )
+        assert result == []
 
     def test_gapfill_tasks_have_correct_source(self) -> None:
         """Tasks generated by gapfill must have source='gapfill'."""
         ledger = _make_ledger()
-        existing_tasks: list[AgentTask] = []
-        focused = [VulnerabilityClass.SSRF]
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "ssrf", "scope": "src/", "reason": "untraced fetch"}]
+            )
+        )
 
-        client = MockModelClient(default=_GapfillResponse(gaps=[]))
-
-        result = _gapfill_impl(
+        result = gapfill_impl(
             ledger=ledger,
-            existing_tasks=existing_tasks,
-            vuln_classes=focused,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.SSRF],
             repo_path="/tmp/repo",
             scan_id="scan-1",
             client=client,
         )
 
+        assert result, "expected at least one gap task"
         for task in result:
-            assert task.source == "gapfill", (
-                f"Gapfill task must have source='gapfill', got '{task.source}'"
-            )
+            assert task.source == "gapfill"
 
 
 class TestGapfillDeduplication:
-    def test_no_duplication_when_model_echoes_floor_gap(self) -> None:
-        """If the model identifies the same gap as the floor, it is not duplicated."""
+    def test_no_duplication_across_hunter_and_agent_gaps(self) -> None:
+        """A hunter gap and an agent gap for the same (class, scope) dedup to one task."""
         ledger = _make_ledger()
-        existing_tasks: list[AgentTask] = []
-        focused = [VulnerabilityClass.FILE_UPLOAD]
-
-        # Model returns a gap for FILE_UPLOAD in "src/" (same as floor would add)
+        # Agent reports a gap for (file_upload, src/); hunter reports the same area.
         client = MockModelClient(
-            default=_GapfillResponse(
-                gaps=[{"vuln_class": "file_upload", "scope": "src/", "reason": "No tests found"}]
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "file_upload", "scope": "src/", "reason": "agent gap"}]
             )
         )
 
-        result = _gapfill_impl(
+        result = gapfill_impl(
             ledger=ledger,
-            existing_tasks=existing_tasks,
-            vuln_classes=focused,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.FILE_UPLOAD],
             repo_path="/tmp/repo",
             scan_id="scan-1",
             client=client,
+            hunter_gaps=[{"area": "src/", "reason": "hunter gap", "vuln_class": "file_upload"}],
         )
 
         fu_scoped_tasks = [
-            t for t in result
+            t
+            for t in result
             if t.vuln_class == VulnerabilityClass.FILE_UPLOAD and t.scope == "src/"
         ]
-        # Should not have more than 2 despite model + floor both finding the same gap
-        # (the floor pads to min_per_class=2; model result merges in if not already present)
-        assert len(fu_scoped_tasks) <= 2, (
-            f"Duplicate gapfill tasks detected for (file_upload, src/): {len(fu_scoped_tasks)}"
+        assert len(fu_scoped_tasks) == 1, (
+            f"Expected one deduped (file_upload, src/) task, got {len(fu_scoped_tasks)}"
         )
+
+
+class TestGapfillExistingFindingsContext:
+    def test_skips_gap_already_covered_by_existing_finding(self) -> None:
+        """A gap for an area an existing finding already covers must NOT become a re-hunt task."""
+        ledger = _make_ledger()
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "ssrf", "scope": "src/", "reason": "fetch helper untraced"}]
+            )
+        )
+
+        result = gapfill_impl(
+            ledger=ledger,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.SSRF],
+            repo_path="/tmp/repo",
+            scan_id="scan-1",
+            client=client,
+            existing_findings=[
+                {
+                    "vuln_class": "ssrf",
+                    "title": "SSRF in fetch",
+                    "affected_component": "src/app.py:42",
+                }
+            ],
+        )
+
+        ssrf_tasks = [t for t in result if t.vuln_class == VulnerabilityClass.SSRF]
+        assert ssrf_tasks == [], "ssrf in src/ already has a finding — no re-hunt task expected"
+
+    def test_creates_gap_for_uncovered_area_despite_findings(self) -> None:
+        """An uncovered (class, scope) still becomes a task even when other findings exist."""
+        ledger = _make_ledger()
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "xss", "scope": "routes/", "reason": "templates untraced"}]
+            )
+        )
+
+        result = gapfill_impl(
+            ledger=ledger,
+            existing_tasks=[],
+            vuln_classes=[VulnerabilityClass.XSS],
+            repo_path="/tmp/repo",
+            scan_id="scan-1",
+            client=client,
+            existing_findings=[
+                {"vuln_class": "ssrf", "title": "SSRF", "affected_component": "src/app.py:42"}
+            ],
+        )
+
+        xss_tasks = [
+            t for t in result if t.vuln_class == VulnerabilityClass.XSS and t.scope == "routes/"
+        ]
+        assert len(xss_tasks) == 1
 
 
 class TestGapfillReturnType:
@@ -193,9 +216,9 @@ class TestGapfillReturnType:
         """The gapfill activity must return a list of AgentTask."""
         ledger = _make_ledger()
         focused = [VulnerabilityClass.XSS]
-        client = MockModelClient(default=_GapfillResponse())
+        client = MockModelClient(default=GapfillResponse())
 
-        result = _gapfill_impl(
+        result = gapfill_impl(
             ledger=ledger,
             existing_tasks=[],
             vuln_classes=focused,
@@ -207,3 +230,106 @@ class TestGapfillReturnType:
         assert isinstance(result, list)
         for item in result:
             assert isinstance(item, AgentTask), f"Expected AgentTask, got {type(item)}"
+
+
+# ---------------------------------------------------------------------------
+# Panel-aware client selection for gapfill_activity (Change 3)
+# ---------------------------------------------------------------------------
+
+
+def test_gapfill_activity_mock_panel_does_not_call_build() -> None:
+    """gapfill_activity with provider=mock must not call build_model_client."""
+    from unittest.mock import patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.gapfill import gapfill_activity
+
+    mock_panel_json = RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30).model_dump_json()
+    ledger = _make_ledger()
+
+    with patch("quarry_activities.gapfill.build_model_client") as mock_build:
+        gapfill_activity(
+            ledger.model_dump(mode="json"), [], None, "/tmp/repo", None, mock_panel_json
+        )
+
+    mock_build.assert_not_called()
+
+
+def test_gapfill_activity_litellm_panel_builds_litellm_client() -> None:
+    """gapfill_activity with provider=litellm must call build_model_client and pass policy."""
+    from unittest.mock import MagicMock, patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.gapfill import gapfill_activity
+    from quarry_models.types import ProviderPolicy
+
+    litellm_panel_json = RoleConfig(
+        provider=Provider.LITELLM,
+        model="chutes/moonshotai/Kimi-K2-Instruct",
+        rpm=20,
+    ).model_dump_json()
+    ledger = _make_ledger()
+
+    fake_client = MagicMock()
+    received_policies: list[ProviderPolicy] = []
+
+    def _spy_loop(**kwargs: object) -> object:
+        p = kwargs.get("provider_policy")
+        if isinstance(p, ProviderPolicy):
+            received_policies.append(p)
+        from quarry.schemas import AgentLoopResult
+
+        return AgentLoopResult(
+            final_answer=None,
+            steps=[],
+            iterations_used=1,
+            total_cost=0.0,
+            stop_reason="final_answer",
+        )
+
+    with (
+        patch(
+            "quarry_activities.gapfill.build_model_client", return_value=fake_client
+        ) as mock_build,
+        patch("quarry_activities.gapfill.run_agent_loop", side_effect=_spy_loop),
+    ):
+        gapfill_activity(
+            ledger.model_dump(mode="json"), [], None, "/tmp/repo", None, litellm_panel_json
+        )
+
+    mock_build.assert_called_once()
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/moonshotai/Kimi-K2-Instruct"
+
+
+def test_gapfill_turns_hunter_gaps_into_rehunt_tasks() -> None:
+    """Hunter-reported coverage gaps become targeted re-hunt tasks (scope=area)."""
+    ledger = _make_ledger()
+    client = MockModelClient(default=GapfillResponse(gaps=[]))
+    hunter_gaps = [
+        {
+            "area": "config/",
+            "reason": "did not search for hardcoded secrets",
+            "vuln_class": "secrets",
+        },
+    ]
+
+    result = gapfill_impl(
+        ledger=ledger,
+        existing_tasks=[],
+        vuln_classes=[VulnerabilityClass.SECRETS],
+        repo_path=".",
+        scan_id="scan-1",
+        client=client,
+        hunter_gaps=hunter_gaps,
+    )
+
+    gap_tasks = [t for t in result if t.scope == "config/"]
+    assert len(gap_tasks) == 1
+    t = gap_tasks[0]
+    assert t.vuln_class == VulnerabilityClass.SECRETS
+    assert t.source == "gapfill"
+    assert "config/" in t.task_prompt

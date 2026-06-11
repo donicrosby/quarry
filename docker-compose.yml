@@ -1,0 +1,78 @@
+# Quarry local stack: Temporal (dev) + API server + worker.
+#
+#   docker compose up --build
+#
+# The server runs with --no-worker so the dedicated worker container owns the
+# `quarry-control` task queue (running both would double-poll the queue).
+# Secrets/config (CHUTES_API_KEY, QUARRY_PANEL, GITHUB_TOKEN, GIT_CLONE_TOKEN)
+# are passed through from your shell / .env — see .env.example.
+
+services:
+  temporal:
+    image: temporalio/temporal:latest
+    command: server start-dev --port 7233 --ui-port 8233 --ip 0.0.0.0
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  server:
+    build:
+      context: .
+      # Version pins default in the Dockerfile; override here if needed, e.g.
+      # args:
+      #   UV_VERSION: 0.9.21
+    image: quarry:local
+    command: ["quarry", "server", "--no-worker"]
+    environment:
+      QUARRY_TEMPORAL_ADDRESS: temporal:7233
+      QUARRY_SERVER_HOST: 0.0.0.0
+      QUARRY_SERVER_PORT: "8000"
+      QUARRY_DB_PATH: /data/quarry.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - quarry-data:/data
+    depends_on:
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request, sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    # Same image as the server; built once by the server service.
+    image: quarry:local
+    command: ["quarry", "worker"]
+    environment:
+      QUARRY_TEMPORAL_ADDRESS: temporal:7233
+      QUARRY_DB_PATH: /data/quarry.db
+      # Optional model/scan config + git auth — passed through from the host/.env.
+      QUARRY_PANEL: ${QUARRY_PANEL:-}
+      CHUTES_API_KEY: ${CHUTES_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GIT_CLONE_TOKEN: ${GIT_CLONE_TOKEN:-}
+    volumes:
+      - quarry-data:/data
+    depends_on:
+      temporal:
+        condition: service_healthy
+
+volumes:
+  # Shared SQLite DB + scan artifacts. Dev-grade: two containers share one SQLite
+  # file and rely on its locking. Postgres is the future path for concurrency.
+  quarry-data:

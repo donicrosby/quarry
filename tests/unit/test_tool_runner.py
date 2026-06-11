@@ -5,7 +5,6 @@ Written RED first — these fail until quarry_tools is created.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -117,13 +116,20 @@ def test_run_returns_tool_call_record(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    shutil.which("rg") is not None,
-    reason="rg is installed; can't test missing-binary path",
-)
-def test_grep_raises_tool_unavailable_when_rg_missing(tmp_path: Path) -> None:
+def test_grep_raises_tool_unavailable_when_rg_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
     from quarry_tools.builtins import BUILTIN_REGISTRY
     from quarry_tools.runner import ToolRunner as TR
+
+    # Simulate ripgrep being absent regardless of the host so the missing-binary
+    # fallback is exercised everywhere (previously skipped wherever rg was installed).
+    def _no_rg(*_args: object, **_kwargs: object) -> object:
+        raise FileNotFoundError("rg")
+
+    monkeypatch.setattr(subprocess, "run", _no_rg)
 
     runner = TR(
         repo_root=tmp_path,

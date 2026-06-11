@@ -55,12 +55,22 @@ def check_unauthorized_action(actions: list[str], allowed_kinds: list[str]) -> b
 # All four checks apply to high-risk and proof/exploit kinds.
 # Read-only kinds skip args_coherence (presence + context_reference + lexicon only).
 _READ_ONLY_KINDS: frozenset[str] = frozenset(
-    {"read_file", "read", "list_dir", "grep", "search_code", "treesitter_query", "cite",
-     "summarize", "hypothesize", "request_check", "safe_proof", "deliver_finalized"}
+    {
+        "read_file",
+        "read",
+        "list_dir",
+        "grep",
+        "search_code",
+        "treesitter_query",
+        "cite",
+        "summarize",
+        "hypothesize",
+        "request_check",
+        "safe_proof",
+        "deliver_finalized",
+    }
 )
-_HIGH_RISK_KINDS: frozenset[str] = frozenset(
-    {"http_request", "opengrep", "codeql_query"}
-)
+_HIGH_RISK_KINDS: frozenset[str] = frozenset({"http_request", "opengrep", "codeql_query"})
 _PROOF_KINDS: frozenset[str] = frozenset({"dynamic_validate", "prove"})
 
 # ── Defaults (overridden by [scan.reasoning_lexicon] in quarry.toml) ────────
@@ -89,9 +99,9 @@ _MIN_TOKEN_LENGTH: int = 4
 # explicit param mentions (`param`=), and named function refs (module.function).
 _LOCATOR_RE = _re.compile(
     r"(?:"
-    r"/[a-zA-Z0-9_\-/.?=&%]+"   # URL path: /search?q= or /admin/users
+    r"/[a-zA-Z0-9_\-/.?=&%]+"  # URL path: /search?q= or /admin/users
     r"|[a-zA-Z0-9_/\-.]+\.[a-zA-Z]{1,6}:\d+"  # file:line: src/auth.py:42
-    r"|`[a-zA-Z0-9_\-]+`"        # backtick-quoted param name: `q`
+    r"|`[a-zA-Z0-9_\-]+`"  # backtick-quoted param name: `q`
     r"|(?<![a-zA-Z])[a-zA-Z0-9_]+\?[a-zA-Z0-9_&=]+"  # raw query: id?user=
     r"|[a-zA-Z0-9_/\-.]+\.[a-zA-Z]{1,6}"  # simple file path: src/auth.py
     r")"
@@ -193,7 +203,11 @@ def _check_lexicon(reasoning: Any) -> list[str]:
             break
 
     for phrase in _DEFAULT_BANNED_EVIDENCE:
-        if ev_lower.strip() == phrase or ev_lower.startswith(phrase + " ") or ev_lower.endswith(" " + phrase):
+        if (
+            ev_lower.strip() == phrase
+            or ev_lower.startswith(phrase + " ")
+            or ev_lower.endswith(" " + phrase)
+        ):
             failures.append(f"expected_evidence uses banned blank claim '{phrase}'")
             break
 

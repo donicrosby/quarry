@@ -100,13 +100,15 @@ async def test_start_scan_starts_temporal_workflow(scan_api: ScanApiTestContext)
     assert started_workflow.workflow == "RunScanWorkflow"
     assert started_workflow.workflow_id == body["scan_id"]
     assert started_workflow.task_queue == "quarry-control"
-    assert started_workflow.scan_input == RunScanInput(
-        repo_path="/tmp/example-repo",
-        scan_id=body["scan_id"],
-        target_url="http://localhost:8000",
-        output_dir="/tmp/quarry-output",
-        db_path=str(scan_api.db_path),
-    )
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    assert scan_input.repo_path == "/tmp/example-repo"
+    assert scan_input.scan_id == body["scan_id"]
+    assert scan_input.target_url == "http://localhost:8000"
+    assert scan_input.output_dir == "/tmp/quarry-output"
+    assert scan_input.db_path == str(scan_api.db_path)
+    # panel_entries is populated by the router from the resolved panel config
+    assert isinstance(scan_input.panel_entries, list)
 
 
 async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext) -> None:
@@ -121,12 +123,16 @@ async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext
     started_workflow = scan_api.temporal_client.started_workflows[0]
     assert started_workflow.workflow == "RunScanWorkflow"
     assert started_workflow.workflow_id.startswith("scan-1-resume-")
-    assert started_workflow.scan_input == RunScanInput(
-        repo_path="/tmp/example-repo",
-        scan_id="scan-1",
-        db_path=str(scan_api.db_path),
-        resume=True,
-    )
+    scan_input = started_workflow.scan_input
+    assert isinstance(scan_input, RunScanInput)
+    assert scan_input.repo_path == "/tmp/example-repo"
+    assert scan_input.scan_id == "scan-1"
+    assert scan_input.db_path == str(scan_api.db_path)
+    assert scan_input.resume is True
+    # Resume threads the configured retry attempts (quarry.toml [retry], default 4).
+    from quarry.panel_config import load_quarry_config
+
+    assert scan_input.activity_max_attempts == load_quarry_config().retry.max_attempts
 
 
 async def test_resume_scan_returns_404_for_unknown_scan(scan_api: ScanApiTestContext) -> None:

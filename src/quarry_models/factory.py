@@ -20,10 +20,12 @@ def build_model_client(provider: Provider, **kwargs: Any) -> Any:
     """
     if provider == Provider.MOCK:
         from quarry_models.mock_client import MockModelClient
+
         return MockModelClient(**kwargs)
 
     if provider == Provider.LITELLM:
         from quarry_models.litellm_client import LiteLLMModelClient
+
         return LiteLLMModelClient()
 
     # Exhaustiveness: StrEnum guarantees *provider* is a valid member, but

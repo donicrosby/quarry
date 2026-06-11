@@ -52,11 +52,13 @@ class QuarryClient:
         repo_path: str,
         target_url: str | None = None,
         vuln_classes: list[VulnerabilityClass] | None = None,
+        repo_url: str | None = None,
     ) -> dict[str, str]:
         response = await self._client.post(
             "/scans",
             json={
                 "repo_path": repo_path,
+                "repo_url": repo_url,
                 "target_url": target_url,
                 "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
             },

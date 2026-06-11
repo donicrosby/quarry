@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for mass assignment / over-posting. Sources: request body/params bound wholesale to a model or dict. Sinks: Model(**request.data), object update from a full payload, setattr loops, ORM create/update with unfiltered input, spread of req.body. Report any path where a request populates object fields without an explicit allowlist — letting a caller set sensitive fields (is_admin, role, owner_id, balance).

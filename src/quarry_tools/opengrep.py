@@ -38,7 +38,7 @@ def _run_opengrep(
 
     Separated for testability — tests can patch this to avoid real subprocess.
     """
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         [_BINARY, "--json", "--config", "-", target_path],
         input=rule_yaml,
         capture_output=True,
@@ -85,6 +85,7 @@ class _OpenGrepTool:
             target.relative_to(repo_root.resolve())
         except ValueError as exc:
             from quarry_tools.errors import ToolSecurityError
+
             raise ToolSecurityError(f"scope '{scope}' escapes repo root") from exc
 
         try:
@@ -93,7 +94,7 @@ class _OpenGrepTool:
             raise ToolUnavailableError(
                 "opengrep binary not found. Install it or use 'grep' instead."
             ) from exc
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             return f"[opengrep timed out after {_TIMEOUT_SECONDS}s]"
 
         results = data.get("results", [])

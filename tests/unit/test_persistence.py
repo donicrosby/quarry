@@ -213,6 +213,79 @@ def test_tool_invocations_persist_and_load(tmp_path: Path) -> None:
     assert invocations[0].tool_name == "git"
 
 
+def test_model_invocations_persist_and_load(tmp_path: Path) -> None:
+    """ModelInvocations (with token + cost provenance) round-trip per scan."""
+    from quarry.schemas import ModelInvocation
+
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    now = datetime.now(UTC)
+    _make_scan(repository, "scan-1", now)
+
+    repository.save_model_invocation(
+        ModelInvocation(
+            id="mi-1",
+            scan_id="scan-1",
+            workspace_id="local",
+            task_name="hunt-ssrf",
+            role="hunt",
+            provider="litellm",
+            model="chutes/Qwen3-32B",
+            token_input=1200,
+            token_output=300,
+            estimated_cost=0.0042,
+            created_at=now,
+        )
+    )
+    repository.save_model_invocation(
+        ModelInvocation(
+            id="mi-2",
+            scan_id="scan-1",
+            workspace_id="local",
+            task_name="validate-ssrf",
+            role="validate",
+            provider="litellm",
+            model="chutes/Kimi-K2",
+            token_input=800,
+            token_output=120,
+            estimated_cost=None,  # unpriced (Chutes)
+            created_at=now,
+        )
+    )
+
+    invocations = repository.load_model_invocations("scan-1")
+    assert len(invocations) == 2
+    by_id = {mi.id: mi for mi in invocations}
+    assert by_id["mi-1"].estimated_cost == 0.0042
+    assert by_id["mi-1"].token_input == 1200
+    assert by_id["mi-2"].estimated_cost is None
+    assert by_id["mi-2"].role == "validate"
+
+
+def test_save_model_invocation_is_idempotent(tmp_path: Path) -> None:
+    """Re-saving the same invocation id does not create a duplicate row."""
+    from quarry.schemas import ModelInvocation
+
+    repository = QuarryRepository(tmp_path / "quarry.db")
+    now = datetime.now(UTC)
+    _make_scan(repository, "scan-1", now)
+
+    inv = ModelInvocation(
+        id="mi-1",
+        scan_id="scan-1",
+        workspace_id="local",
+        task_name="hunt-ssrf",
+        role="hunt",
+        provider="litellm",
+        model="chutes/Qwen3-32B",
+        estimated_cost=0.01,
+        created_at=now,
+    )
+    repository.save_model_invocation(inv)
+    repository.save_model_invocation(inv)
+
+    assert len(repository.load_model_invocations("scan-1")) == 1
+
+
 # ---------------------------------------------------------------------------
 # Gap 3: ArchitectureDoc persistence (RED)
 # ---------------------------------------------------------------------------

@@ -15,13 +15,13 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from quarry.schemas import ScanStatus, Target, local_scan_profile, Scan
+from quarry.schemas import Scan, ScanStatus, Target, local_scan_profile
 from quarry_persistence import QuarryRepository
-from quarry_workflows.commit_stage import CommitStageInput, CommitStageWorkflow, CommitPayload
+from quarry_workflows.commit_stage import CommitPayload, CommitStageInput, CommitStageWorkflow
 
 
 @pytest.fixture
-def _seeded_db(tmp_path: Path) -> tuple[Path, str]:
+def seeded_db(tmp_path: Path) -> tuple[Path, str]:
     """Seed a minimal scan record and return (db_path, scan_id)."""
     import uuid
     from datetime import UTC, datetime
@@ -53,25 +53,27 @@ def _seeded_db(tmp_path: Path) -> tuple[Path, str]:
 async def test_commit_stage_workflow_advances_marker(
     temporal_client: Client,
     temporal_worker: Worker,
-    _seeded_db: tuple[Path, str],
+    seeded_db: tuple[Path, str],
     tmp_path: Path,
 ) -> None:
     """CommitStageWorkflow writes payloads then advances the stage marker."""
-    db_path, scan_id = _seeded_db
+    db_path, scan_id = seeded_db
 
     import json as _json
     import uuid
 
-    event_payload = _json.dumps({
-        "event": {
-            "id": str(uuid.uuid4()),
-            "scan_id": scan_id,
-            "workspace_id": "local",
-            "event_type": "test.committed",
-            "payload": {},
-            "created_at": "2026-06-04T00:00:00+00:00",
+    event_payload = _json.dumps(
+        {
+            "event": {
+                "id": str(uuid.uuid4()),
+                "scan_id": scan_id,
+                "workspace_id": "local",
+                "event_type": "test.committed",
+                "payload": {},
+                "created_at": "2026-06-04T00:00:00+00:00",
+            }
         }
-    })
+    )
 
     await temporal_client.execute_workflow(
         CommitStageWorkflow.run,

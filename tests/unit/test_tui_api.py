@@ -145,10 +145,13 @@ class TestQuarryTuiApp:
         assert app.api_url == "http://example.com:9999"
 
     def test_compose_yields_dashboard(self) -> None:
+        from textual.widgets import Footer
+
         app = QuarryTuiApp()
         children = list(app.compose())
-        assert len(children) == 1
+        assert len(children) == 2
         assert isinstance(children[0], Dashboard)
+        assert isinstance(children[1], Footer)
 
 
 class TestDashboardWithClient:

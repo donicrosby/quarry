@@ -1,13 +1,14 @@
-"""Seeded vulnerable FastAPI target for local scanner development."""
+"""FastAPI demo target for local scanner development."""
 
 import base64
 import subprocess
 from typing import Annotated
+from urllib.request import urlopen
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-app = FastAPI(title="Quarry Vulnerable FastAPI Target")
+app = FastAPI(title="Quarry FastAPI Target")
 
 ADMIN_API_KEY = "demo-admin-key-please-rotate"
 
@@ -85,4 +86,7 @@ def ping(host: str = "127.0.0.1") -> dict[str, str]:
 def fetch_local(url: str) -> dict[str, str]:
     if not url.startswith("http://127.0.0.1") and not url.startswith("http://localhost"):
         raise HTTPException(status_code=400, detail="Only local URLs are accepted")
-    return {"requested_url": url, "note": "Local-only SSRF seed"}
+    with urlopen(url, timeout=2) as resp:  # noqa: S310
+        status = resp.status
+        body = resp.read(512).decode("utf-8", "replace")
+    return {"requested_url": url, "status": str(status), "body": body}

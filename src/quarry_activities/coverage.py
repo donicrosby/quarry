@@ -7,6 +7,7 @@ surfaced in the report so coverage gaps are never hidden.
 """
 
 import json
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -35,10 +36,18 @@ def build_coverage_ledger(
     attack_surface_items_total: int,
     attack_surface_items_scanned: int,
     skipped_items: list[CoverageGap],
+    id: str | None = None,
+    created_at: Any = None,
 ) -> CoverageLedger:
-    """Build a coverage ledger from already-computed scan facts (no I/O)."""
+    """Build a coverage ledger from already-computed scan facts (no I/O).
+
+    *id* and *created_at* may be supplied by workflow code (using
+    ``workflow.uuid4()`` / ``workflow.now()``) to stay within the
+    Temporal sandbox.  Both default to fresh values when called from
+    activity or non-workflow code.
+    """
     return CoverageLedger(
-        id=str(uuid4()),
+        id=id if id is not None else str(uuid4()),
         scan_id=scan_id,
         workspace_id=workspace_id,
         attack_surface_items_total=attack_surface_items_total,
@@ -46,7 +55,7 @@ def build_coverage_ledger(
         vuln_classes_requested=requested_vuln_classes,
         vuln_classes_completed=completed_vuln_classes,
         skipped_items=skipped_items,
-        created_at=utc_now(),
+        created_at=created_at if isinstance(created_at, datetime) else utc_now(),
     )
 
 

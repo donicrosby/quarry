@@ -85,13 +85,11 @@ def test_resolve_panel_none_returns_default(tmp_path: Path) -> None:
 
 def test_resolve_panel_named_fills_missing_from_default(tmp_path: Path) -> None:
     from quarry.schemas import Provider
+
     toml_path = tmp_path / "quarry.toml"
     # Define a panel that only specifies the "hunt" role using a valid Provider value.
     toml_path.write_text(
-        "[panels.custom.roles.hunt]\n"
-        'provider = "litellm"\n'
-        'model = "claude-opus-4-8"\n'
-        "rpm = 5\n",
+        '[panels.custom.roles.hunt]\nprovider = "litellm"\nmodel = "claude-opus-4-8"\nrpm = 5\n',
         encoding="utf-8",
     )
     cfg = load_quarry_config(path=toml_path)
@@ -160,7 +158,11 @@ def test_resolve_focus_empty_resolved_set_raises() -> None:
 
 
 def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
-    cfg = load_quarry_config(path=tmp_path / "nonexistent.toml")
+    # Pass an empty TOML (no scan_defaults section) so we get the code defaults,
+    # regardless of any quarry.toml in the working directory.
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
     assert cfg.scan_defaults.hunt_max_iterations == 12
     assert cfg.scan_defaults.hunt_max_concurrent == 8
 
@@ -174,3 +176,42 @@ def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
     cfg = load_quarry_config(path=toml_path)
     assert cfg.scan_defaults.hunt_max_iterations == 6
     assert cfg.scan_defaults.hunt_max_concurrent == 3
+
+
+# ---------------------------------------------------------------------------
+# RetryConfig — configurable activity retries (default in 3–5)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_config_default_is_in_3_to_5(tmp_path: Path) -> None:
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert 3 <= cfg.retry.max_attempts <= 5
+
+
+def test_retry_config_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text("[retry]\nmax_attempts = 5\n", encoding="utf-8")
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.retry.max_attempts == 5
+
+
+def test_retry_config_clamps_below_range(tmp_path: Path) -> None:
+    """max_attempts below 1 is invalid; clamp up to at least 1 attempt."""
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text("[retry]\nmax_attempts = 0\n", encoding="utf-8")
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.retry.max_attempts >= 1
+
+
+# ---------------------------------------------------------------------------
+# BudgetConfig — already present; assert the cost cap field exists
+# ---------------------------------------------------------------------------
+
+
+def test_budget_config_cost_cap_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text("[budget]\nmax_cost_per_scan_usd = 2.5\n", encoding="utf-8")
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.budget.max_cost_per_scan_usd == 2.5

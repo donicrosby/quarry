@@ -15,10 +15,8 @@ Algorithm:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 from pydantic import BaseModel
 
 from quarry.schemas import (
@@ -27,7 +25,7 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
-from quarry_activities.dedup import _dedup_impl
+from quarry_activities.dedup import dedup_impl
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 
@@ -39,7 +37,7 @@ _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 # ---------------------------------------------------------------------------
 
 
-class _DedupeResponse(BaseModel):
+class DedupeResponse(BaseModel):
     """Mock response schema for the dedup agent loop."""
 
     decision: str = "keep_first"  # keep_all | keep_first | keep_by_index
@@ -81,9 +79,11 @@ class TestDedupSingletonClusters:
 
         # If a model call is made, this client will raise to surface the error
         client = MagicMock()
-        client.complete_structured.side_effect = AssertionError("No model call expected for size-1 cluster")
+        client.complete_structured.side_effect = AssertionError(
+            "No model call expected for size-1 cluster"
+        )
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 1
         assert result[0].id == "cf-1"
@@ -98,9 +98,11 @@ class TestDedupSingletonClusters:
 
         # No model calls needed — each cluster is size 1
         client = MagicMock()
-        client.complete_structured.side_effect = AssertionError("No model calls for all-distinct keys")
+        client.complete_structured.side_effect = AssertionError(
+            "No model calls for all-distinct keys"
+        )
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         ids = {f.id for f in result}
         assert ids == {"cf-1", "cf-2", "cf-3"}
@@ -113,9 +115,9 @@ class TestDedupAgentMerge:
             _make_finding(id="cf-1", root_cause_key="key-dup"),
             _make_finding(id="cf-2", root_cause_key="key-dup"),
         ]
-        client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
+        client = MockModelClient(default=DedupeResponse(decision="keep_first"))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 1
         assert result[0].id == "cf-1"
@@ -126,9 +128,9 @@ class TestDedupAgentMerge:
             _make_finding(id="cf-1", root_cause_key="key-dup"),
             _make_finding(id="cf-2", root_cause_key="key-dup"),
         ]
-        client = MockModelClient(default=_DedupeResponse(decision="keep_all"))
+        client = MockModelClient(default=DedupeResponse(decision="keep_all"))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 2
         ids = {f.id for f in result}
@@ -140,11 +142,9 @@ class TestDedupAgentMerge:
             _make_finding(id="cf-1", root_cause_key="key-dup"),
             _make_finding(id="cf-2", root_cause_key="key-dup"),
         ]
-        client = MockModelClient(
-            default=_DedupeResponse(decision="keep_by_index", keep_indices=[1])
-        )
+        client = MockModelClient(default=DedupeResponse(decision="keep_by_index", keep_indices=[1]))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 1
         assert result[0].id == "cf-2"
@@ -156,9 +156,9 @@ class TestDedupAgentMerge:
             _make_finding(id="cf-2", root_cause_key="key-dup"),
             _make_finding(id="cf-3", root_cause_key="key-unique"),
         ]
-        client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
+        client = MockModelClient(default=DedupeResponse(decision="keep_first"))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         ids = {f.id for f in result}
         assert "cf-1" in ids  # winner of dedup cluster
@@ -176,8 +176,86 @@ class TestDedupNullRootCauseKey:
         ]
         # None != None in the dedup key, so each should be its own singleton
         client = MagicMock()
-        client.complete_structured.side_effect = AssertionError("No model calls for null-key findings")
+        client.complete_structured.side_effect = AssertionError(
+            "No model calls for null-key findings"
+        )
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Panel-aware client selection for deduplicate_activity (Change 3)
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_activity_mock_panel_does_not_call_build() -> None:
+    """deduplicate_activity with provider=mock must not call build_model_client."""
+    from unittest.mock import patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.dedup import deduplicate_activity
+
+    mock_panel_json = RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30).model_dump_json()
+
+    with patch("quarry_activities.dedup.build_model_client") as mock_build:
+        deduplicate_activity([], "/tmp/repo", None, mock_panel_json)
+
+    mock_build.assert_not_called()
+
+
+def test_dedup_activity_litellm_panel_builds_litellm_client() -> None:
+    """deduplicate_activity with provider=litellm must call build_model_client and pass policy."""
+    from unittest.mock import MagicMock, patch
+
+    from quarry.panel_config import RoleConfig
+    from quarry.schemas import Provider
+    from quarry_activities.dedup import deduplicate_activity
+    from quarry_models.types import ProviderPolicy
+
+    litellm_panel_json = RoleConfig(
+        provider=Provider.LITELLM,
+        model="chutes/moonshotai/Kimi-K2-Instruct",
+        rpm=20,
+    ).model_dump_json()
+
+    fake_client = MagicMock()
+    received_policies: list[ProviderPolicy] = []
+
+    def _spy_loop(**kwargs: object) -> object:
+        p = kwargs.get("provider_policy")
+        if isinstance(p, ProviderPolicy):
+            received_policies.append(p)
+        from quarry.schemas import AgentLoopResult
+
+        return AgentLoopResult(
+            final_answer=None,
+            steps=[],
+            iterations_used=1,
+            total_cost=0.0,
+            stop_reason="final_answer",
+        )
+
+    # Two findings with same root_cause_key so the agent loop fires.
+    findings = [
+        _make_finding(id="cf-1", root_cause_key="same-key"),
+        _make_finding(id="cf-2", root_cause_key="same-key"),
+    ]
+
+    with (
+        patch("quarry_activities.dedup.build_model_client", return_value=fake_client) as mock_build,
+        patch("quarry_activities.dedup.run_agent_loop", side_effect=_spy_loop),
+    ):
+        deduplicate_activity(
+            [f.model_dump(mode="json") for f in findings],
+            "/tmp/repo",
+            None,
+            litellm_panel_json,
+        )
+
+    mock_build.assert_called_once()
+    assert len(received_policies) == 1
+    assert received_policies[0].provider == "litellm"
+    assert received_policies[0].model == "chutes/moonshotai/Kimi-K2-Instruct"

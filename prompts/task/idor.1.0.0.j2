@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for insecure direct object references / broken object-level authorization. Sources: any user-controlled identifier (path param, query param, body field, header) that selects a record, file, or resource. Sink: the fetch/update/delete of that resource. Report any path where the requested object is looked up by the user-supplied id WITHOUT a check that the authenticated caller owns or is permitted to access it. Missing-auth and predictable/sequential identifiers both qualify.

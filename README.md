@@ -8,13 +8,26 @@ coverage ledger.
 
 ## Quickstart
 
-### Prerequisites
+### Option A — everything in Docker
+
+Brings up Temporal, the API server (port 8000), and the worker in one command:
+
+```bash
+docker compose up --build -d        # or: task compose-up
+curl localhost:8000/healthz         # {"status":"ok"}
+```
+
+The server runs with `--no-worker`; the dedicated `worker` container owns the
+Temporal task queue. Model/git secrets are passed through from your shell or a
+`.env` file — see `.env.example`. Stop with `docker compose down`.
+
+### Option B — local dev (uv)
 
 Start the supporting services in separate terminals:
 
 ```bash
-# 1. Temporal server
-docker compose -f docker-compose.temporal.yml up -d
+# 1. Temporal server (the server + worker services are also defined here)
+docker compose up -d temporal
 
 # 2. Vulnerable-FastAPI target (port 9000)
 task target

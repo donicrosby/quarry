@@ -9,7 +9,11 @@ Setup: 4 AgentTasks, hunt_max_concurrent=2.  Expected: peak concurrent ≤ 2.
 
 from __future__ import annotations
 
-import asyncio
+# ── Shared concurrency counter ──────────────────────────────────────────────
+# Written from activity threads; read in the test coroutine after all tasks
+# complete.  Using a plain list (mutable, captured by closure) with a threading
+# lock is simpler than asyncio coordination across the thread pool.
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -18,28 +22,23 @@ from pathlib import Path
 import pytest
 from temporalio import activity
 from temporalio.client import Client
-from temporalio.exceptions import CancelledError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from quarry.schemas import VulnerabilityClass
 from quarry_activities.coverage import build_coverage_ledger_activity
+from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
+from quarry_activities.validate import validate_activity
 from quarry_activities.validation import validate_secret_candidate
 from quarry_workflows import RunScanInput, RunScanWorkflow
 from quarry_workflows.commit_stage import CommitStageWorkflow
 from quarry_workflows.recon import ReconWorkflow
-
-# ── Shared concurrency counter ──────────────────────────────────────────────
-# Written from activity threads; read in the test coroutine after all tasks
-# complete.  Using a plain list (mutable, captured by closure) with a threading
-# lock is simpler than asyncio coordination across the thread pool.
-
-import threading
 
 _lock = threading.Lock()
 _current_concurrent: list[int] = [0]
@@ -58,6 +57,8 @@ def counting_hunt_activity(
     repo_path: str | None = None,
     max_iterations: int = 12,
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> list[object]:
     """Mock hunt activity that tracks peak concurrent execution."""
     with _lock:
@@ -81,8 +82,10 @@ def _passthrough_recon_subsystem(
     scan_id: str | None = None,
     budget_spec: object = None,
     panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
+
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
     return {
@@ -128,6 +131,9 @@ async def test_hunt_fan_out_respects_max_concurrent(
             emit_agent_tasks,
             counting_hunt_activity,
             validate_secret_candidate,
+            validate_activity,
+            gapfill_activity,
+            deduplicate_activity,
             build_coverage_ledger_activity,
             render_markdown_report_activity,
             build_scan_manifest_activity,

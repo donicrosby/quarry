@@ -8,7 +8,7 @@ fences by the evidence.j2 envelope macro — the only place that fence appears.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
@@ -31,7 +31,7 @@ class RenderedPrompt:
     ref: PromptTemplateRef
     part_hashes: dict[str, str]  # part_name -> sha256 hex
     evidence_hashes: list[str]  # sha256 of each scrubbed evidence chunk
-    header_yaml: str            # YAML provenance front-matter (prepended to system msg)
+    header_yaml: str  # YAML provenance front-matter (prepended to system msg)
     scrubber_hits: int = 0
 
 
@@ -55,7 +55,9 @@ def _split_by_sentinels(rendered: str) -> dict[str, str]:
     return parts
 
 
-def _build_header(ref: PromptTemplateRef, part_hashes: dict[str, str], evidence_hashes: list[str]) -> str:
+def _build_header(
+    ref: PromptTemplateRef, part_hashes: dict[str, str], evidence_hashes: list[str]
+) -> str:
     lines = [
         _PROVENANCE_HEADER_START,
         f"template_id: {ref.id}",

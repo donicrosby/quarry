@@ -1,6 +1,7 @@
 import json
 from hashlib import sha256
 from pathlib import Path
+from typing import TypedDict
 from uuid import uuid4
 
 from jinja2 import Template
@@ -13,6 +14,7 @@ from quarry.schemas import (
     CandidateFinding,
     CoverageLedger,
     FinalFinding,
+    ModelInvocation,
     ProofArtifact,
     RedactionStatus,
     RepositorySnapshot,
@@ -81,6 +83,27 @@ No routes mapped.
 {% else -%}
 Full coverage: no items were skipped.
 {% endif %}
+{% endif -%}
+
+{% if cost -%}
+## Cost & usage
+
+- Model calls: `{{ cost.calls }}`
+- Input tokens: `{{ cost.total_input_tokens }}`
+- Output tokens: `{{ cost.total_output_tokens }}`
+{% if cost.total_cost is none -%}
+- Total cost: tokens only (no pricing available for these models)
+{% else -%}
+- Total cost: `${{ "%.4f" | format(cost.total_cost) }}`
+{% endif %}
+
+| Role | Model | Calls | Input | Output | Cost |
+|------|-------|-------|-------|--------|------|
+{% for row in cost.rows -%}
+{% set row_cost = ("—" if not row.priced else "$" ~ ("%.4f" | format(row.cost))) -%}
+{% set cells = [row.role, "`" ~ row.model ~ "`", row.calls, row.input, row.output, row_cost] -%}
+| {{ cells | join(" | ") }} |
+{% endfor %}
 {% endif -%}
 
 {% if final_findings -%}
@@ -168,6 +191,7 @@ def render_markdown_report_activity(
             coverage_json=input.get("coverage_json"),
             proof_artifacts_json=input.get("proof_artifacts_json"),
             manifest_json=input.get("manifest_json"),
+            model_invocations_json=input.get("model_invocations_json"),
         )
     return _render_markdown_report_from_input(input)
 
@@ -181,6 +205,7 @@ def render_markdown_report(
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
+    model_invocations: list[ModelInvocation] | None = None,
 ) -> str:
     return _render_markdown_report_impl(
         scan,
@@ -191,6 +216,7 @@ def render_markdown_report(
         coverage,
         proof_artifacts,
         manifest,
+        model_invocations,
     )
 
 
@@ -227,6 +253,11 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         if input.manifest_json is not None
         else None
     )
+    model_invocations = (
+        [ModelInvocation.model_validate(item) for item in json.loads(input.model_invocations_json)]
+        if input.model_invocations_json is not None
+        else None
+    )
     report_text = _render_markdown_report_impl(
         scan,
         findings,
@@ -236,6 +267,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         coverage,
         proof_artifacts,
         manifest,
+        model_invocations,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -259,11 +291,13 @@ def _render_markdown_report_impl(
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
+    model_invocations: list[ModelInvocation] | None = None,
 ) -> str:
     summary = (
         f"Quarry produced {len(final_findings or [])} validated finding(s) "
         f"and {len(findings)} candidate finding(s) for the local scan."
     )
+    cost = summarize_model_cost(model_invocations) if model_invocations else None
     return REPORT_TEMPLATE.render(
         scan=scan,
         findings=findings,
@@ -274,6 +308,76 @@ def _render_markdown_report_impl(
         coverage=coverage,
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
         manifest=manifest,
+        cost=cost,
+    )
+
+
+class CostRow(TypedDict):
+    """Per-(role, model) usage row in the report's Cost & usage table."""
+
+    role: str
+    model: str
+    calls: int
+    input: int
+    output: int
+    cost: float
+    priced: bool
+
+
+class CostSummary(TypedDict):
+    """Aggregate token + cost totals for the report's Cost & usage section."""
+
+    calls: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost: float | None
+    rows: list[CostRow]
+
+
+def summarize_model_cost(invocations: list[ModelInvocation]) -> CostSummary:
+    """Aggregate token + cost totals over model invocations for the report.
+
+    ``total_cost`` is ``None`` when *no* invocation carried a price (Chutes and
+    other unpriced models) — the report then renders a tokens-only line. A
+    per-(role, model) breakdown marks each row priced/unpriced so unknown costs
+    show as ``—`` rather than a misleading ``$0``.
+    """
+    rows: dict[tuple[str, str], CostRow] = {}
+    total_input = 0
+    total_output = 0
+    priced_costs: list[float] = []
+    for inv in invocations:
+        ti = inv.token_input or 0
+        to = inv.token_output or 0
+        total_input += ti
+        total_output += to
+        key = (inv.role, inv.model)
+        row = rows.get(key)
+        if row is None:
+            row = CostRow(
+                role=inv.role,
+                model=inv.model,
+                calls=0,
+                input=0,
+                output=0,
+                cost=0.0,
+                priced=False,
+            )
+            rows[key] = row
+        row["calls"] += 1
+        row["input"] += ti
+        row["output"] += to
+        if inv.estimated_cost is not None:
+            row["cost"] += inv.estimated_cost
+            row["priced"] = True
+            priced_costs.append(inv.estimated_cost)
+
+    return CostSummary(
+        calls=len(invocations),
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        total_cost=sum(priced_costs) if priced_costs else None,
+        rows=sorted(rows.values(), key=lambda r: (r["role"], r["model"])),
     )
 
 

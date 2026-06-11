@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref so pushes don't pile up.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.9.21"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # Fast static checks share a single dependency install (no N× syncs).
+  static:
+    name: lint / format / types / lockfile / prompts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - run: uv sync --extra dev --frozen
+      - name: uv lockfile is in sync
+        run: uv lock --check
+      - name: ruff lint
+        run: uv run ruff check .
+      - name: ruff format
+        run: uv run ruff format --check .
+      - name: prompt-lint (ADR-019)
+        run: uv run python scripts/prompt_lint.py src
+      - name: pyright (strict)
+        run: uv run pyright
+
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ripgrep backs the `grep` tool; installing it lets the grep tool tests run
+      # for real instead of skipping (the only binary any test is gated on).
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - run: uv sync --extra dev --frozen
+      # Self-contained: conftest spins up an in-process Temporal test env
+      # (start_time_skipping), so no external services are needed. pytest config
+      # already sets -n auto + 300s per-test timeout + ResourceWarning-as-error.
+      - name: pytest
+        run: uv run pytest tests/unit tests/integration tests/golden
+
+  hadolint:
+    name: hadolint (Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+
+  docker:
+    name: docker build${{ github.event_name == 'push' && ' + push' || '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Compute image refs
+        id: meta
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          short="${GITHUB_SHA::7}"
+          {
+            echo "tags<<EOF"
+            for img in quarry-server quarry-worker; do
+              echo "ghcr.io/${owner}/${img}:latest"
+              echo "ghcr.io/${owner}/${img}:sha-${short}"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # One build, tagged as both server and worker (identical image, different
+      # run command). PRs build-only (proves it compiles + warms the cache);
+      # pushes to main publish to GHCR.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  pr-title:
+    name: conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

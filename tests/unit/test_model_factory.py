@@ -19,6 +19,7 @@ def test_provider_mock_returns_mock_client() -> None:
 
 def test_provider_litellm_returns_litellm_client() -> None:
     from quarry_models.litellm_client import LiteLLMModelClient
+
     client = build_model_client(Provider.LITELLM)
     assert isinstance(client, LiteLLMModelClient)
 
@@ -32,14 +33,19 @@ def test_unknown_provider_str_raises() -> None:
 def test_role_config_provider_coerces_to_enum() -> None:
     """RoleConfig.provider must accept 'mock' and 'litellm' and coerce to Provider."""
     from quarry.panel_config import RoleConfig
-    rc = RoleConfig(provider="mock", model="mock-v1")
+
+    # model_validate exercises the raw-string coercion path (what real config does).
+    rc = RoleConfig.model_validate({"provider": "mock", "model": "mock-v1"})
     assert rc.provider == Provider.MOCK
 
-    rc2 = RoleConfig(provider="litellm", model="claude-opus-4-8")
+    rc2 = RoleConfig.model_validate({"provider": "litellm", "model": "claude-opus-4-8"})
     assert rc2.provider == Provider.LITELLM
 
 
 def test_role_config_rejects_unknown_provider() -> None:
+    from pydantic import ValidationError
+
     from quarry.panel_config import RoleConfig
-    with pytest.raises(Exception):
-        RoleConfig(provider="openai_classic", model="gpt-4")
+
+    with pytest.raises(ValidationError):
+        RoleConfig.model_validate({"provider": "openai_classic", "model": "gpt-4"})

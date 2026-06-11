@@ -63,7 +63,11 @@ class ModelRequest(BaseModel):
     budget: BudgetSpec | None = None
     redaction_policy: RedactionPolicy = Field(default_factory=RedactionPolicy)
     provider_policy: ProviderPolicy = Field(default_factory=ProviderPolicy)
-    timeout_seconds: int = 120
+    # Open models (e.g. Qwen via Chutes) running long full-fidelity prompts can
+    # be very slow, and a premature per-call timeout fails the whole scan. Prefer
+    # an hours-scale ceiling: it only ever fires on a genuinely hung request, not
+    # on legitimately-slow generation.
+    timeout_seconds: int = 3600
     response_schema_name: str | None = None
     prompt_version: str = "v1"
     prompt_hash: str = ""
