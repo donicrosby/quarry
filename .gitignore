@@ -39,6 +39,9 @@ dist/
 .env.*
 !.env.example
 
+# Target authentication profiles — never commit; use auth-profiles.toml.example as template
+auth-profiles.toml
+
 # Editor and OS files
 .idea/
 .vscode/
