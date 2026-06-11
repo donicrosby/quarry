@@ -61,14 +61,17 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
         for role, cfg in resolved.items()
     ]
 
+    # Derive output_dir from the server-configured db_path so artifacts land
+    # alongside the database (e.g. /data when db_path=/data/quarry.db).
+    _server_data_dir = str(Path(settings.db_path).parent)
     await temporal_client.start_workflow(
         "RunScanWorkflow",
         RunScanInput(
             repo_path=body.repo_path,
             repo_url=body.repo_url,
             scan_id=scan_id,
-            db_path=body.db_path,
-            output_dir=body.output_dir,
+            db_path=settings.db_path,  # use server-configured path, not client default
+            output_dir=_server_data_dir,
             target_url=body.target_url,
             vuln_classes=list(body.vuln_classes),
             panel_entries=panel_entries,
@@ -126,7 +129,7 @@ async def start_diff_scan(request: Request, body: DiffScanRequest) -> ScanRespon
             repo_path=body.repo_path,
             base_commit=body.base_commit,
             head_commit=body.head_commit,
-            db_path=body.db_path,
+            db_path=settings.db_path,  # use server-configured path, not client default
             output_dir=body.output_dir,
             target_url=body.target_url,
         ),
