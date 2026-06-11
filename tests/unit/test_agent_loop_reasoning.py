@@ -9,17 +9,14 @@ Tests:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
 from quarry.schemas import ActionReasoning, AgentLoopResult, ProposedAction
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec, ModelRequest, ModelResponse
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -120,6 +117,7 @@ class _NoopRunner:
     def run(self, tool: str, inputs: dict[str, Any]) -> Any:
         class _Record:
             output = ""
+
         return _Record()
 
 
@@ -155,11 +153,13 @@ class TestVagueReasoningReprompt:
         """Turn 1: vague proposed_action → re-prompt. Turn 2: good action → executes.
         Turn 3: no tool_calls → final answer.
         """
-        client = _SequentialMockModelClient([
-            _with_vague_action(),  # fails guard → re-prompt (not a real iteration)
-            _with_good_action(),   # passes guard → tool executes (iteration 1)
-            _final_answer(),       # final answer (iteration 2)
-        ])
+        client = _SequentialMockModelClient(
+            [
+                _with_vague_action(),  # fails guard → re-prompt (not a real iteration)
+                _with_good_action(),  # passes guard → tool executes (iteration 1)
+                _final_answer(),  # final answer (iteration 2)
+            ]
+        )
         result = _run_loop(client)
 
         assert result.stop_reason == "final_answer"
@@ -171,11 +171,13 @@ class TestVagueReasoningReprompt:
         Set max_iterations=2. One vague re-prompt + one good action + final answer
         should use 2 real iterations (not 3 counting the retry).
         """
-        client = _SequentialMockModelClient([
-            _with_vague_action(),  # fails → re-prompt (doesn't count)
-            _with_good_action(),   # passes → iteration 1
-            _final_answer(),       # iteration 2
-        ])
+        client = _SequentialMockModelClient(
+            [
+                _with_vague_action(),  # fails → re-prompt (doesn't count)
+                _with_good_action(),  # passes → iteration 1
+                _final_answer(),  # iteration 2
+            ]
+        )
         result = _run_loop(client, max_iterations=2)
 
         # Should succeed (2 real iterations consumed ≤ max_iterations=2)
@@ -211,10 +213,12 @@ class TestVagueReasoningReprompt:
 
     def test_good_reasoning_from_start_no_reprompt(self) -> None:
         """Good reasoning on first turn → no re-prompt, proceeds to tool execution."""
-        client = _SequentialMockModelClient([
-            _with_good_action(),  # passes guard → iteration 1
-            _final_answer(),      # iteration 2
-        ])
+        client = _SequentialMockModelClient(
+            [
+                _with_good_action(),  # passes guard → iteration 1
+                _final_answer(),  # iteration 2
+            ]
+        )
         result = _run_loop(client)
 
         assert result.stop_reason == "final_answer"

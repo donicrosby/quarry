@@ -12,10 +12,6 @@
       "path": "app.py"
     },
     {
-      "language": null,
-      "path": "ground_truth.json"
-    },
-    {
       "language": "toml",
       "path": "pyproject.toml"
     }

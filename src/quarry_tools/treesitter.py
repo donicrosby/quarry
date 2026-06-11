@@ -32,17 +32,18 @@ def _load_language(language: str) -> Any:
 
     if language == "javascript":
         import tree_sitter_javascript as _ts_js
+
         return tree_sitter.Language(_ts_js.language())
     if language == "c":
         import tree_sitter_c as _ts_c
+
         return tree_sitter.Language(_ts_c.language())
     if language == "go":
         import tree_sitter_go as _ts_go
+
         return tree_sitter.Language(_ts_go.language())
 
-    raise ToolUnavailableError(
-        f"unsupported language: {language!r}; use grep instead"
-    )
+    raise ToolUnavailableError(f"unsupported language: {language!r}; use grep instead")
 
 
 @contextmanager
@@ -137,13 +138,11 @@ class _TreeSitterTool:
             target.relative_to(repo_root.resolve())
         except ValueError as exc:
             from quarry_tools.errors import ToolSecurityError
+
             raise ToolSecurityError(f"scope '{scope}' escapes repo root") from exc
 
         extensions = _LANGUAGE_EXTENSIONS[language]
-        source_files = [
-            p for p in target.rglob("*")
-            if p.is_file() and p.suffix in extensions
-        ]
+        source_files = [p for p in target.rglob("*") if p.is_file() and p.suffix in extensions]
 
         if not source_files:
             return f"(no {language} files found in scope)"
@@ -162,7 +161,7 @@ class _TreeSitterTool:
                         all_matches.extend(matches)
                     except Exception:
                         pass
-        except TimeoutError as exc:
+        except TimeoutError:
             return f"[treesitter_query timed out after {_TIMEOUT_SECONDS}s]"
 
         if not all_matches:
@@ -170,7 +169,11 @@ class _TreeSitterTool:
 
         lines: list[str] = []
         for m in all_matches:
-            rel = Path(m["file"]).relative_to(repo_root.resolve()) if repo_root.resolve() in Path(m["file"]).parents else m["file"]
+            rel = (
+                Path(m["file"]).relative_to(repo_root.resolve())
+                if repo_root.resolve() in Path(m["file"]).parents
+                else m["file"]
+            )
             snippet = m["text"].replace("\n", " ")[:80]
             lines.append(f"{rel}:{m['start_line']}-{m['end_line']}: {snippet}")
 

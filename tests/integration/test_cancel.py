@@ -197,8 +197,10 @@ def slow_recon_subsystem(
     scan_id: str | None = None,
     budget_spec: object = None,
     panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
+
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
     for index in range(200):
@@ -223,6 +225,8 @@ def slow_hunt_activity(
     repo_path: str | None = None,
     max_iterations: int = 12,
     budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> list[object]:
     for index in range(200):
         with suppress(RuntimeError):

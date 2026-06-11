@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from quarry.schemas import AgentTask, VulnerabilityClass
 from quarry_models.coverage import enforce_coverage_floor
 
@@ -76,9 +74,7 @@ class TestEnforceCoverageFloor:
             assert "no findings here yet" in t.task_prompt.lower(), (
                 "Nudge prompt must contain 'no findings here yet'"
             )
-            assert "ssrf" in t.task_prompt.lower(), (
-                "Nudge prompt must mention the vuln_class"
-            )
+            assert "ssrf" in t.task_prompt.lower(), "Nudge prompt must mention the vuln_class"
 
     def test_does_not_add_when_already_at_floor(self) -> None:
         """No synthetic tasks added when a class already meets the floor."""

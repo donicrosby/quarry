@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 from quarry.schemas import AgentTask, VulnerabilityClass
-from quarry_activities.hunt import _hunt_impl
+from quarry_activities.hunt import hunt_impl
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec
@@ -37,9 +37,7 @@ def test_hunt_express_finds_command_injection(tmp_path: Path) -> None:
         findings: list[dict[str, Any]] = []
         tool_calls: list[ToolCallRequest] = []
 
-    client = MockModelClient(
-        default=_HuntResponse(findings=[raw_finding], tool_calls=[])
-    )
+    client = MockModelClient(default=_HuntResponse(findings=[raw_finding], tool_calls=[]))
 
     task = AgentTask(
         id="golden-express-1",
@@ -53,7 +51,7 @@ def test_hunt_express_finds_command_injection(tmp_path: Path) -> None:
         created_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
     )
 
-    findings = _hunt_impl(
+    findings, _gaps = hunt_impl(
         task=task,
         repo_path=str(FIXTURE_REPO),
         max_iterations=12,
@@ -63,14 +61,11 @@ def test_hunt_express_finds_command_injection(tmp_path: Path) -> None:
 
     assert len(findings) >= 1, "Expected at least one finding from the Express hunt"
 
-    cmdi_findings = [
-        f for f in findings
-        if f.vuln_class == VulnerabilityClass.COMMAND_INJECTION
-    ]
+    cmdi_findings = [f for f in findings if f.vuln_class == VulnerabilityClass.COMMAND_INJECTION]
     assert len(cmdi_findings) >= 1, "Expected at least one command_injection finding"
 
     affected = cmdi_findings[0].affected_component or ""
-    source_files = [ref.file for ref in cmdi_findings[0].source_refs]
+    source_files = [ref.file_path for ref in cmdi_findings[0].source_refs]
     all_paths = [affected] + source_files
 
     assert any("routes/" in p or "routes" in p for p in all_paths), (

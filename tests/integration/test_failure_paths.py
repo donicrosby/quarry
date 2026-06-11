@@ -15,7 +15,6 @@ from quarry.schemas import ScanStatus, SubsystemAssignment
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.provenance import build_scan_manifest_activity
-from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_subsystem import recon_subsystem_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state

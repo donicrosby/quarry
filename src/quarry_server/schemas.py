@@ -13,6 +13,9 @@ class StartScanRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     repo_path: str
+    # Optional git URL to clone (public/token-HTTPS/SSH). When set, the clone's
+    # local path becomes the effective repo path for the scan.
+    repo_url: str | None = None
     target_url: str | None = None
     output_dir: str = ".quarry"
     db_path: str = ".quarry/quarry.db"

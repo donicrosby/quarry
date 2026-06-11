@@ -19,6 +19,23 @@ class CreateSnapshotInput(BaseModel):
     workspace_id: str = "local"
 
 
+class CloneRepoInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repo_url: str
+    dest_dir: str
+    # When set, the clone is checked out at exactly this commit (deterministic
+    # re-clone on retries/resumes). When None, the activity captures HEAD's SHA.
+    pinned_sha: str | None = None
+
+
+class CloneRepoResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    local_path: str
+    commit_sha: str
+
+
 class ExtractRoutesInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -131,6 +148,7 @@ class RenderReportInput(BaseModel):
     coverage_json: str | None = None
     proof_artifacts_json: str | None = None
     manifest_json: str | None = None
+    model_invocations_json: str | None = None
 
 
 class DeliverIntegrationsInput(BaseModel):

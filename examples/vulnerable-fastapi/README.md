@@ -1,13 +1,7 @@
-# Vulnerable FastAPI Target
+# FastAPI Target
 
-Local-only seeded target for Quarry development.
-
-Intentional vulnerabilities:
-
-- hardcoded secret exposed in source and response data
-- direct object access without authorization checks
-- shell command construction from request input
-- local-only URL fetch shape for SSRF testing
+A minimal FastAPI application used as a recon and analysis target for the Quarry
+security research harness. It is intentionally simple and self-contained.
 
 Run it locally with:
 

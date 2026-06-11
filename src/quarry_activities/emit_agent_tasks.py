@@ -15,42 +15,36 @@ from typing import Any
 from temporalio import activity
 
 from quarry.schemas import AgentTask, ArchitectureDoc, VulnerabilityClass
+from quarry_prompts import get_registry
+from quarry_prompts.build_prompt import build_prompt
+from quarry_prompts.registry import TemplateNotFoundError
 
-_TASK_PROMPTS: dict[str, str] = {
-    VulnerabilityClass.SECRETS.value: (
-        "Search for hardcoded secrets, API keys, tokens, passwords, and credentials. "
-        "Look for assignment patterns like `api_key = '...'`, environment-variable "
-        "bypasses, and configuration files with plaintext secrets."
-    ),
-    VulnerabilityClass.IDOR.value: (
-        "Search for insecure direct object references. Look for endpoints that accept "
-        "user-controlled object IDs (path params, query params, request body) and fetch "
-        "objects without checking that the requesting user owns or is authorized to access them."
-    ),
-    VulnerabilityClass.COMMAND_INJECTION.value: (
-        "Search for sinks where user-controlled input reaches OS command execution. "
-        "Look for subprocess calls, shell=True, exec/spawn/popen functions, and "
-        "`os/exec.Command` in Go. Trace from HTTP handler parameters to the sink."
-    ),
-    VulnerabilityClass.SSRF.value: (
-        "Search for server-side request forgery. Look for HTTP client calls that "
-        "accept user-controlled URLs without allowlist validation."
-    ),
-    VulnerabilityClass.SQL_INJECTION.value: (
-        "Search for SQL injection. Look for string-concatenated queries and "
-        "ORM raw() / execute() calls with user-controlled input."
-    ),
-    VulnerabilityClass.XSS.value: (
-        "Search for cross-site scripting. Look for user-controlled content "
-        "rendered into HTML without escaping."
-    ),
-}
+_TASK_PROMPT_ROLE = "task"
+_TASK_PROMPT_VERSION = "1.0.0"
 
-_DEFAULT_TASK_PROMPT = (
-    "Search for vulnerabilities of the requested class in this scope. "
-    "Use generic tools (grep, search_code, opengrep, treesitter_query) to "
-    "enumerate potential sinks and trace data flow from user-controlled inputs."
-)
+
+def task_prompt_for(vuln_class: VulnerabilityClass) -> str:
+    """Render the per-class hunt task-prompt stub from the prompt registry.
+
+    Stubs live in ``prompts/task/<vuln_class>.1.0.0.j2`` (ADR-019 — prompt text is
+    editable in the registry by the end user, never hardcoded). Falls back to
+    ``prompts/task/default.1.0.0.j2`` for classes without a dedicated stub.
+    """
+    registry = get_registry()
+    for name in (vuln_class.value, "default"):
+        try:
+            prompt = build_prompt(
+                registry=registry,
+                role=_TASK_PROMPT_ROLE,
+                name=name,
+                version=_TASK_PROMPT_VERSION,
+                variables={},
+            )
+        except TemplateNotFoundError:
+            continue
+        # Developer-only stub template: the text lands in the user message.
+        return prompt.messages[1].content.strip() if len(prompt.messages) > 1 else ""
+    return ""
 
 
 @activity.defn(name="emit-agent-tasks")
@@ -83,17 +77,21 @@ def emit_agent_tasks(
     now = datetime.now(UTC)
     tasks: list[AgentTask] = []
 
-    scopes: list[str] = []
+    # Each subsystem's entry points and notes belong to its own scope, so carry
+    # them onto every task for that scope — the hunter uses the entry points as
+    # concrete leads and the notes (per-class sink/source buckets) to seed its
+    # backward-taint analysis.
+    scoped: list[tuple[str, list[Any], str]] = []
     if arch_doc.subsystems:
         for sub in arch_doc.subsystems:
             scope = sub.root_paths[0] if sub.root_paths else sub.name
-            scopes.append(scope)
-    if not scopes:
-        scopes = ["."]
+            scoped.append((scope, list(sub.entry_points), sub.notes))
+    if not scoped:
+        scoped = [(".", [], "")]
 
     for vc in requested_classes:
-        for scope in scopes:
-            task_prompt = _TASK_PROMPTS.get(vc.value, _DEFAULT_TASK_PROMPT)
+        task_prompt = task_prompt_for(vc)
+        for scope, entry_points, recon_notes in scoped:
             task = AgentTask(
                 id=str(uuid.uuid4()),
                 scan_id=str(scan_id),
@@ -102,6 +100,8 @@ def emit_agent_tasks(
                 task_prompt=task_prompt,
                 vuln_class=vc,
                 scope=scope,
+                entry_points=entry_points,
+                recon_notes=recon_notes,
                 source="recon",
                 status="pending",
                 created_at=now,

@@ -28,6 +28,12 @@ Classes already completed:
 
 Attack surface items scanned: {{ items_scanned }} / {{ items_total }}
 
+{% if existing_findings %}
+Findings already reported — do NOT propose re-hunting these exact vectors; only
+fill genuine gaps NOT already covered below:
+{% for f in existing_findings %}  - [{{ f.vuln_class }}] {{ f.title }} ({{ f.component }})
+{% endfor %}
+{% endif %}
 Identify any (vuln_class, scope) pairs where coverage is insufficient.
 
 <!-- QUARRY:PART:evidence -->

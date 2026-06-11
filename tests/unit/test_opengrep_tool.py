@@ -9,7 +9,7 @@ the tool raises ToolUnavailableError; callers fall back to builtin grep.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -61,14 +61,21 @@ def test_opengrep_tool_absent_binary_raises_unavailable(tmp_path: Path) -> None:
     """If the opengrep binary is not found, ToolUnavailableError is raised."""
     from quarry_tools.opengrep import OPENGREP_TOOL
 
-    rule_yaml = "rules:\n  - id: x\n    pattern: foo\n    languages: [python]\n    severity: ERROR\n"
+    rule_yaml = (
+        "rules:\n  - id: x\n    pattern: foo\n    languages: [python]\n    severity: ERROR\n"
+    )
 
-    with patch("quarry_tools.opengrep._run_opengrep", side_effect=FileNotFoundError("opengrep not found")):
-        with pytest.raises(ToolUnavailableError, match="opengrep"):
-            OPENGREP_TOOL.run(
-                {"rule_yaml": rule_yaml, "scope": None},
-                repo_root=tmp_path,
-            )
+    with (
+        patch(
+            "quarry_tools.opengrep._run_opengrep",
+            side_effect=FileNotFoundError("opengrep not found"),
+        ),
+        pytest.raises(ToolUnavailableError, match="opengrep"),
+    ):
+        OPENGREP_TOOL.run(
+            {"rule_yaml": rule_yaml, "scope": None},
+            repo_root=tmp_path,
+        )
 
 
 def test_opengrep_tool_is_registered_for_hunt_role() -> None:

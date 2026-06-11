@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for insecure deserialization. Sources: user-controlled bytes/strings (request body, cookies, headers, uploads). Sinks: pickle.loads, yaml.load (unsafe Loader), marshal/shelve, jsonpickle, Java readObject/ObjectInputStream, PHP unserialize, Node serialize/funcster. Report any path where untrusted data is deserialized by a format that can instantiate arbitrary types or execute code on load.

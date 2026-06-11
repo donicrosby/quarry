@@ -13,8 +13,8 @@
       {
         "artifact_ref": null,
         "file_path": "app.py",
-        "start_line": 41,
-        "end_line": 42,
+        "start_line": 42,
+        "end_line": 43,
         "symbol": "health",
         "snippet_hash": null
       }
@@ -35,8 +35,8 @@
       {
         "artifact_ref": null,
         "file_path": "app.py",
-        "start_line": 46,
-        "end_line": 47,
+        "start_line": 47,
+        "end_line": 48,
         "symbol": "config",
         "snippet_hash": null
       }
@@ -59,8 +59,8 @@
       {
         "artifact_ref": null,
         "file_path": "app.py",
-        "start_line": 51,
-        "end_line": 68,
+        "start_line": 52,
+        "end_line": 69,
         "symbol": "read_user",
         "snippet_hash": null
       }
@@ -81,8 +81,8 @@
       {
         "artifact_ref": null,
         "file_path": "app.py",
-        "start_line": 72,
-        "end_line": 81,
+        "start_line": 73,
+        "end_line": 82,
         "symbol": "ping",
         "snippet_hash": null
       }
@@ -103,8 +103,8 @@
       {
         "artifact_ref": null,
         "file_path": "app.py",
-        "start_line": 85,
-        "end_line": 88,
+        "start_line": 86,
+        "end_line": 92,
         "symbol": "fetch_local",
         "snippet_hash": null
       }

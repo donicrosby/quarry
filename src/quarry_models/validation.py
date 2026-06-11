@@ -11,13 +11,16 @@ decides what happens next.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError
 
 from quarry.schemas import CandidateFinding
-from quarry.schemas import ProposedAction as ProposedAction  # re-export (moved to schemas in ADR-020)
+from quarry.schemas import (
+    ProposedAction as ProposedAction,  # re-export (moved to schemas in ADR-020)
+)
 from quarry.schemas import ValidatorClaim as ValidatorClaim  # re-export
 from quarry_models.redaction import scrub
 
@@ -126,8 +129,6 @@ def _parse_file_and_lines(
     component = affected_component.strip()
 
     # Try 'file:start-end' or 'file:start'
-    import re  # noqa: PLC0415
-
     m = re.match(r"^(.+?):(\d+)(?:-(\d+))?$", component)
     if m:
         file_path = m.group(1)
@@ -139,7 +140,7 @@ def _parse_file_and_lines(
     return component, None, None
 
 
-def validate_claim_from_finding(finding: CandidateFinding) -> "ValidatorClaim":
+def validate_claim_from_finding(finding: CandidateFinding) -> ValidatorClaim:
     """Build a ValidatorClaim from a CandidateFinding.
 
     Only the claim fields defined in ADR-021 are included:

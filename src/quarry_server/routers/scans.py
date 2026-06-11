@@ -65,12 +65,15 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
         "RunScanWorkflow",
         RunScanInput(
             repo_path=body.repo_path,
+            repo_url=body.repo_url,
             scan_id=scan_id,
             db_path=body.db_path,
             output_dir=body.output_dir,
             target_url=body.target_url,
             vuln_classes=list(body.vuln_classes),
             panel_entries=panel_entries,
+            activity_max_attempts=quarry_config.retry.max_attempts,
+            budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
         ),
         id=scan_id,
         task_queue=settings.task_queue,
@@ -92,6 +95,7 @@ async def resume_scan(scan_id: str, request: Request) -> ScanResponse:
     repo_path = _required_metadata_str(scan, "repo_path")
     output_dir = _metadata_str(scan, "output_dir", default=".quarry") or ".quarry"
     target_url = _metadata_str(scan, "target_url", default=None)
+    quarry_config = load_quarry_config()
     await temporal_client.start_workflow(
         "RunScanWorkflow",
         RunScanInput(
@@ -101,6 +105,7 @@ async def resume_scan(scan_id: str, request: Request) -> ScanResponse:
             output_dir=output_dir,
             target_url=target_url,
             resume=True,
+            activity_max_attempts=quarry_config.retry.max_attempts,
         ),
         id=f"{scan_id}-resume-{uuid4()}",
         task_queue=settings.task_queue,

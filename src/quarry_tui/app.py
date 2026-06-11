@@ -37,9 +37,9 @@ class QuarryTuiApp(App[None]):
         self.push_screen(IntegrationsScreen(self.client, event.scan_id))
 
     def action_help(self) -> None:
-        from textual.widgets import Label
-        from textual.screen import ModalScreen
         from textual.app import ComposeResult as CR
+        from textual.screen import ModalScreen
+        from textual.widgets import Label
 
         class HelpModal(ModalScreen[None]):
             BINDINGS = [("escape,q,?", "dismiss", "Close")]

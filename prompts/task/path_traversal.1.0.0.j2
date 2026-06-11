@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for path traversal / arbitrary file access. Sources: user-controlled file names, paths, or identifiers used to build a filesystem path. Sinks: open/read/write/send_file/os.path.join/Path()/static-file handlers. Report any path where user input reaches a filesystem operation without canonicalization + containment to an allowed base directory (e.g. missing realpath check, `../` not neutralised, absolute paths accepted).

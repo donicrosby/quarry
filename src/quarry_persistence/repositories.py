@@ -14,6 +14,7 @@ from quarry.schemas import (
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
+    ModelInvocation,
     Report,
     Scan,
     ScanManifest,
@@ -154,6 +155,15 @@ class ToolInvocationRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
     tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    invocation_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ModelInvocationRecord(Base):
+    __tablename__ = "model_invocations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
     invocation_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -444,6 +454,26 @@ class QuarryRepository:
             ).all()
             return [
                 ToolInvocation.model_validate_json(record.invocation_json) for record in records
+            ]
+
+    def save_model_invocation(self, invocation: ModelInvocation) -> None:
+        with session_scope(self.engine) as session:
+            session.merge(
+                ModelInvocationRecord(
+                    id=invocation.id,
+                    scan_id=invocation.scan_id,
+                    role=invocation.role,
+                    invocation_json=invocation.model_dump_json(),
+                )
+            )
+
+    def load_model_invocations(self, scan_id: str) -> list[ModelInvocation]:
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(ModelInvocationRecord).where(ModelInvocationRecord.scan_id == scan_id)
+            ).all()
+            return [
+                ModelInvocation.model_validate_json(record.invocation_json) for record in records
             ]
 
     def list_scan_summaries(self) -> list[ScanSummary]:

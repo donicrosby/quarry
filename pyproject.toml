@@ -66,24 +66,33 @@ module-name = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = ["tests/fixtures"]
+# examples/ are intentional vulnerability fixtures (scan targets) — never lint or
+# reformat them (it would alter seeded code and shift golden line numbers).
+extend-exclude = ["tests/fixtures", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Query/Path/Depends in argument defaults is the framework's intended
+# idiom, not the mutable-default-argument bug B008 guards against.
+extend-immutable-calls = ["fastapi.Query", "fastapi.Path", "fastapi.Depends", "fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-n auto"
 timeout = 300
-filterwarnings = ["error::ResourceWarning"]
+filterwarnings = [
+    "error::ResourceWarning",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["src", "tests"]
 exclude = ["**/__pycache__", "tests/fixtures"]
-extraPaths = ["src"]
+extraPaths = ["src", "scripts"]
 venv = ".venv"
 venvPath = "."
 reportUnknownMemberType = "none"

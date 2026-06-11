@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for cross-site scripting. Sources: user-controlled values that end up in a response. Sinks: HTML/JS output rendered without context-correct escaping — template interpolation marked safe/raw/`|safe`, innerHTML/dangerouslySetInnerHTML/document.write, string-built HTML responses, reflected query/path/header values echoed into pages, and stored values rendered later. Report reflected, stored, and DOM paths where output encoding is missing or wrong for the context (HTML body vs attribute vs JS vs URL).

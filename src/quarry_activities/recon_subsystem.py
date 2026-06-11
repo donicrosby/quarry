@@ -18,6 +18,7 @@ from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
+from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.types import BudgetSpec, ProviderPolicy
@@ -27,7 +28,7 @@ from quarry_tools.builtins import BUILTIN_REGISTRY
 from quarry_tools.runner import ToolRunner
 
 
-class _SubsystemAnalysis(BaseModel):
+class SubsystemAnalysis(BaseModel):
     """Model output schema for the subsystem recon agent."""
 
     entry_points: list[dict[str, Any]] = []
@@ -38,11 +39,12 @@ class _SubsystemAnalysis(BaseModel):
 
 @activity.defn(name="recon-subsystem")
 def recon_subsystem_activity(
-    assignment: SubsystemAssignment | dict,  # type: ignore[type-arg]
+    assignment: SubsystemAssignment | dict[str, Any],
     repo_root: Path | str,
     scan_id: str,
     budget_spec: BudgetSpec | None = None,
     panel_json: str | None = None,
+    db_path: str | None = None,
 ) -> Subsystem:
     """Run the recon agent loop for one subsystem and return a Subsystem.
 
@@ -66,18 +68,21 @@ def recon_subsystem_activity(
     heartbeat_thread.start()
 
     try:
-        return _recon_subsystem_impl(assignment, repo_root, scan_id, budget_spec, panel_json)
+        return _recon_subsystem_impl(
+            assignment, repo_root, scan_id, budget_spec, panel_json, db_path
+        )
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=5)
 
 
 def _recon_subsystem_impl(
-    assignment: SubsystemAssignment | dict,  # type: ignore[type-arg]
+    assignment: SubsystemAssignment | dict[str, Any],
     repo_root: Path | str,
     scan_id: str,
     budget_spec: BudgetSpec | None,
     panel_json: str | None,
+    db_path: str | None = None,
 ) -> Subsystem:
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
@@ -105,7 +110,7 @@ def _recon_subsystem_impl(
     if provider == Provider.MOCK:
         client = build_model_client(
             Provider.MOCK,
-            default=_SubsystemAnalysis(
+            default=SubsystemAnalysis(
                 entry_points=[],
                 responsibility=assignment.responsibility,
                 notes="",
@@ -143,14 +148,16 @@ def _recon_subsystem_impl(
         initial_user_message=initial_message,
         runner=runner,
         budget_spec=budget_spec,
-        response_model=_SubsystemAnalysis,
-        max_iterations=12,
+        response_model=SubsystemAnalysis,
+        max_iterations=40,
         provider_policy=policy,
     )
 
+    persist_model_invocations(db_path, scan_id, client)
+
     # Parse entry points from the final answer
     entry_points: list[EntryPoint] = []
-    if result.final_answer and isinstance(result.final_answer, _SubsystemAnalysis):
+    if result.final_answer and isinstance(result.final_answer, SubsystemAnalysis):
         for ep_dict in result.final_answer.entry_points:
             try:
                 ep = EntryPoint.model_validate(ep_dict)

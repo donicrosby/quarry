@@ -1,7 +1,7 @@
 [
   {
     "file_path": "app.py",
-    "line_number": 12,
+    "line_number": 13,
     "key_name": "ADMIN_API_KEY",
     "value_length": 28,
     "vuln_class": "secrets",

@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for LDAP injection. Sources: user-controlled values reaching an LDAP query. Sinks: search filters built by concatenation/format (ldap.search, search_s, DirContext.search, filters like `(uid=<input>)`). Report any path where input is placed into a filter or DN without LDAP-special-character escaping (parentheses, asterisk, backslash, NUL).

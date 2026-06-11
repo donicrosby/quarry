@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from quarry.schemas import ActionReasoning, ProposedAction, ReasoningCheckResult
+from quarry.schemas import ActionReasoning, ProposedAction
 from quarry_models.guards import check_vague_reasoning
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures" / "mock_reasoning_fixtures"
@@ -262,12 +262,14 @@ class TestGraduatedStrictness:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(params=[
-    "good_xss_reasoning.json",
-    "good_read_reasoning.json",
-    "vague_xss_reasoning.json",
-    "bad_coherence_reasoning.json",
-])
+@pytest.fixture(
+    params=[
+        "good_xss_reasoning.json",
+        "good_read_reasoning.json",
+        "vague_xss_reasoning.json",
+        "bad_coherence_reasoning.json",
+    ]
+)
 def reasoning_fixture(request: pytest.FixtureRequest) -> dict[str, Any]:
     fixture_path = _FIXTURES / request.param  # type: ignore[attr-defined]
     return json.loads(fixture_path.read_text())  # type: ignore[return-value]

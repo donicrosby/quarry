@@ -15,11 +15,8 @@ Also confirms that:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 
-import pytest
-from pydantic import BaseModel
-
+from quarry.panel_config import DEFAULT_PANEL
 from quarry.schemas import (
     AgentTask,
     CandidateFinding,
@@ -29,11 +26,9 @@ from quarry.schemas import (
     ValidationResult,
     VulnerabilityClass,
 )
-from quarry.panel_config import DEFAULT_PANEL
-from quarry_activities.dedup import _dedup_impl, _DedupeResponse
-from quarry_activities.gapfill import _gapfill_impl, _GapfillResponse
-from quarry_activities.validate import _validate_impl, _ValidateResponse
-from quarry_models.loop import ToolCallRequest
+from quarry_activities.dedup import DedupeResponse, dedup_impl
+from quarry_activities.gapfill import GapfillResponse, gapfill_impl
+from quarry_activities.validate import ValidateResponse, validate_impl
 from quarry_models.mock_client import MockModelClient
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
@@ -93,10 +88,10 @@ class TestValidateStagePipeline:
             _make_finding(id="cf-2", vuln_class=VulnerabilityClass.XSS),
         ]
         panel = dict(DEFAULT_PANEL)
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
         results = [
-            _validate_impl(finding=f, repo_path="/tmp/repo", panel=panel, client=client)
+            validate_impl(finding=f, repo_path="/tmp/repo", panel=panel, client=client)
             for f in findings
         ]
 
@@ -111,10 +106,10 @@ class TestValidateStagePipeline:
 
         verdicts = ["validated", "rejected"]
         results: list[ValidationResult] = []
-        for finding, verdict in zip(findings, verdicts):
-            client = MockModelClient(default=_ValidateResponse(verdict=verdict))
+        for finding, verdict in zip(findings, verdicts, strict=False):
+            client = MockModelClient(default=ValidateResponse(verdict=verdict))
             results.append(
-                _validate_impl(finding=finding, repo_path="/tmp/repo", panel=panel, client=client)
+                validate_impl(finding=finding, repo_path="/tmp/repo", panel=panel, client=client)
             )
 
         assert results[0].verdict == "validated"
@@ -127,38 +122,17 @@ class TestValidateStagePipeline:
 
 
 class TestGapfillStagePipeline:
-    def test_gapfill_adds_tasks_for_uncovered_class(self) -> None:
-        """Gapfill produces tasks for a class with zero existing findings."""
+    def test_gapfill_adds_task_for_agent_reported_gap(self) -> None:
+        """Gapfill produces a re-hunt task for a gap the agent actually reports."""
         focused = [VulnerabilityClass.COMMAND_INJECTION, VulnerabilityClass.SSRF]
         ledger = _make_ledger(focused)
-        # CI has one task, SSRF has zero
-        existing = [
-            AgentTask(
-                id="t-1", scan_id="scan-1", role="hunt", task_name="hunt-command_injection",
-                vuln_class=VulnerabilityClass.COMMAND_INJECTION, scope="src/",
-                source="recon", status="pending", created_at=_NOW,
-            ),
-        ]
-        client = MockModelClient(default=_GapfillResponse())
-
-        new_tasks = _gapfill_impl(
-            ledger=ledger,
-            existing_tasks=existing,
-            vuln_classes=focused,
-            repo_path="/tmp/repo",
-            scan_id="scan-1",
-            client=client,
+        client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "ssrf", "scope": "src/", "reason": "fetch helper untraced"}]
+            )
         )
 
-        ssrf_tasks = [t for t in new_tasks if t.vuln_class == VulnerabilityClass.SSRF]
-        assert len(ssrf_tasks) >= 2
-
-    def test_gapfill_uses_gapfill_source(self) -> None:
-        focused = [VulnerabilityClass.IDOR]
-        ledger = _make_ledger(focused)
-        client = MockModelClient(default=_GapfillResponse())
-
-        new_tasks = _gapfill_impl(
+        new_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=[],
             vuln_classes=focused,
@@ -167,7 +141,26 @@ class TestGapfillStagePipeline:
             client=client,
         )
 
-        assert all(t.source == "gapfill" for t in new_tasks)
+        ssrf_tasks = [t for t in new_tasks if t.vuln_class == VulnerabilityClass.SSRF]
+        assert len(ssrf_tasks) == 1
+
+    def test_gapfill_returns_nothing_without_real_gaps(self) -> None:
+        """No coverage floor: empty agent output + no hunter gaps → no tasks."""
+        focused = [VulnerabilityClass.IDOR]
+        ledger = _make_ledger(focused)
+        client = MockModelClient(default=GapfillResponse())
+
+        new_tasks = gapfill_impl(
+            ledger=ledger,
+            existing_tasks=[],
+            vuln_classes=focused,
+            repo_path="/tmp/repo",
+            scan_id="scan-1",
+            client=client,
+        )
+
+        assert new_tasks == []
+        assert all(t.source == "gapfill" for t in new_tasks)  # vacuously true
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +176,9 @@ class TestDedupStagePipeline:
             _make_finding(id="cf-2", root_cause_key="key-dup"),
             _make_finding(id="cf-3", root_cause_key="key-unique"),
         ]
-        client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
+        client = MockModelClient(default=DedupeResponse(decision="keep_first"))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         ids = {f.id for f in result}
         assert "cf-1" in ids
@@ -195,13 +188,10 @@ class TestDedupStagePipeline:
 
     def test_dedup_preserves_all_when_unique(self) -> None:
         """All unique root_cause_keys → no dedup, all findings preserved."""
-        findings = [
-            _make_finding(id=f"cf-{i}", root_cause_key=f"key-{i}")
-            for i in range(4)
-        ]
-        client = MockModelClient(default=_DedupeResponse(decision="keep_all"))
+        findings = [_make_finding(id=f"cf-{i}", root_cause_key=f"key-{i}") for i in range(4)]
+        client = MockModelClient(default=DedupeResponse(decision="keep_all"))
 
-        result = _dedup_impl(candidates=findings, client=client)
+        result = dedup_impl(candidates=findings, client=client)
 
         assert len(result) == 4
 
@@ -219,16 +209,22 @@ class TestFullPipelineStages3to5:
 
         # Two hunt findings: one duplicate pair on CI, one unique XSS
         findings = [
-            _make_finding(id="cf-1", root_cause_key="ci-dup", vuln_class=VulnerabilityClass.COMMAND_INJECTION),
-            _make_finding(id="cf-2", root_cause_key="ci-dup", vuln_class=VulnerabilityClass.COMMAND_INJECTION),
-            _make_finding(id="cf-3", root_cause_key="xss-unique", vuln_class=VulnerabilityClass.XSS),
+            _make_finding(
+                id="cf-1", root_cause_key="ci-dup", vuln_class=VulnerabilityClass.COMMAND_INJECTION
+            ),
+            _make_finding(
+                id="cf-2", root_cause_key="ci-dup", vuln_class=VulnerabilityClass.COMMAND_INJECTION
+            ),
+            _make_finding(
+                id="cf-3", root_cause_key="xss-unique", vuln_class=VulnerabilityClass.XSS
+            ),
         ]
         panel = dict(DEFAULT_PANEL)
 
         # Stage 3: Validate each finding
-        validate_client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        validate_client = MockModelClient(default=ValidateResponse(verdict="validated"))
         validation_results = [
-            _validate_impl(finding=f, repo_path="/tmp/repo", panel=panel, client=validate_client)
+            validate_impl(finding=f, repo_path="/tmp/repo", panel=panel, client=validate_client)
             for f in findings
         ]
         assert len(validation_results) == 3
@@ -237,15 +233,24 @@ class TestFullPipelineStages3to5:
         existing_tasks = [
             AgentTask(
                 id=f"t-{f.id}",
-                scan_id="scan-1", role="hunt",
+                scan_id="scan-1",
+                role="hunt",
                 task_name=f"hunt-{f.vuln_class.value}",
                 vuln_class=f.vuln_class,
-                scope="src/", source="recon", status="pending", created_at=_NOW,
+                scope="src/",
+                source="recon",
+                status="pending",
+                created_at=_NOW,
             )
             for f in findings
         ]
-        gapfill_client = MockModelClient(default=_GapfillResponse())
-        gapfill_tasks = _gapfill_impl(
+        # Agent reports one real XSS gap → exactly one re-hunt task (no floor padding).
+        gapfill_client = MockModelClient(
+            default=GapfillResponse(
+                gaps=[{"vuln_class": "xss", "scope": "src/", "reason": "reflected param untraced"}]
+            )
+        )
+        gapfill_tasks = gapfill_impl(
             ledger=ledger,
             existing_tasks=existing_tasks,
             vuln_classes=focused,
@@ -253,14 +258,12 @@ class TestFullPipelineStages3to5:
             scan_id="scan-1",
             client=gapfill_client,
         )
-        # Both classes already have >= 1 task, but floor requires 2 per class
-        # XSS has 1 → floor adds 1; CI has 2 → no padding needed
         xss_gap_tasks = [t for t in gapfill_tasks if t.vuln_class == VulnerabilityClass.XSS]
-        assert len(xss_gap_tasks) >= 1
+        assert len(xss_gap_tasks) == 1
 
         # Stage 5: Dedup — the duplicate CI pair collapses to one
-        dedup_client = MockModelClient(default=_DedupeResponse(decision="keep_first"))
-        deduped = _dedup_impl(candidates=findings, client=dedup_client)
+        dedup_client = MockModelClient(default=DedupeResponse(decision="keep_first"))
+        deduped = dedup_impl(candidates=findings, client=dedup_client)
 
         assert len(deduped) == 2  # cf-1 (winner) + cf-3 (unique)
         ids = {f.id for f in deduped}

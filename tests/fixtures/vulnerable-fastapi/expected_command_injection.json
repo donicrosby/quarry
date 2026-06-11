@@ -4,7 +4,7 @@
     "param": "host",
     "sink": "subprocess.run",
     "file_path": "app.py",
-    "line_number": 73,
+    "line_number": 74,
     "vuln_class": "command_injection",
     "title": "Potential command injection via host"
   }

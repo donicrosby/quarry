@@ -45,7 +45,10 @@ int handle_network_command(const char *input) {
 _MOCK_FINDING = {
     "vuln_class": "command_injection",
     "title": "User input reaches system() via snprintf in handle_network_command",
-    "hypothesis": "The 'input' parameter is interpolated into a shell command string passed to system() without sanitization.",
+    "hypothesis": (
+        "The 'input' parameter is interpolated into a shell command string "
+        "passed to system() without sanitization."
+    ),
     "affected_component": "task.c:10",
     "confidence": "high",
     "severity": "critical",
@@ -71,9 +74,7 @@ def run_smoke() -> int:
         task_file = Path(tmpdir) / "task.c"
         task_file.write_text(_C_TASK_SOURCE, encoding="utf-8")
 
-        client = MockModelClient(
-            default=_HuntResponse(findings=[_MOCK_FINDING], tool_calls=[])
-        )
+        client = MockModelClient(default=_HuntResponse(findings=[_MOCK_FINDING], tool_calls=[]))
 
         task = AgentTask(
             id="cybergym-smoke-1",

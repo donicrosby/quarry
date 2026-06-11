@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 from quarry.schemas import AgentTask, VulnerabilityClass
-from quarry_activities.hunt import _hunt_impl
+from quarry_activities.hunt import hunt_impl
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec
@@ -43,9 +43,7 @@ def test_hunt_go_finds_command_injection(tmp_path: Path) -> None:
         findings: list[dict[str, Any]] = []
         tool_calls: list[ToolCallRequest] = []
 
-    client = MockModelClient(
-        default=_HuntResponse(findings=[raw_finding], tool_calls=[])
-    )
+    client = MockModelClient(default=_HuntResponse(findings=[raw_finding], tool_calls=[]))
 
     task = AgentTask(
         id="golden-go-1",
@@ -59,7 +57,7 @@ def test_hunt_go_finds_command_injection(tmp_path: Path) -> None:
         created_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
     )
 
-    findings = _hunt_impl(
+    findings, _gaps = hunt_impl(
         task=task,
         repo_path=str(FIXTURE_REPO),
         max_iterations=12,
@@ -75,7 +73,7 @@ def test_hunt_go_finds_command_injection(tmp_path: Path) -> None:
     )
 
     affected = accepted_findings[0].affected_component or ""
-    source_files = [ref.file for ref in accepted_findings[0].source_refs]
+    source_files = [ref.file_path for ref in accepted_findings[0].source_refs]
     all_paths = [affected] + source_files
 
     assert any(p.endswith(".go") or ".go:" in p for p in all_paths), (

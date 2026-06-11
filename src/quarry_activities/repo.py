@@ -21,6 +21,7 @@ from quarry.schemas import (
     FileManifestEntry,
     FinalFinding,
     IntegrationRun,
+    ModelInvocation,
     Report,
     RepositorySnapshot,
     Scan,
@@ -221,6 +222,13 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
             return [
                 invocation.model_dump(mode="json")
                 for invocation in repository.load_tool_invocations(payload["scan_id"])
+            ]
+        case "save_model_invocation":
+            repository.save_model_invocation(ModelInvocation.model_validate(payload["invocation"]))
+        case "load_model_invocations":
+            return [
+                invocation.model_dump(mode="json")
+                for invocation in repository.load_model_invocations(payload["scan_id"])
             ]
         case "save_agent_task":
             # No-op for now — tasks are re-derived from ArchitectureDoc on resume.

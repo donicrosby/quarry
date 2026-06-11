@@ -53,6 +53,7 @@ async def test_scan_run_executes_recon_stage(
     repository = QuarryRepository(db_path)
     scan = repository.load_scan(result.scan_id)
     from quarry.schemas import ScanStatus
+
     assert scan.status is ScanStatus.COMPLETED
     assert scan.metadata.get("current_stage") == "COMPLETED"
 

@@ -30,7 +30,6 @@ func ListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetUser returns a user record identified by the last path segment.
-// No authorization check is performed — any caller may read any record.
 func GetUser(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/users/")
 	if id == "" {

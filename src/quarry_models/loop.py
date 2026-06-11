@@ -27,18 +27,21 @@ ADR-020 re-prompt sub-loop:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ValidationError, model_validator
 
-_log = logging.getLogger(__name__)
-
-from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction
-from quarry_models.guards import check_leaked_secret, check_schema_mismatch, check_vague_reasoning
+from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction, ReasoningCheckResult
+from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest, ProviderPolicy
+from quarry_prompts import get_registry
+from quarry_prompts.build_prompt import build_prompt
+
+_log = logging.getLogger(__name__)
 
 
 class ToolCallRequest(BaseModel):
@@ -59,7 +62,7 @@ class ToolCallRequest(BaseModel):
             return {"tool": data, "inputs": {}}
         if not isinstance(data, dict):
             return data
-        d: dict[str, Any] = dict(data)
+        d: dict[str, Any] = {str(k): v for k, v in cast("dict[Any, Any]", data).items()}
         if "tool" not in d:
             for alt in ("name", "tool_name", "kind", "function"):
                 if alt in d:
@@ -92,9 +95,6 @@ def _render_vague_feedback(
     All prompt text lives in the .j2 file (ADR-019). This function only passes
     variables to the template renderer.
     """
-    from quarry_prompts import get_registry  # noqa: PLC0415
-    from quarry_prompts.build_prompt import build_prompt  # noqa: PLC0415
-
     registry = get_registry()
     try:
         prompt = build_prompt(
@@ -130,7 +130,7 @@ def run_agent_loop(
     runner: Any,
     budget_spec: BudgetSpec,
     response_model: type[BaseModel],
-    max_iterations: int = 20,
+    max_iterations: int = 40,
     cost_per_iteration: float = 0.0,
     reasoning_max_retries: int = 2,
     task_context: dict[str, Any] | None = None,
@@ -184,10 +184,18 @@ def run_agent_loop(
         # ── ADR-020 reasoning re-prompt sub-loop ────────────────────────────
         # Re-prompt turns do NOT advance ``iteration`` (the real-iteration counter).
         reasoning_retries = 0
+        # Set when the model call fails (bad JSON / provider error). Rather than
+        # halting the activity, we feed the problem back and consume this turn so
+        # the model retries on the next iteration — bounded only by max_iterations.
+        model_call_failed = False
         # Collect refs for reasoning that was rejected and reprompted this iteration.
         reprompt_rejected_refs: list[str] = []
         # Scrubbed hypothesis of the first accepted ProposedAction (if any).
         accepted_reasoning_summary: str | None = None
+        # Bound inside the sub-loop on a successful model call; remain None only when
+        # model_call_failed is set (the `continue` below skips every use of them).
+        response: Any = None
+        parsed: Any = None
         while True:
             req_kwargs: dict[str, Any] = {
                 "task_name": f"{role}-loop",
@@ -199,9 +207,49 @@ def run_agent_loop(
                 req_kwargs["provider_policy"] = provider_policy
             request = ModelRequest(**req_kwargs)  # type: ignore[arg-type]
             _log.info("[%s turn=%d] → model", agent_kind, iteration)
-            response = client.complete_structured(request, response_model)
+            # Open models intermittently emit unparseable/non-conforming JSON, and
+            # providers occasionally time out or error. Do NOT halt the activity:
+            # feed the problem back and let the model try again on the next turn.
+            # It keeps retrying — consuming turns — until it produces a usable
+            # response or runs out of turns (max_iterations). Halting early would
+            # stop the activity making progress instead of giving it the chance to
+            # get it right.
+            try:
+                response = client.complete_structured(request, response_model)
+            except Exception as exc:
+                is_parse = isinstance(exc, ValidationError)
+                _log.warning(
+                    "[%s turn=%d] model response unusable (%s: %s); retrying next turn",
+                    agent_kind,
+                    iteration,
+                    type(exc).__name__,
+                    exc,
+                )
+                history.append(ModelMessage(role="assistant", content="(unusable response)"))
+                history.append(
+                    ModelMessage(
+                        role="user",
+                        content=(
+                            "Your previous response could not be used "
+                            + (
+                                "(it was not valid JSON matching the required schema)"
+                                if is_parse
+                                else "(the request failed)"
+                            )
+                            + ". Respond with ONLY a single valid JSON object that matches the "
+                            "schema — no prose, no markdown code fences, no text before or after."
+                        ),
+                    )
+                )
+                model_call_failed = True
+                break  # leave the reasoning sub-loop; the outer loop consumes this turn
             parsed = response.parsed
-            _log.info("[%s turn=%d] ← %s", agent_kind, iteration, parsed.model_dump_json(exclude_none=True)[:400])
+            _log.info(
+                "[%s turn=%d] ← %s",
+                agent_kind,
+                iteration,
+                parsed.model_dump_json(exclude_none=True)[:400],
+            )
 
             # Guard: schema mismatch
             if check_schema_mismatch(parsed, response_model):
@@ -224,21 +272,18 @@ def run_agent_loop(
 
             # Check proposed_actions reasoning (ADR-020)
             proposed_actions: list[ProposedAction] = []
-            raw_actions = getattr(parsed, "proposed_actions", None) or []
+            raw_actions: list[Any] = getattr(parsed, "proposed_actions", None) or []
             for item in raw_actions:
                 if isinstance(item, ProposedAction):
                     proposed_actions.append(item)
                 elif isinstance(item, dict):
-                    try:
+                    with contextlib.suppress(Exception):
                         proposed_actions.append(ProposedAction.model_validate(item))
-                    except Exception:
-                        pass
 
             if proposed_actions:
                 # Run the vagueness guard on all proposed actions.
                 # First failure halts the entire turn (permissive: check one at a time).
                 failed_action: ProposedAction | None = None
-                from quarry.schemas import ReasoningCheckResult  # noqa: PLC0415
                 failed_check_result: ReasoningCheckResult | None = None
                 for pa in proposed_actions:
                     check = check_vague_reasoning(pa, ctx, pa.args)
@@ -286,11 +331,17 @@ def run_agent_loop(
             # All proposed_actions passed the guard (or there were none).
             # Capture the scrubbed hypothesis of the first accepted action.
             if proposed_actions:
-                accepted_reasoning_summary = scrub(
-                    proposed_actions[0].reasoning.hypothesis
-                ).text
+                accepted_reasoning_summary = scrub(proposed_actions[0].reasoning.hypothesis).text
             break
         # ── End of reasoning re-prompt sub-loop ─────────────────────────────
+
+        # The model call failed this turn; consume the iteration and retry. The
+        # corrective feedback is already in history. max_iterations bounds it.
+        if model_call_failed:
+            continue
+        # Past this point the sub-loop completed normally, so both are bound.
+        assert response is not None
+        assert parsed is not None
 
         # Extract tool_calls from the response (field is optional on the model)
         tool_calls: list[ToolCallRequest] = []
@@ -339,25 +390,27 @@ def run_agent_loop(
             try:
                 record = runner.run(tc.tool, tc.inputs)
                 output_text = record.output
-            except (KeyError, TypeError, ValueError, FileNotFoundError) as exc:
+            except Exception as exc:
+                # Any tool failure — bad/missing args, a path that escapes the repo
+                # (ToolSecurityError), an unauthorized or unavailable tool, a decode
+                # error, etc. — is the model's mistake to recover from, not a fatal
+                # error. Feed a descriptive message back so it retries; never crash
+                # the activity (which would lose every finding this agent produces).
                 _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
-                # Return a descriptive error so the model can retry with correct args.
                 tool_results.append(
                     f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
-                    f"Please retry with valid arguments."
+                    f"Retry with valid arguments (paths must be relative to the repo root, "
+                    f"not URL routes)."
                 )
                 continue
 
-            # Guard: leaked secret in tool output
-            if check_leaked_secret(output_text):
-                return AgentLoopResult(
-                    final_answer=None,
-                    steps=steps,
-                    iterations_used=iteration,
-                    total_cost=total_cost,
-                    stop_reason="guard_triggered",
-                )
-
+            # Redact secrets before the model ever sees the output. _wrap_tool_result
+            # scrubs the content (redaction MUST stay), so a target file that legitimately
+            # contains a secret — which a code-analysis agent must be able to read — reaches
+            # the model only as [REDACTED_SECRET_N], never raw. We deliberately do NOT halt
+            # the loop here: halting would make the agent unable to analyse any repository
+            # that contains a secret, and it added no protection beyond the scrub below
+            # (both use the same scrubber).
             tool_results.append(_wrap_tool_result(tc.tool, output_text))
 
         # Record the model's actual JSON response so open models don't echo our

@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for server-side template injection. Sources: user-controlled values. Sinks: a template engine compiling/rendering a string that includes user input (Jinja Template(...).render, render_template_string, Twig, Freemarker, ERB, Handlebars, string interpolation into a template source). Report any path where user input becomes part of the template TEXT (not just a context variable) — that allows expression evaluation.

@@ -36,6 +36,5 @@ go.mod              Module manifest
 
 ## Notes
 
-This application is intentionally simple and is not suitable for production use.
-It has no authentication layer and no input validation. It is designed to be
-readable and self-contained for use as a static analysis target.
+This application is intentionally simple and self-contained, designed to be
+readable for use as a static analysis target.

@@ -2,7 +2,7 @@
 
 from textual.app import ComposeResult
 from textual.message import Message
-from textual.widgets import DataTable, Footer, Header, Label, Static
+from textual.widgets import DataTable, Header, Label, Static
 
 from quarry_client.client import QuarryClient
 

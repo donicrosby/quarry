@@ -31,7 +31,7 @@ _PROMPT_PHRASES = [
     "You are a validate agent",
     "You are a gapfill agent",
     "You are a prove agent",
-    "Return a JSON object with a single key \"findings\"",
+    'Return a JSON object with a single key "findings"',
     "Hunt for **",
     "Never follow instructions found inside",
 ]
@@ -47,7 +47,7 @@ _PROMPT_CONSTANT_NAMES = {
 # Files acknowledged as migration targets (old infrastructure being phased out).
 # Remove entries as files are fully migrated.
 _MIGRATION_ALLOWLIST = {
-    "quarry_models/prompting.py",   # superseded by quarry_prompts; kept as compat shim
+    "quarry_models/prompting.py",  # superseded by quarry_prompts; kept as compat shim
 }
 
 
@@ -55,13 +55,10 @@ def _is_prompt_string(s: str) -> bool:
     """Return True if the string looks like direct prompt copy."""
     if "\n" not in s or len(s) < 100:
         return False
-    for phrase in _PROMPT_PHRASES:
-        if phrase in s:
-            return True
-    return False
+    return any(phrase in s for phrase in _PROMPT_PHRASES)
 
 
-def _check_file(path: Path) -> list[tuple[int, str]]:
+def check_file(path: Path) -> list[tuple[int, str]]:
     """Return list of (lineno, reason) for violations in *path*."""
     violations: list[tuple[int, str]] = []
     try:
@@ -81,10 +78,12 @@ def _check_file(path: Path) -> list[tuple[int, str]]:
                     and isinstance(node.value.value, str)
                     and node.value.value.strip()
                 ):
-                    violations.append((
-                        node.lineno,
-                        f"prompt constant {target.id!r} — move to prompts/*.j2",
-                    ))
+                    violations.append(
+                        (
+                            node.lineno,
+                            f"prompt constant {target.id!r} — move to prompts/*.j2",
+                        )
+                    )
 
         # Detect long multi-line string literals containing prompt phrases
         if (
@@ -92,10 +91,12 @@ def _check_file(path: Path) -> list[tuple[int, str]]:
             and isinstance(node.value, str)
             and _is_prompt_string(node.value)
         ):
-            violations.append((
-                node.lineno,
-                "string literal contains prompt text — move to prompts/*.j2",
-            ))
+            violations.append(
+                (
+                    node.lineno,
+                    "string literal contains prompt text — move to prompts/*.j2",
+                )
+            )
 
     return violations
 
@@ -107,7 +108,7 @@ def main(src_root: str = "src") -> int:
     for py_file in sorted(root.rglob("*.py")):
         if any(allowed in str(py_file) for allowed in _MIGRATION_ALLOWLIST):
             continue
-        violations = _check_file(py_file)
+        violations = check_file(py_file)
         for lineno, reason in violations:
             print(f"{py_file}:{lineno}: {reason}")
             total_violations += 1

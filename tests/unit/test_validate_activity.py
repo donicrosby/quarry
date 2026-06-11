@@ -14,20 +14,18 @@ The activity:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 from pydantic import BaseModel
 
+from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     CandidateFinding,
-    Confidence,
-    Severity,
     VulnerabilityClass,
 )
-from quarry.panel_config import DEFAULT_PANEL, RoleConfig
-from quarry_activities.validate import _validate_impl
+from quarry_activities.validate import validate_impl
 from quarry_models.loop import ToolCallRequest
 from quarry_models.mock_client import MockModelClient
 
@@ -38,7 +36,7 @@ _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 # ---------------------------------------------------------------------------
 
 
-class _ValidateResponse(BaseModel):
+class ValidateResponse(BaseModel):
     """Mock response schema that the validate loop produces."""
 
     verdict: str = "validated"
@@ -74,8 +72,6 @@ def _make_panel(validate_provider: str = "litellm") -> dict[str, RoleConfig]:
     cross-vendor check compares the provider string from panel entry vs
     finding.hunter_provider.
     """
-    from quarry.panel_config import RoleConfig  # noqa: PLC0415
-
     panel = dict(DEFAULT_PANEL)
     panel["validate"] = RoleConfig(provider=validate_provider, model="gpt-4o", rpm=30)  # type: ignore[assignment]
     return panel
@@ -90,9 +86,9 @@ class TestValidateActivityOutcomes:
     def test_validated_outcome(self) -> None:
         finding = _make_finding()
         panel = _make_panel(validate_provider="litellm")
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -106,13 +102,13 @@ class TestValidateActivityOutcomes:
         finding = _make_finding()
         panel = _make_panel(validate_provider="litellm")
         client = MockModelClient(
-            default=_ValidateResponse(
+            default=ValidateResponse(
                 verdict="rejected",
                 reasons=["No evidence of unsanitized data flow to exec."],
             )
         )
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -125,13 +121,13 @@ class TestValidateActivityOutcomes:
         finding = _make_finding()
         panel = _make_panel(validate_provider="litellm")
         client = MockModelClient(
-            default=_ValidateResponse(
+            default=ValidateResponse(
                 verdict="needs_proof",
                 reasons=["Suspicious pattern found but insufficient static evidence."],
             )
         )
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -151,9 +147,9 @@ class TestCrossVendorDisagreement:
         # hunter used "anthropic" (plain string); validate panel uses "litellm"
         finding = _make_finding(hunter_provider="anthropic")
         panel = _make_panel(validate_provider="litellm")
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -166,9 +162,9 @@ class TestCrossVendorDisagreement:
         # Both sides use "litellm"
         finding = _make_finding(hunter_provider="litellm")
         panel = _make_panel(validate_provider="litellm")
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -181,9 +177,9 @@ class TestCrossVendorDisagreement:
         """Null hunter_provider + real validate provider → no disagreement (unknown)."""
         finding = _make_finding(hunter_provider=None)  # type: ignore[arg-type]
         panel = _make_panel(validate_provider="litellm")
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -208,11 +204,11 @@ class TestValidatorIndependenceBoundary:
             def complete_structured(self, request: Any, response_model: Any) -> Any:
                 for msg in request.messages:
                     captured.append(msg.content)
-                return MockModelClient(default=_ValidateResponse()).complete_structured(
+                return MockModelClient(default=ValidateResponse()).complete_structured(
                     request, response_model
                 )
 
-        _validate_impl(
+        validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -255,9 +251,9 @@ class TestValidatorIndependenceBoundary:
     def test_validate_result_links_to_finding(self) -> None:
         finding = _make_finding()
         panel = _make_panel()
-        client = MockModelClient(default=_ValidateResponse(verdict="validated"))
+        client = MockModelClient(default=ValidateResponse(verdict="validated"))
 
-        result = _validate_impl(
+        result = validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,
@@ -275,7 +271,6 @@ class TestValidatorIndependenceBoundary:
 
 def test_validate_activity_mock_panel_does_not_call_build(tmp_path: Path) -> None:
     """validate_activity with provider=mock must not call build_model_client."""
-    from pathlib import Path
     from unittest.mock import patch
 
     from quarry.panel_config import RoleConfig
@@ -286,15 +281,17 @@ def test_validate_activity_mock_panel_does_not_call_build(tmp_path: Path) -> Non
 
     with patch("quarry_activities.validate.build_model_client") as mock_build:
         from quarry_activities.validate import validate_activity
-        validate_activity(finding.model_dump(mode="json"), str(tmp_path), None, None, mock_panel_json)
+
+        validate_activity(
+            finding.model_dump(mode="json"), str(tmp_path), None, None, mock_panel_json
+        )
 
     mock_build.assert_not_called()
 
 
 def test_validate_activity_litellm_panel_builds_litellm_client(tmp_path: Path) -> None:
     """validate_activity with provider=litellm must call build_model_client and pass policy."""
-    from pathlib import Path
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
     from quarry.panel_config import RoleConfig
     from quarry.schemas import Provider
@@ -315,16 +312,26 @@ def test_validate_activity_litellm_panel_builds_litellm_client(tmp_path: Path) -
         if isinstance(p, ProviderPolicy):
             received_policies.append(p)
         from quarry.schemas import AgentLoopResult
+
         return AgentLoopResult(
-            final_answer=None, steps=[], iterations_used=1, total_cost=0.0, stop_reason="final_answer"
+            final_answer=None,
+            steps=[],
+            iterations_used=1,
+            total_cost=0.0,
+            stop_reason="final_answer",
         )
 
     with (
-        patch("quarry_activities.validate.build_model_client", return_value=fake_client) as mock_build,
+        patch(
+            "quarry_activities.validate.build_model_client", return_value=fake_client
+        ) as mock_build,
         patch("quarry_activities.validate.run_agent_loop", side_effect=_spy_loop),
     ):
         from quarry_activities.validate import validate_activity
-        validate_activity(finding.model_dump(mode="json"), str(tmp_path), None, None, litellm_panel_json)
+
+        validate_activity(
+            finding.model_dump(mode="json"), str(tmp_path), None, None, litellm_panel_json
+        )
 
     mock_build.assert_called_once()
     assert len(received_policies) == 1

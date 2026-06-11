@@ -11,18 +11,14 @@ may leak through.
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import UTC, datetime
-
-import pytest
 
 from quarry.schemas import (
     CandidateFinding,
-    Confidence,
-    Severity,
     VulnerabilityClass,
 )
-from quarry_models.validation import ValidatorClaim, validate_claim_from_finding
+from quarry_models.validation import ValidatorClaim as VC
+from quarry_models.validation import validate_claim_from_finding
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
@@ -66,7 +62,7 @@ class TestValidatorClaim:
         claim = validate_claim_from_finding(finding)
 
         # ValidatorClaim must have no field named 'reasoning'
-        claim_fields = set(claim.model_fields.keys())
+        claim_fields = set(type(claim).model_fields.keys())
         assert "reasoning" not in claim_fields, (
             "ValidatorClaim must not expose 'reasoning' — hunter reasoning leaks the provenance"
         )
@@ -75,7 +71,7 @@ class TestValidatorClaim:
         finding = _make_finding(hunter_provider="anthropic")
         claim = validate_claim_from_finding(finding)
 
-        claim_fields = set(claim.model_fields.keys())
+        claim_fields = set(type(claim).model_fields.keys())
         assert "hunter_provider" not in claim_fields
         assert "provider" not in claim_fields
 
@@ -84,10 +80,9 @@ class TestValidatorClaim:
         claim = validate_claim_from_finding(finding)
 
         forbidden = {"tool_calls", "agent_steps", "model_name", "model", "hypothesis"}
+        claim_fields = type(claim).model_fields
         for field in forbidden:
-            assert field not in claim.model_fields, (
-                f"ValidatorClaim must not expose '{field}'"
-            )
+            assert field not in claim_fields, f"ValidatorClaim must not expose '{field}'"
 
     def test_claim_serialisation_contains_no_hunter_text(self) -> None:
         """The serialised claim payload must not contain hunter reasoning verbatim."""
@@ -120,8 +115,6 @@ class TestValidatorClaim:
         """ValidatorClaim must round-trip through JSON (Pydantic BaseModel)."""
         finding = _make_finding()
         claim = validate_claim_from_finding(finding)
-
-        from quarry_models.validation import ValidatorClaim as VC  # noqa: PLC0415
 
         reloaded = VC.model_validate_json(claim.model_dump_json())
         assert reloaded.vuln_class == claim.vuln_class

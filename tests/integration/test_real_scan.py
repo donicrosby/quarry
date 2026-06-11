@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, run_scan
 
 REPO_ROOT = Path("examples/vulnerable-fastapi").resolve()

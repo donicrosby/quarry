@@ -17,7 +17,6 @@ type execResponse struct {
 }
 
 // RunCommand executes a host command supplied by the caller and returns the output.
-// The input is passed directly to exec.Command without sanitization.
 func RunCommand(w http.ResponseWriter, r *http.Request) {
 	var req execRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

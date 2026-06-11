@@ -5,11 +5,8 @@ Written RED first — these fail until panel_json is wired into the activity.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
-
-import pytest
 
 from quarry.panel_config import RoleConfig
 from quarry.schemas import Provider, SubsystemAssignment
@@ -50,7 +47,6 @@ def test_recon_subsystem_uses_mock_when_panel_json_specifies_mock(tmp_path: Path
 def test_recon_subsystem_uses_litellm_when_panel_json_specifies_litellm(tmp_path: Path) -> None:
     """panel_json with provider='litellm' selects LiteLLMModelClient."""
     from quarry_activities.recon_subsystem import recon_subsystem_activity
-    from quarry_models.litellm_client import LiteLLMModelClient
 
     assignment = _make_assignment()
     role_config = RoleConfig(provider=Provider.LITELLM, model="claude-opus-4-8")
@@ -62,11 +58,10 @@ def test_recon_subsystem_uses_litellm_when_panel_json_specifies_litellm(tmp_path
     def _mock_factory(provider: Provider, **kw):  # type: ignore[override]
         captured_providers.append(provider)
         # Return a mock client so the activity doesn't need a live network call
-        from pydantic import BaseModel
-        from quarry_models.loop import ToolCallRequest
-        from quarry_activities.recon_subsystem import _SubsystemAnalysis
+        from quarry_activities.recon_subsystem import SubsystemAnalysis
+
         return MockModelClient(
-            default=_SubsystemAnalysis(
+            default=SubsystemAnalysis(
                 entry_points=[],
                 responsibility=assignment.responsibility,
                 notes="",

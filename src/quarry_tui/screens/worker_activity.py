@@ -34,6 +34,9 @@ class WorkerActivityPanel(Static):
         super().__init__()
         self.client = client
         self.scan_id = scan_id
+        # Mirror of the lines written to the RichLog, so get_events() doesn't have
+        # to read RichLog's private internals.
+        self._event_lines: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -57,12 +60,12 @@ class WorkerActivityPanel(Static):
         for event in events:
             self._last_event_id = event.id
             line = _format_event(event.event_type, event.payload)
+            self._event_lines.append(line)
             log.write(line)
 
     def get_events(self) -> list[dict[str, Any]]:
         """Return current event log entries (for testing and CLI --verbose mode)."""
-        log = self.query_one(RichLog)
-        return [{"text": str(line)} for line in log._lines]
+        return [{"text": line} for line in self._event_lines]
 
 
 def _format_event(event_type: str, payload: dict[str, Any]) -> str:

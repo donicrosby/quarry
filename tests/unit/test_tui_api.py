@@ -146,6 +146,7 @@ class TestQuarryTuiApp:
 
     def test_compose_yields_dashboard(self) -> None:
         from textual.widgets import Footer
+
         app = QuarryTuiApp()
         children = list(app.compose())
         assert len(children) == 2

@@ -17,7 +17,6 @@ router.get('/:id', (req, res) => {
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
-  // Returns the full user record to the requester
   return res.json(user);
 });
 

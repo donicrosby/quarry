@@ -1,6 +1,6 @@
 """Integration tests: panel_entries in RunScanInput reach every agentic activity.
 
-Tests Change 4 — panel_entries field acceptance, _panel_json_for_role serialisation,
+Tests Change 4 — panel_entries field acceptance, panel_json_for_role serialisation,
 and each agentic activity's panel_json=None backwards-compat path.
 
 Strategy: all tests run in-process with no Temporal server or model calls.
@@ -25,15 +25,21 @@ from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.validate import validate_activity
-from quarry_workflows.run_scan import RunScanInput, _panel_json_for_role
+from quarry_workflows.run_scan import RunScanInput, panel_json_for_role
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
 
 def _mock_entries(scan_id: str = "test-scan") -> list[ModelPanelEntry]:
     return [
-        ModelPanelEntry(id=str(uuid4()), scan_id=scan_id, role=role,
-                        provider="mock", model="mock-v1", rate_limit_rpm=30)
+        ModelPanelEntry(
+            id=str(uuid4()),
+            scan_id=scan_id,
+            role=role,
+            provider="mock",
+            model="mock-v1",
+            rate_limit_rpm=30,
+        )
         for role in ("recon", "hunt", "validate", "gapfill", "dedup")
     ]
 
@@ -41,24 +47,36 @@ def _mock_entries(scan_id: str = "test-scan") -> list[ModelPanelEntry]:
 def _make_scan(entries: list[ModelPanelEntry]):  # type: ignore[return]
     """Build a minimal Scan (model_construct skips validation)."""
     from quarry.schemas import Scan
+
     return Scan.model_construct(panel_snapshot=entries)
 
 
 def _make_agent_task() -> AgentTask:
     return AgentTask(
-        id="t-1", scan_id="s-1", role="hunt", task_name="hunt-secrets",
-        vuln_class=VulnerabilityClass.SECRETS, scope="src/",
-        task_prompt="find secrets", status="pending", created_at=_NOW,
+        id="t-1",
+        scan_id="s-1",
+        role="hunt",
+        task_name="hunt-secrets",
+        vuln_class=VulnerabilityClass.SECRETS,
+        scope="src/",
+        task_prompt="find secrets",
+        status="pending",
+        created_at=_NOW,
     )
 
 
 def _make_finding() -> CandidateFinding:
     return CandidateFinding(
-        id="cf-1", scan_id="s-1", workspace_id="ws",
+        id="cf-1",
+        scan_id="s-1",
+        workspace_id="ws",
         vuln_class=VulnerabilityClass.SECRETS,
-        title="test finding", hypothesis="test",
-        confidence=Confidence.LOW, severity=Severity.LOW,
-        created_by="test", created_at=_NOW,
+        title="test finding",
+        hypothesis="test",
+        confidence=Confidence.LOW,
+        severity=Severity.LOW,
+        created_by="test",
+        created_at=_NOW,
     )
 
 
@@ -79,18 +97,18 @@ def test_empty_panel_entries_is_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _panel_json_for_role
+# panel_json_for_role
 # ---------------------------------------------------------------------------
 
 
 def test_panel_json_for_role_returns_none_when_empty_snapshot() -> None:
     scan = _make_scan([])
-    assert _panel_json_for_role(scan, "hunt") is None
+    assert panel_json_for_role(scan, "hunt") is None
 
 
 def test_panel_json_for_role_serialises_mock_entry() -> None:
     scan = _make_scan(_mock_entries(scan_id="s-2"))
-    result = _panel_json_for_role(scan, "hunt")
+    result = panel_json_for_role(scan, "hunt")
     assert result is not None
     data = json.loads(result)
     assert data["provider"] == "mock"
@@ -99,16 +117,20 @@ def test_panel_json_for_role_serialises_mock_entry() -> None:
 
 def test_panel_json_for_role_missing_role_returns_none() -> None:
     scan = _make_scan(_mock_entries())
-    assert _panel_json_for_role(scan, "unknown_role") is None
+    assert panel_json_for_role(scan, "unknown_role") is None
 
 
 def test_panel_json_for_role_invalid_provider_returns_none() -> None:
     bad_entry = ModelPanelEntry(
-        id=str(uuid4()), scan_id="s-4", role="hunt",
-        provider="totally_fake_provider", model="x", rate_limit_rpm=10,
+        id=str(uuid4()),
+        scan_id="s-4",
+        role="hunt",
+        provider="totally_fake_provider",
+        model="x",
+        rate_limit_rpm=10,
     )
     scan = _make_scan([bad_entry])
-    assert _panel_json_for_role(scan, "hunt") is None
+    assert panel_json_for_role(scan, "hunt") is None
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +139,12 @@ def test_panel_json_for_role_invalid_provider_returns_none() -> None:
 
 
 def test_hunt_activity_accepts_none_panel_json() -> None:
-    result = hunt_activity(_make_agent_task(), "/nonexistent/repo",
-                           max_iterations=1, panel_json=None)
-    assert isinstance(result, list)
+    result = hunt_activity(
+        _make_agent_task(), "/nonexistent/repo", max_iterations=1, panel_json=None
+    )
+    # Hunt returns {"findings": [...], "coverage_gaps": [...]} at the boundary.
+    assert isinstance(result, dict)
+    assert "findings" in result and "coverage_gaps" in result
 
 
 def test_validate_activity_accepts_none_panel_json() -> None:
@@ -129,12 +154,17 @@ def test_validate_activity_accepts_none_panel_json() -> None:
 
 def test_gapfill_activity_accepts_none_panel_json() -> None:
     ledger = CoverageLedger(
-        id="l-1", scan_id="s-1", workspace_id="ws",
-        attack_surface_items_total=0, attack_surface_items_scanned=0,
+        id="l-1",
+        scan_id="s-1",
+        workspace_id="ws",
+        attack_surface_items_total=0,
+        attack_surface_items_scanned=0,
         vuln_classes_requested=[VulnerabilityClass.SECRETS],
         created_at=_NOW,
     )
-    result = gapfill_activity(ledger.model_dump(mode="json"), [], [], "/nonexistent", panel_json=None)
+    result = gapfill_activity(
+        ledger.model_dump(mode="json"), [], [], "/nonexistent", panel_json=None
+    )
     assert isinstance(result, list)
 
 

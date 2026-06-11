@@ -23,7 +23,6 @@ from quarry.schemas import (
     ToolInvocation,
 )
 
-
 # ---------------------------------------------------------------------------
 # ActionReasoning — four mandatory string fields
 # ---------------------------------------------------------------------------

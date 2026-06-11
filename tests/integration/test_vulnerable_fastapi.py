@@ -3,6 +3,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
+import pytest
+from fastapi import HTTPException
+
 Route = Callable[..., dict[str, str]]
 
 
@@ -19,7 +22,11 @@ def test_vulnerable_fastapi_seeded_routes() -> None:
     assert module.health() == {"status": "ok"}
     assert module.config()["admin_api_key"] == "demo-admin-key-please-rotate"
     assert module.read_user("2")["email"] == "grace@example.test"
-    assert module.fetch_local("http://127.0.0.1:8000/health")["requested_url"]
+    # fetch_local is now a real SSRF sink (it fetches the URL via urlopen). Its
+    # weak allowlist rejects non-local URLs before any request — assert that guard
+    # rather than triggering a live outbound fetch.
+    with pytest.raises(HTTPException):
+        module.fetch_local("http://attacker.example/")
 
 
 def _load_example_app() -> ExampleAppModule:

@@ -39,6 +39,5 @@ package.json        Dependency manifest
 
 ## Notes
 
-This application is intentionally simple and is not suitable for production use.
-It has no authentication layer, no database, and no input validation beyond basic
-type checks. It is designed to be readable and self-contained.
+This application is intentionally simple and self-contained, designed to be
+readable for use as a static analysis target.

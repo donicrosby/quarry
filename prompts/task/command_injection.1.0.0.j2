@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for OS command injection. Sources: any user-controlled value reaching a command. Sinks: process/shell execution — subprocess/os.system/popen/exec/spawn, shell=True, backticks, `os/exec.Command`, `Runtime.exec`, or eval-of-shell. Report any path where user input is concatenated/interpolated into a command, passed through a shell, or used as an argument without strict allowlisting. Argument injection (user controls a flag/option) also qualifies.

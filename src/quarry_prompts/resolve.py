@@ -16,7 +16,7 @@ from quarry_prompts.registry import PromptRegistry, PromptTemplateRef
 class RegistryManifest:
     """Result of resolve_prompts(): the set of loaded template refs."""
 
-    entries: dict[str, PromptTemplateRef] = field(default_factory=dict)
+    entries: dict[str, PromptTemplateRef] = field(default_factory=dict[str, PromptTemplateRef])
 
 
 def resolve_prompts(

@@ -12,24 +12,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-import pytest
 from pydantic import BaseModel
 
+from quarry.panel_config import DEFAULT_PANEL
 from quarry.schemas import (
     ActionReasoning,
-    AgentLoopResult,
     CandidateFinding,
-    Confidence,
     ProposedAction,
-    Severity,
     VulnerabilityClass,
 )
-from quarry.panel_config import DEFAULT_PANEL, RoleConfig
-from quarry_activities.validate import _validate_impl, _ValidateResponse
+from quarry_activities.validate import ValidateResponse, validate_impl
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.redaction import scrub
-from quarry_models.types import BudgetSpec
+from quarry_models.types import BudgetSpec, ModelResponse
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
@@ -62,6 +58,7 @@ class _NoopRunner:
     def run(self, tool: str, inputs: dict[str, Any]) -> Any:
         class _R:
             output = ""
+
         return _R()
 
 
@@ -75,12 +72,17 @@ class _SequentialMockClient:
         canned = self._queue[idx]
         self.call_count += 1
         parsed = response_model.model_validate(canned.model_dump())
-        from quarry_models.types import ModelResponse  # noqa: PLC0415
         return ModelResponse(
-            parsed=parsed, provider="mock", model="mock-v1",
-            role=request.role, prompt_version=request.prompt_version,
-            token_input=10, token_output=5, cached_tokens=0,
-            estimated_cost=0.0, finish_reason="stop",
+            parsed=parsed,
+            provider="mock",
+            model="mock-v1",
+            role=request.role,
+            prompt_version=request.prompt_version,
+            token_input=10,
+            token_output=5,
+            cached_tokens=0,
+            estimated_cost=0.0,
+            finish_reason="stop",
         )
 
 
@@ -137,12 +139,15 @@ class TestReasoningSummaryIsScrubbedHypothesis:
 class TestRejectedReasoningRefs:
     def test_reasoning_rejected_step_has_non_empty_detail(self) -> None:
         """When loop halts with reasoning_rejected, detail should be non-empty."""
-        client = _SequentialMockClient([
-            _LoopAnswer(
-                proposed_actions=[_VAGUE_ACTION],
-                tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
-            )
-        ] * 5)
+        client = _SequentialMockClient(
+            [
+                _LoopAnswer(
+                    proposed_actions=[_VAGUE_ACTION],
+                    tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
+                )
+            ]
+            * 5
+        )
 
         result = run_agent_loop(
             client=client,
@@ -162,12 +167,15 @@ class TestRejectedReasoningRefs:
 
     def test_reasoning_rejected_uses_fewer_iterations(self) -> None:
         """reasoning_rejected halts well before max_iterations."""
-        client = _SequentialMockClient([
-            _LoopAnswer(
-                proposed_actions=[_VAGUE_ACTION],
-                tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
-            )
-        ] * 20)
+        client = _SequentialMockClient(
+            [
+                _LoopAnswer(
+                    proposed_actions=[_VAGUE_ACTION],
+                    tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
+                )
+            ]
+            * 20
+        )
 
         result = run_agent_loop(
             client=client,
@@ -219,11 +227,11 @@ class TestValidatorIndependenceReasoning:
             def complete_structured(self, request: Any, response_model: Any) -> Any:
                 for msg in request.messages:
                     captured.append(msg.content)
-                return MockModelClient(default=_ValidateResponse()).complete_structured(
+                return MockModelClient(default=ValidateResponse()).complete_structured(
                     request, response_model
                 )
 
-        _validate_impl(
+        validate_impl(
             finding=finding,
             repo_path="/tmp/repo",
             panel=panel,

@@ -254,6 +254,7 @@ def test_no_provider_policy_leaves_default(tmp_path: Path) -> None:
 def test_tool_call_request_normalises_name_args() -> None:
     """name/args (OpenAI-style) → tool/inputs."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate({"name": "list_dir", "args": {"path": "."}})
     assert r.tool == "list_dir"
     assert r.inputs == {"path": "."}
@@ -262,6 +263,7 @@ def test_tool_call_request_normalises_name_args() -> None:
 def test_tool_call_request_normalises_kind_tool_name() -> None:
     """kind/tool_name/inputs (DeepSeek/recon-prompt style) → tool/inputs."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate(
         {"kind": "read_file", "tool_name": "read_file", "inputs": {"path": "app.py"}}
     )
@@ -272,6 +274,7 @@ def test_tool_call_request_normalises_kind_tool_name() -> None:
 def test_tool_call_request_normalises_function_parameters() -> None:
     """function/parameters → tool/inputs."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate({"function": "grep", "parameters": {"pattern": "TODO"}})
     assert r.tool == "grep"
     assert r.inputs == {"pattern": "TODO"}
@@ -280,6 +283,7 @@ def test_tool_call_request_normalises_function_parameters() -> None:
 def test_tool_call_request_canonical_form_unchanged() -> None:
     """tool/inputs pass through without modification."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate({"tool": "list_dir", "inputs": {"path": "."}})
     assert r.tool == "list_dir"
     assert r.inputs == {"path": "."}
@@ -288,6 +292,7 @@ def test_tool_call_request_canonical_form_unchanged() -> None:
 def test_tool_call_request_bare_string() -> None:
     """Bare string 'read_file' → {"tool": "read_file", "inputs": {}}."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate("read_file")
     assert r.tool == "read_file"
     assert r.inputs == {}
@@ -296,6 +301,7 @@ def test_tool_call_request_bare_string() -> None:
 def test_tool_call_request_missing_inputs_defaults_empty() -> None:
     """Dict with tool but no inputs/args defaults inputs to {}."""
     from quarry_models.loop import ToolCallRequest
+
     r = ToolCallRequest.model_validate({"tool": "list_dir"})
     assert r.tool == "list_dir"
     assert r.inputs == {}
@@ -317,10 +323,18 @@ def test_tool_call_error_continues_as_error_message(tmp_path: Path) -> None:
             call_count[0] += 1
             if call_count[0] == 1:
                 # First call: request a tool call that will fail
-                return type("R", (), {"parsed": response_model(
-                    result="pending",
-                    tool_calls=[ToolCallRequest(tool="read_file", inputs={})],  # missing 'path'
-                )})()
+                return type(
+                    "R",
+                    (),
+                    {
+                        "parsed": response_model(
+                            result="pending",
+                            tool_calls=[
+                                ToolCallRequest(tool="read_file", inputs={})
+                            ],  # missing 'path'
+                        )
+                    },
+                )()
             # Second call: return final answer (model saw the error)
             return type("R", (), {"parsed": response_model(result="done", tool_calls=[])})()
 
@@ -338,3 +352,130 @@ def test_tool_call_error_continues_as_error_message(tmp_path: Path) -> None:
     )
     assert result.stop_reason == "final_answer"
     assert call_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Parse resilience — flaky open-model JSON must not crash the loop
+# ---------------------------------------------------------------------------
+
+
+def test_parse_failure_recovers_after_retry(tmp_path: Path) -> None:
+    """A ValidationError on one turn is retried with a nudge, not propagated."""
+
+    class _FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                # Simulate an open model emitting unparseable JSON.
+                response_model.model_validate_json("{ this is not valid json")
+            return type("Resp", (), {"parsed": response_model(result="done", tool_calls=[])})()
+
+    client = _FlakyClient()
+    result = run_agent_loop(
+        client=client,  # type: ignore[arg-type]
+        role="recon",
+        agent_kind="subsystem",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=100.0),
+        response_model=_DummyAnswer,
+        max_iterations=3,
+    )
+    assert result.stop_reason == "final_answer"
+    assert result.final_answer is not None
+    assert client.calls == 2  # first attempt failed, retry succeeded
+
+
+def test_parse_failure_retries_until_turns_run_out(tmp_path: Path) -> None:
+    """If every turn fails to parse, the loop retries until max_iterations — no halt, no crash."""
+
+    class _BadClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            self.calls += 1
+            response_model.model_validate_json("{ never valid")
+
+    client = _BadClient()
+    result = run_agent_loop(
+        client=client,  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=100.0),
+        response_model=_DummyAnswer,
+        max_iterations=3,
+    )
+    # It kept retrying every turn (feeding the error back) until the turn budget ran out.
+    assert result.stop_reason == "max_iterations"
+    assert result.final_answer is None
+    assert client.calls == 3
+
+
+def test_tool_security_error_is_fed_back_not_fatal(tmp_path: Path) -> None:
+    """A path-escape (ToolSecurityError) from a model's bad args must not crash the loop."""
+    from quarry_models.loop import ToolCallRequest
+
+    class _BadPathThenDone:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                # Model uses a URL route as a filesystem path → ToolSecurityError.
+                tc = [ToolCallRequest(tool="list_dir", inputs={"path": "/health"})]
+                return type("Resp", (), {"parsed": response_model(result="x", tool_calls=tc)})()
+            return type("Resp", (), {"parsed": response_model(result="done", tool_calls=[])})()
+
+    client = _BadPathThenDone()
+    result = run_agent_loop(
+        client=client,  # type: ignore[arg-type]
+        role="recon",
+        agent_kind="subsystem",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=100.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+    )
+    # Loop survived the security error, fed it back, and the model finished.
+    assert result.stop_reason == "final_answer"
+    assert client.calls == 2
+
+
+def test_model_call_exception_retries_until_turns_run_out(tmp_path: Path) -> None:
+    """A model-call failure (timeout/network) must not crash; it retries until max_iterations."""
+
+    class _TimingOutClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            self.calls += 1
+            raise TimeoutError("litellm.Timeout: request timed out")
+
+    client = _TimingOutClient()
+    result = run_agent_loop(
+        client=client,  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=100.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+    )
+    # No early halt: retried each turn until the turn budget ran out.
+    assert result.stop_reason == "max_iterations"
+    assert result.final_answer is None
+    assert client.calls == 5

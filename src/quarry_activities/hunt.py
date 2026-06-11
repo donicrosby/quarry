@@ -25,16 +25,21 @@ from quarry.schemas import (
     AgentTask,
     CandidateFinding,
     Confidence,
+    HunterGap,
     Provider,
     Severity,
     SourceRef,
     VulnerabilityClass,
 )
+from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
+from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
+from quarry_prompts.registry import TemplateNotFoundError
+from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
 
 
@@ -42,6 +47,9 @@ class _HuntResponse(BaseModel):
     """Model output schema for the hunt agent loop."""
 
     findings: list[dict[str, Any]] = []
+    # Areas/paths/inputs the hunter did NOT fully investigate or skipped this pass.
+    # Gapfill turns these into a fresh round of targeted hunters.
+    coverage_gaps: list[HunterGap] = []
     tool_calls: list[ToolCallRequest] = []
 
 
@@ -49,10 +57,17 @@ def _parse_finding(
     raw: dict[str, Any],
     scan_id: str,
     workspace_id: str,
+    vuln_class: VulnerabilityClass,
 ) -> CandidateFinding | None:
-    """Convert a model-output finding dict to a CandidateFinding, or None on parse failure."""
+    """Convert a model-output finding dict to a CandidateFinding, or None on parse failure.
+
+    ``vuln_class`` is the hunter's assigned class and is authoritative: a per-class
+    hunter only hunts its class, and the model's free-text ``vuln_class`` field is
+    unreliable (it writes taxonomy labels like "Horizontal IDOR" or
+    "URL_Manipulation" that are not canonical enum values). Trusting it caused real
+    findings to be silently dropped, so we ignore it and use the assigned class.
+    """
     try:
-        vuln_class = VulnerabilityClass(raw.get("vuln_class", ""))
         affected = raw.get("affected_component", "")
         file_path = affected.split(":")[0] if ":" in affected else affected
         try:
@@ -61,16 +76,22 @@ def _parse_finding(
             start_line = 1
 
         confidence_str = raw.get("confidence", "low").lower()
-        confidence = Confidence[confidence_str.upper()] if confidence_str.upper() in Confidence.__members__ else Confidence.LOW
+        confidence = (
+            Confidence[confidence_str.upper()]
+            if confidence_str.upper() in Confidence.__members__
+            else Confidence.LOW
+        )
         severity_str = raw.get("severity", "medium").lower()
-        severity = Severity[severity_str.upper()] if severity_str.upper() in Severity.__members__ else Severity.MEDIUM
+        severity = (
+            Severity[severity_str.upper()]
+            if severity_str.upper() in Severity.__members__
+            else Severity.MEDIUM
+        )
 
         source_refs: list[SourceRef] = []
         for ref in raw.get("source_refs", []):
-            try:
+            with suppress(Exception):
                 source_refs.append(SourceRef.model_validate(ref))
-            except Exception:
-                pass
 
         fingerprint = compute_fingerprint(
             vuln_class=vuln_class,
@@ -103,7 +124,7 @@ def _parse_finding(
         return None
 
 
-def _hunt_impl(
+def hunt_impl(
     *,
     task: AgentTask,
     repo_path: str,
@@ -112,10 +133,13 @@ def _hunt_impl(
     client: Any,
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
-) -> list[CandidateFinding]:
-    """Core hunt implementation — callable from the activity and from tests."""
-    from quarry_tools.registry import load_registry
+) -> tuple[list[CandidateFinding], list[HunterGap]]:
+    """Core hunt implementation — callable from the activity and from tests.
 
+    Returns ``(findings, coverage_gaps)``. Each ``HunterGap`` carries the area the
+    hunter did not fully cover, its reason, and this hunter's ``vuln_class`` — so
+    gapfill can turn it straight into a targeted re-hunt task.
+    """
     runner = ToolRunner(
         repo_root=Path(repo_path),
         role="hunt",
@@ -124,21 +148,35 @@ def _hunt_impl(
     )
 
     registry = get_registry()
-    prompt = build_prompt(
-        registry=registry,
-        role="hunt",
-        name="hunt",
-        version="1.0.0",
-        variables={
-            "vuln_class": (task.vuln_class or VulnerabilityClass.SECRETS).value,
-            "scope": task.scope,
-            "entry_points": [],
-            "focus_classes": [],
-            "scope_exclusions": [],
-            "task_prompt": task.task_prompt,
-            "evidence_chunks": [],
-        },
-    )
+    vuln_value = (task.vuln_class or VulnerabilityClass.SECRETS).value
+    variables = {
+        "vuln_class": vuln_value,
+        "scope": task.scope,
+        "entry_points": task.entry_points,
+        "recon_notes": task.recon_notes,
+        "focus_classes": [],
+        "scope_exclusions": [],
+        "task_prompt": task.task_prompt,
+        "evidence_chunks": [],
+    }
+    # Prefer the per-class hunt template (prompts/hunt/<vuln_class>.1.0.0.j2);
+    # fall back to the generic hunt template for classes without one.
+    try:
+        prompt = build_prompt(
+            registry=registry,
+            role="hunt",
+            name=vuln_value,
+            version="1.0.0",
+            variables=variables,
+        )
+    except TemplateNotFoundError:
+        prompt = build_prompt(
+            registry=registry,
+            role="hunt",
+            name="hunt",
+            version="1.0.0",
+            variables=variables,
+        )
 
     # Strip provenance header before passing to run_agent_loop
     _, system_prompt = strip_provenance_header(prompt.messages[0].content)
@@ -159,27 +197,39 @@ def _hunt_impl(
     )
 
     findings: list[CandidateFinding] = []
+    coverage_gaps: list[HunterGap] = []
     if result.final_answer and isinstance(result.final_answer, _HuntResponse):
+        hunt_class = task.vuln_class or VulnerabilityClass.SECRETS
         for raw in result.final_answer.findings:
-            cf = _parse_finding(raw, task.scan_id, "local")
+            cf = _parse_finding(raw, task.scan_id, "local", hunt_class)
             if cf is not None:
                 findings.append(cf)
+        for gap in result.final_answer.coverage_gaps:
+            area = (gap.area or task.scope or "").strip()
+            if not gap.reason.strip() and not area:
+                continue
+            # Stamp this hunter's class; the model only supplies area + reason.
+            coverage_gaps.append(
+                gap.model_copy(update={"vuln_class": gap.vuln_class or hunt_class, "area": area})
+            )
 
-    return findings
+    return findings, coverage_gaps
 
 
 @activity.defn(name="hunt-vuln-class")
 def hunt_activity(
     task: AgentTask | dict[str, Any],
     repo_path: str,
-    max_iterations: int = 12,
+    max_iterations: int = 40,
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
-) -> list[dict[str, Any]]:
+    db_path: str | None = None,
+) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
-    Returns a list of CandidateFinding dicts (JSON-serializable at the Temporal
-    boundary).  The caller (workflow) converts them back to CandidateFinding objects.
+    Returns ``{"findings": [...], "coverage_gaps": [...]}`` (JSON-serializable at
+    the Temporal boundary). The caller (workflow) converts findings back to
+    CandidateFinding objects and feeds coverage_gaps into the gapfill stage.
 
     *panel_json*, if provided, is a serialised ``RoleConfig`` for the hunt role.
     When provider is MOCK (the default), the existing mock client is used unchanged.
@@ -199,7 +249,9 @@ def hunt_activity(
     heartbeat_thread.start()
 
     try:
-        return _hunt_activity_impl(task, repo_path, max_iterations, budget_cap_usd, panel_json)
+        return _hunt_activity_impl(
+            task, repo_path, max_iterations, budget_cap_usd, panel_json, db_path
+        )
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=5)
@@ -211,11 +263,10 @@ def _hunt_activity_impl(
     max_iterations: int,
     budget_cap_usd: float | None,
     panel_json: str | None,
-) -> list[dict[str, Any]]:
+    db_path: str | None = None,
+) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
-
-    from quarry_models.mock_client import MockModelClient  # noqa: PLC0415
 
     role_cfg = (
         RoleConfig.model_validate_json(panel_json)
@@ -232,7 +283,7 @@ def _hunt_activity_impl(
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
-    findings = _hunt_impl(
+    findings, coverage_gaps = hunt_impl(
         task=task,
         repo_path=repo_path,
         max_iterations=max_iterations,
@@ -241,4 +292,9 @@ def _hunt_activity_impl(
         provider_policy=policy,
     )
 
-    return [f.model_dump(mode="json") for f in findings]
+    persist_model_invocations(db_path, task.scan_id, client)
+
+    return {
+        "findings": [f.model_dump(mode="json") for f in findings],
+        "coverage_gaps": [g.model_dump(mode="json") for g in coverage_gaps],
+    }

@@ -1,0 +1,2 @@
+<!-- QUARRY:PART:developer -->
+Hunt for SQL/NoSQL injection. Sources: user-controlled values reaching a query. Sinks: query construction — string concatenation/format/f-strings into SQL, ORM raw()/extra()/execute() with interpolated input, dynamic ORDER BY/LIMIT/column/table names, or NoSQL query objects built from user input. Report any path where input is not passed as a bound parameter. Parameterized queries are safe; flag everything that builds query text from user data directly.

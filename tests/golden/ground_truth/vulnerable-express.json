@@ -1,0 +1,26 @@
+[
+  {
+    "id": "gt-express-cmdi-admin-exec",
+    "vuln_class": "command_injection",
+    "file_path": "routes/admin.js",
+    "route": "/admin/exec",
+    "severity": "critical",
+    "expected_fingerprint_hint": "command_injection:routes/admin.js:exec"
+  },
+  {
+    "id": "gt-express-idor-get-user",
+    "vuln_class": "idor",
+    "file_path": "routes/users.js",
+    "route": "/users/:id",
+    "severity": "high",
+    "expected_fingerprint_hint": "idor:routes/users.js:getUser"
+  },
+  {
+    "id": "gt-express-authz-admin-endpoints",
+    "vuln_class": "idor",
+    "file_path": "routes/admin.js",
+    "route": "/admin/exec,/admin/status",
+    "severity": "high",
+    "expected_fingerprint_hint": "idor:routes/admin.js (missing authorization on admin endpoints — vertical access control / A01)"
+  }
+]

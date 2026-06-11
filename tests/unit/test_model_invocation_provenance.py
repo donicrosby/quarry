@@ -6,29 +6,6 @@ Written RED first — these fail until the new fields are added to ModelInvocati
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
-from unittest.mock import patch
-
-import pytest
-
-from quarry.schemas import Provider, VulnerabilityClass, AgentTask
-from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec
-
-
-def _make_task() -> AgentTask:
-    return AgentTask(
-        id="t1",
-        scan_id="s1",
-        role="hunt",
-        task_name="hunt-command_injection",
-        task_prompt="Look for exec sinks.",
-        vuln_class=VulnerabilityClass.COMMAND_INJECTION,
-        scope="handlers/",
-        status="pending",
-        created_at=datetime.now(UTC),
-    )
 
 
 def test_model_invocation_has_prompt_template_fields() -> None:
