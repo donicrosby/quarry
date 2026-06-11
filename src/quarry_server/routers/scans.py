@@ -77,6 +77,8 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             panel_entries=panel_entries,
             activity_max_attempts=quarry_config.retry.max_attempts,
             budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
+            hunt_max_iterations=quarry_config.scan_defaults.hunt_max_iterations,
+            hunt_max_concurrent=quarry_config.scan_defaults.hunt_max_concurrent,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

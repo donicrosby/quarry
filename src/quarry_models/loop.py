@@ -554,9 +554,12 @@ def run_agent_loop(
                 stop_reason="budget_exceeded",
             )
 
-    # Exhausted iterations
+    # Exhausted iterations — preserve findings from the last response if the model
+    # never submitted a clean final answer (no tool_calls). This prevents losing
+    # findings that the model reported alongside tool_calls in its last turn.
+    _last_response = parsed if isinstance(parsed, response_model) else None
     return AgentLoopResult(
-        final_answer=None,
+        final_answer=_last_response,
         steps=steps,
         iterations_used=max_iterations,
         total_cost=total_cost,

@@ -107,6 +107,7 @@ class RunScanInput(BaseModel):
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    hunt_max_iterations: int = 12
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -493,7 +494,7 @@ class RunScanWorkflow:
                         args=[
                             task,
                             repo_path,
-                            40,
+                            scan_input.hunt_max_iterations,
                             budget_cap,
                             hunt_panel_json,
                             scan_input.db_path,
@@ -802,7 +803,7 @@ class RunScanWorkflow:
                                 args=[
                                     task,
                                     repo_path,
-                                    40,
+                                    scan_input.hunt_max_iterations,
                                     gf_budget_remaining,
                                     hunt_panel_json,
                                     scan_input.db_path,
