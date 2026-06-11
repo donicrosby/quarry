@@ -38,12 +38,34 @@ class LiteLLMModelClient:
         model_string = model if "/" in model else f"{provider}/{model}"
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        completion = litellm.completion(
-            model=model_string,
-            messages=messages,
-            temperature=self.temperature,
-            timeout=request.timeout_seconds,
-        )
+        # Request structured JSON output where the provider supports it.
+        # This reduces prose-wrapping and truncation from open models.
+        # The lenient parser (extract_json / parse_model_json) stays as the fallback
+        # for providers that ignore or don't support the response_format param.
+        _response_format: dict[str, Any] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_model.__name__.lower(),
+                "schema": response_model.model_json_schema(),
+                "strict": False,
+            },
+        }
+        try:
+            completion = litellm.completion(
+                model=model_string,
+                messages=messages,
+                temperature=self.temperature,
+                timeout=request.timeout_seconds,
+                response_format=_response_format,
+            )
+        except Exception:
+            # Provider doesn't support response_format — fall back to unstructured.
+            completion = litellm.completion(
+                model=model_string,
+                messages=messages,
+                temperature=self.temperature,
+                timeout=request.timeout_seconds,
+            )
 
         content = _content(completion)
         _log.debug("raw response [%s/%s]: %s", provider, model, content[:600])

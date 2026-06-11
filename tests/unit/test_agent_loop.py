@@ -390,8 +390,13 @@ def test_parse_failure_recovers_after_retry(tmp_path: Path) -> None:
     assert client.calls == 2  # first attempt failed, retry succeeded
 
 
-def test_parse_failure_retries_until_turns_run_out(tmp_path: Path) -> None:
-    """If every turn fails to parse, the loop retries until max_iterations — no halt, no crash."""
+def test_parse_failure_exhausts_retries_and_halts(tmp_path: Path) -> None:
+    """If every attempt raises ValidationError, the loop halts with schema_rejected.
+
+    Parse/schema failures are re-prompted in-place (do not burn real iterations).
+    With max_parse_retries=2, the loop makes 3 total attempts (initial + 2 retries),
+    all within iteration 1, then returns schema_rejected.
+    """
 
     class _BadClient:
         def __init__(self) -> None:
@@ -411,11 +416,13 @@ def test_parse_failure_retries_until_turns_run_out(tmp_path: Path) -> None:
         runner=_make_runner(tmp_path),
         budget_spec=BudgetSpec(max_cost_usd=100.0),
         response_model=_DummyAnswer,
-        max_iterations=3,
+        max_iterations=10,  # many iterations available; halts early via schema_rejected
+        max_parse_retries=2,
     )
-    # It kept retrying every turn (feeding the error back) until the turn budget ran out.
-    assert result.stop_reason == "max_iterations"
+    # Halted after retries exhausted — not after max_iterations.
+    assert result.stop_reason == "schema_rejected"
     assert result.final_answer is None
+    # 3 calls: initial attempt + 2 retries (max_parse_retries=2), all in iteration 1.
     assert client.calls == 3
 
 

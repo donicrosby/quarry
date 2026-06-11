@@ -980,6 +980,8 @@ class AgentLoopResult(BaseModel):
         "guard_triggered",
         # ADR-020: all reasoning_max_retries for an action consumed; loop halted.
         "reasoning_rejected",
+        # All max_parse_retries for a turn consumed (schema/parse failure); loop halted.
+        "schema_rejected",
     ]
 
 
