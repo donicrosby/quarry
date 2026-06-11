@@ -91,6 +91,18 @@ Raw tool `args` never appear in event payloads — they may carry exploit payloa
 
 ---
 
+## Docker stack + benchmark fixes
+
+Three bugs found and fixed while running the first real Chutes benchmark against the Docker stack:
+
+**`quarry.toml` not in containers**: The Dockerfile does not copy `quarry.toml`; the server fell back to all-defaults (mock panel) even with `QUARRY_PANEL=chutes`. Fix: bind-mount `./quarry.toml:/app/quarry.toml:ro` in `docker-compose.yml`; also forward `QUARRY_PANEL` and `CHUTES_API_KEY` to the server service (previously worker-only), and mount `./examples:/app/examples:ro` for the worker.
+
+**`hunt_max_iterations` hardcoded to 40**: `quarry.toml [scan_defaults] hunt_max_iterations` was never wired into `RunScanInput` or the hunt activity call sites. Both invocations in `run_scan.py` used a literal `40`. Fix: added `hunt_max_iterations: int = 12` to `RunScanInput`, wired from `quarry_config.scan_defaults` in `start_scan`, replaced both hardcoded values.
+
+**Findings lost at iteration cap**: When `run_agent_loop` exhausted `max_iterations` and the last response contained findings but also `tool_calls` (model not done yet), `final_answer=None` was returned and all findings were discarded. Fix: at exhaustion the loop now returns `final_answer=parsed if isinstance(parsed, response_model) else None`, preserving the last valid response.
+
+---
+
 ## Verification
 
 | Check | Result |
@@ -102,3 +114,6 @@ Raw tool `args` never appear in event payloads — they may carry exploit payloa
 | `agent.*` events emitted from all 5 activity callers | ✓ |
 | Custom lexicon phrase caught by `check_vague_reasoning` | ✓ |
 | Validator prompt carries no hunter provider/model | ✓ |
+| Chutes benchmark: `quarry.toml` resolved in container | ✓ |
+| `hunt_max_iterations` from config reaches hunt activities | ✓ |
+| Findings preserved when loop exits at iteration cap | ✓ |
