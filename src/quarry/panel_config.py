@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import re
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from quarry.schemas import Provider, VulnerabilityClass
+from quarry.schemas import Provider, Target, TargetAuthorization, VulnerabilityClass
 
 
 def _empty_vuln_classes() -> list[VulnerabilityClass]:
@@ -226,3 +227,91 @@ def resolve_focus(
         raise ValueError(msg)
 
     return resolved
+
+
+class DynamicValidationConfig:
+    """Resolved live-dynamic validation settings for a scan.
+
+    Created by ``resolve_dynamic()`` only when all safety gates pass.
+    An instance is truthy; ``None`` means the live path is inactive.
+    """
+
+    def __init__(
+        self,
+        target: Target,
+        authorization: TargetAuthorization,
+        dynamic_validation_enabled: bool,
+        live_prove_enabled: bool,
+    ) -> None:
+        self.target = target
+        self.authorization = authorization
+        self.dynamic_validation_enabled = dynamic_validation_enabled
+        self.live_prove_enabled = live_prove_enabled
+
+
+def resolve_dynamic(
+    target: Target,
+    *,
+    dynamic_validation_enabled: bool,
+    live_prove_enabled: bool,
+    target_authorization: TargetAuthorization | None,
+) -> DynamicValidationConfig | None:
+    """Validate the live-dynamic path gates and return config or None.
+
+    Returns ``None`` when both live flags are off — the pipeline is unchanged.
+    Raises ``ValueError`` with a clear message if a live flag is on but any
+    required prerequisite is missing (fail-fast before any model call, consistent
+    with ``resolve_focus()``).
+
+    Enforces ADR-017's Layers 1–3:
+    - Layer 1: Config gate (flags default False; this function is the check).
+    - Layer 2: Target gate (target_url + non-empty allowed_hosts).
+    - Layer 3: Authorization ceiling (non-expired TargetAuthorization).
+    """
+    if not dynamic_validation_enabled and not live_prove_enabled:
+        # Both flags off → live path is inert; URL presence does NOT flip this.
+        # (ADR-017 "Alternatives considered": "Make live validation always enabled
+        # when a target URL is present" was explicitly rejected.)
+        return None
+
+    # Layer 2: target_url is required
+    if not target.target_url:
+        flag = "--dynamic-validation" if dynamic_validation_enabled else "--live-prove"
+        msg = (
+            f"{flag} requires --target-url to be set. "
+            "Provide the base URL of the authorized target."
+        )
+        raise ValueError(msg)
+
+    # Layer 2: allowed_hosts must not be empty
+    if not target.allowed_hosts:
+        msg = (
+            "Live dynamic validation requires Target.allowed_hosts to be non-empty. "
+            "Set allowed_hosts to the host(s) the scanner may contact."
+        )
+        raise ValueError(msg)
+
+    # Layer 3: a valid, non-expired TargetAuthorization is required
+    if target_authorization is None:
+        msg = (
+            "Live dynamic validation requires a TargetAuthorization. "
+            "Create one with: quarry auth create --target-url <url>"
+        )
+        raise ValueError(msg)
+
+    if target_authorization.expires_at is not None:
+        now = datetime.now(UTC)
+        if target_authorization.expires_at < now:
+            msg = (
+                f"TargetAuthorization '{target_authorization.id}' expired at "
+                f"{target_authorization.expires_at.isoformat()}. "
+                "Create a new authorization to proceed."
+            )
+            raise ValueError(msg)
+
+    return DynamicValidationConfig(
+        target=target,
+        authorization=target_authorization,
+        dynamic_validation_enabled=dynamic_validation_enabled,
+        live_prove_enabled=live_prove_enabled,
+    )

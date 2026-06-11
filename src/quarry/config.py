@@ -31,3 +31,6 @@ class QuarrySettings(BaseSettings):
     config_file: str = "quarry.toml"
     panel: str = ""
     focus_classes: str = ""  # comma-separated, env: QUARRY_FOCUS_CLASSES
+
+    # Task queues
+    dynamic_task_queue: str = "quarry-dynamic"  # live HTTP / dynamic validation

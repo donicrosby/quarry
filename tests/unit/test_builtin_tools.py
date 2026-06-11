@@ -120,5 +120,21 @@ def test_builtin_registry_contains_expected_tools() -> None:
 
 
 def test_all_builtins_have_recon_role() -> None:
+    # Dynamic tools (http_request) are intentionally restricted to
+    # dynamic_validate and prove only (ADR-017, Layer 5). They must NOT have
+    # the recon role; skip them here and assert their roles explicitly.
+    from quarry_tools.http_tool import HTTP_REQUEST_TOOL
+
+    dynamic_tools = {HTTP_REQUEST_TOOL.name}
     for name, tool in BUILTIN_REGISTRY.items():
+        if name in dynamic_tools:
+            continue
         assert "recon" in tool.roles, f"Tool '{name}' missing 'recon' role"
+
+
+def test_http_request_does_not_have_recon_role() -> None:
+    """http_request is strictly dynamic_validate/prove — never recon."""
+    from quarry_tools.http_tool import HTTP_REQUEST_TOOL
+
+    assert "recon" not in HTTP_REQUEST_TOOL.roles
+    assert set(HTTP_REQUEST_TOOL.roles) == {"dynamic_validate", "prove"}

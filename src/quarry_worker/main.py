@@ -13,6 +13,7 @@ from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.diff import git_diff_commits
+from quarry_activities.dynamic_http import http_request_activity
 from quarry_activities.dynamic_validation import (
     validate_command_injection_candidate_activity,
     validate_idor_candidate_activity,
@@ -72,6 +73,7 @@ async def run_worker() -> None:
             validate_candidate_finding_activity,
             gapfill_activity,
             deduplicate_activity,
+            http_request_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),
         graceful_shutdown_timeout=timedelta(seconds=30),

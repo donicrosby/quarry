@@ -47,7 +47,25 @@ def test_local_scan_profile_includes_idor() -> None:
     profile = local_scan_profile(target_url="http://localhost:8000")
 
     assert VulnerabilityClass.IDOR in profile.vuln_classes
-    assert profile.dynamic_validation_enabled is True
+    # A bare target_url does NOT enable live validation — CLI flags are authoritative
+    # (ADR-017 "Alternatives considered": "Make live validation always enabled when a
+    # target URL is present" was explicitly rejected).
+    assert profile.dynamic_validation_enabled is False
+
+
+def test_local_scan_profile_dynamic_flag_is_authoritative() -> None:
+    """Only the explicit flag enables live HTTP — not URL presence."""
+    without_flag = local_scan_profile(target_url="http://localhost:8000")
+    assert without_flag.dynamic_validation_enabled is False
+
+    with_flag = local_scan_profile(
+        target_url="http://localhost:8000",
+        dynamic_validation_enabled=True,
+    )
+    assert with_flag.dynamic_validation_enabled is True
+
+    no_url_but_flag = local_scan_profile(dynamic_validation_enabled=True)
+    assert no_url_but_flag.dynamic_validation_enabled is True
 
 
 def test_split_hunt_result_tolerates_dict_list_and_exceptions() -> None:

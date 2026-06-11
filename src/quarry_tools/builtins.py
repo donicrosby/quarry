@@ -152,9 +152,12 @@ class _SearchCode:
         return result.stdout.strip()
 
 
+from quarry_tools.http_tool import HTTP_REQUEST_TOOL  # noqa: E402
+
 BUILTIN_REGISTRY: ToolRegistry = {
     "read_file": _ReadFile(),  # type: ignore[dict-item]
     "list_dir": _ListDir(),  # type: ignore[dict-item]
     "grep": _Grep(),  # type: ignore[dict-item]
     "search_code": _SearchCode(),  # type: ignore[dict-item]
+    "http_request": HTTP_REQUEST_TOOL,  # type: ignore[dict-item]
 }

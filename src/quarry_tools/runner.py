@@ -1,16 +1,21 @@
-"""ToolRunner — enforces path restriction, role allowlist, and timeout."""
+"""ToolRunner — enforces path restriction, role allowlist, scope guard, and timeout."""
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quarry.schemas import ScopeExclusion
 from quarry_models.types import BudgetSpec
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
 from quarry_tools.spec import ToolRegistry
+
+# Tools that may issue live HTTP requests; the scope-exclusion guard applies to them.
+_DYNAMIC_TOOLS = frozenset({"http_request"})
 
 
 @dataclass
@@ -25,6 +30,8 @@ class ToolCallRecord:
     started_at: datetime
     completed_at: datetime | None = None
     args_hash: str = field(default="")
+    denied_reason: str | None = None
+    status: str = "ok"  # "ok" | "refused"
 
     def __post_init__(self) -> None:
         if not self.args_hash:
@@ -48,14 +55,78 @@ def _resolve_path(path_str: str, repo_root: Path) -> Path:
     return resolved
 
 
+def _path_glob_to_url_prefix(glob_value: str) -> str:
+    """Convert a source path glob to a URL path prefix for scope matching.
+
+    e.g. "src/billing/**" → "/billing/"
+         "src/admin/routes.py" → "/admin/"
+    """
+    # Strip common source-tree prefixes: src/, app/, lib/
+    stripped = glob_value
+    for prefix in ("src/", "app/", "lib/"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    # Take the first non-glob path component as the URL segment
+    parts = stripped.rstrip("/*").split("/")
+    if parts:
+        return f"/{parts[0]}/"
+    return "/"
+
+
+def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) -> bool:
+    """Return True if *inputs* triggers the given scope exclusion."""
+    if not exclusion.block_dynamic:
+        return False
+
+    kind = exclusion.kind
+    value = exclusion.value
+    path = str(inputs.get("path", ""))
+    method = str(inputs.get("method", "")).upper()
+
+    if kind == "route":
+        # Match "METHOD /path/*" patterns or plain path globs
+        # Try "METHOD /path" first
+        route_str = f"{method} {path}"
+        if fnmatch.fnmatch(route_str, value):
+            return True
+        # Also try matching just the path part against the glob path portion
+        if " " in value:
+            _, glob_path = value.split(" ", 1)
+            if fnmatch.fnmatch(path, glob_path):
+                return True
+        else:
+            if fnmatch.fnmatch(path, value):
+                return True
+
+    elif kind == "functional_area":
+        fa = str(inputs.get("functional_area", "")).lower()
+        if fa and fnmatch.fnmatch(fa, value.lower()):
+            return True
+
+    elif kind == "path_glob":
+        # Map source path glob → URL prefix, then check if request URL starts with it
+        url_prefix = _path_glob_to_url_prefix(value)
+        if path.startswith(url_prefix) or fnmatch.fnmatch(path, value):
+            return True
+
+    elif kind == "vuln_class":
+        vc = str(inputs.get("vuln_class", "")).lower()
+        if vc and fnmatch.fnmatch(vc, value.lower()):
+            return True
+
+    return False
+
+
 class ToolRunner:
     """Runs tools from a registry with security and role enforcement.
 
     Enforces:
     1. Repo-root path prefix (raises ToolSecurityError on escape).
     2. Per-role action-kind allowlist (raises UnauthorizedToolError).
-    3. Per-call timeout of 30 seconds via subprocess.run(timeout=30).
-    4. Records each call as a ToolCallRecord.
+    3. Scope-exclusion hard-guard for dynamic tools (Layer 4, ADR-017).
+    4. Per-call timeout of 30 seconds via subprocess.run(timeout=30).
+    5. Records each call as a ToolCallRecord.
     """
 
     def __init__(
@@ -64,14 +135,36 @@ class ToolRunner:
         role: str,
         registry: ToolRegistry,
         budget_spec: BudgetSpec,
+        scope_exclusions: list[ScopeExclusion] | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._role = role
         self._registry = registry
         self._budget_spec = budget_spec
+        self._scope_exclusions: list[ScopeExclusion] = scope_exclusions or []
+
+    def _check_scope_exclusion(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
+        """Return a denial reason string if a scope exclusion blocks this request.
+
+        Returns None when the request may proceed.  Only checks dynamic tools
+        (http_request); static analysis tools are never blocked this way.
+        """
+        if tool_name not in _DYNAMIC_TOOLS:
+            return None
+
+        for exclusion in self._scope_exclusions:
+            if _matches_scope_exclusion(exclusion, inputs):
+                return f"{exclusion.value}:{exclusion.kind}"
+
+        return None
 
     def run(self, tool_name: str, inputs: dict[str, Any]) -> ToolCallRecord:
         """Execute *tool_name* with *inputs* and return a ToolCallRecord.
+
+        For dynamic tools (http_request), performs a scope-exclusion hard-guard
+        check (ADR-017 Layer 4) before execution.  A refused invocation is
+        returned as a ToolCallRecord with allowed=False and status="refused" —
+        it is NEVER silently dropped.
 
         Raises:
             KeyError: if the tool is not in the registry.
@@ -88,12 +181,28 @@ class ToolRunner:
             )
             raise UnauthorizedToolError(msg)
 
-        # Path restriction — check any 'path' input before execution
-        if "path" in inputs:
-            _resolve_path(str(inputs["path"]), self._repo_root)
-
         started = datetime.now(UTC)
         invocation_id = f"{tool_name}-{started.timestamp():.0f}"
+
+        # Scope-exclusion hard-guard (Layer 4) — only for dynamic tools
+        denial_reason = self._check_scope_exclusion(tool_name, inputs)
+        if denial_reason is not None:
+            return ToolCallRecord(
+                tool_name=tool_name,
+                inputs=inputs,
+                output="",
+                allowed=False,
+                invocation_id=invocation_id,
+                started_at=started,
+                completed_at=started,
+                denied_reason=denial_reason,
+                status="refused",
+            )
+
+        # Path restriction — check any 'path' input before execution (static tools)
+        if "path" in inputs and tool_name not in _DYNAMIC_TOOLS:
+            _resolve_path(str(inputs["path"]), self._repo_root)
+
         output = tool.run(inputs, self._repo_root)
         completed = datetime.now(UTC)
 
