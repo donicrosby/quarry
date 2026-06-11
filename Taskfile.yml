@@ -67,6 +67,26 @@ tasks:
     cmds:
       - uv run python scripts/prompt_lint.py src
 
+  hadolint:
+    desc: Lint the Dockerfile with hadolint (via docker).
+    cmds:
+      - docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" hadolint/hadolint hadolint --config /.hadolint.yaml - < Dockerfile
+
+  docker-build:
+    desc: Build the Quarry server/worker image.
+    cmds:
+      - docker build -t quarry:local .
+
+  compose-up:
+    desc: Start Temporal + server + worker via docker compose.
+    cmds:
+      - docker compose up --build -d
+
+  compose-down:
+    desc: Stop the docker compose stack.
+    cmds:
+      - docker compose down
+
   demo:
     desc: Run the local demo scan (checks prerequisites first).
     cmds:

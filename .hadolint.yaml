@@ -1,0 +1,6 @@
+# hadolint configuration (https://github.com/hadolint/hadolint)
+ignored:
+  # DL3008: "Pin versions in apt-get install". Debian package versions churn with
+  # mirror snapshots, so pinning them makes builds fail unpredictably. We pin the
+  # base image + all fetched release binaries via build ARGs instead.
+  - DL3008

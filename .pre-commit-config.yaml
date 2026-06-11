@@ -26,6 +26,13 @@ repos:
         pass_filenames: false
         types_or: [python, pyi]
 
+  - repo: https://github.com/AleksaC/hadolint-py
+    rev: v2.12.1b3
+    hooks:
+      - id: hadolint
+        name: hadolint (Dockerfile lint)
+        args: ["--config", ".hadolint.yaml"]
+
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.4.0
     hooks:

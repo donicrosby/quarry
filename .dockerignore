@@ -1,0 +1,27 @@
+# Keep the build context small → faster uploads, better layer caching.
+.git
+.github
+.venv
+.quarry
+.ruff_cache
+.pytest_cache
+.mypy_cache
+**/__pycache__
+**/*.pyc
+# Tests, fixtures, and example vuln apps are not needed in the runtime image.
+tests
+examples
+# Local/dev artefacts and docs that don't belong in the image.
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.env
+.env.*
+*.md
+!README.md
+.pre-commit-config.yaml
+Taskfile.yml
+scripts
+.idea
+.vscode
+.DS_Store
