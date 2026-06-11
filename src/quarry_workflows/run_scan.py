@@ -25,6 +25,7 @@ from quarry.schemas import (
     ArtifactRef,
     CandidateFinding,
     FinalFinding,
+    FindingStatus,
     IntegrationRun,
     IntegrationStatus,
     ModelPanelEntry,
@@ -106,6 +107,11 @@ class RunScanInput(BaseModel):
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    hunt_max_iterations: int = 12
+    validate_max_iterations: int = 20
+    gapfill_max_iterations: int = 20
+    recon_max_iterations: int = 40
+    dedup_max_iterations: int = 8
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -114,6 +120,8 @@ class RunScanInput(BaseModel):
     # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
     # None disables budget gating.
     budget_cap_usd: float | None = None
+    # Seed for model calls. None means derive from scan_id at activity time.
+    scan_seed: int | None = None
 
 
 class RunScanResult(BaseModel):
@@ -346,6 +354,8 @@ class RunScanWorkflow:
                             None,
                             recon_panel_json,
                             scan_input.db_path,
+                            scan_input.recon_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -427,6 +437,10 @@ class RunScanWorkflow:
         # Focus + exclusion drops happen here in workflow code (deterministic).
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
+        # Retained pending proof — verdict was needs_proof or inconclusive.
+        # This is the carry-forward set for the future prove stage:
+        #   prove_stage(findings) should filter to status == NEEDS_PROOF.
+        needs_proof_findings: list[CandidateFinding] = []
         proof_artifacts: list[ProofArtifact] = []
         # Coverage gaps the hunters self-reported (areas they didn't fully cover);
         # gapfill turns these into a targeted re-hunt round.
@@ -488,10 +502,11 @@ class RunScanWorkflow:
                         args=[
                             task,
                             repo_path,
-                            40,
+                            scan_input.hunt_max_iterations,
                             budget_cap,
                             hunt_panel_json,
                             scan_input.db_path,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -616,6 +631,8 @@ class RunScanWorkflow:
                             val_budget_remaining,
                             validate_panel_json,
                             scan_input.db_path,
+                            scan_input.validate_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -631,12 +648,14 @@ class RunScanWorkflow:
                         {"finding_id": candidate.id, "error": _describe_failure(exc)},
                     )
                     continue
-                # Promote on a 'validated' verdict from the adversarial validator.
+                # Explicit 4-way verdict branch — never silently drop any verdict.
                 verdict = ""
                 if isinstance(validate_payload, dict):
                     payload_dict = cast("dict[str, Any]", validate_payload)
                     verdict = str(payload_dict.get("verdict", "")).lower()
+
                 if verdict == "validated":
+                    # Promote to FinalFinding (confirmed vulnerability).
                     final = _final_from_candidate(candidate, scan.id, workflow.now())
                     await _persist_scan_state(
                         scan_input.db_path,
@@ -650,7 +669,32 @@ class RunScanWorkflow:
                         "finding.validated",
                         {"finding_id": final.id},
                     )
+                elif verdict in ("needs_proof", "inconclusive"):
+                    # Retain as unverified — never drop. Persist with NEEDS_PROOF status
+                    # so the future prove stage can filter on status == NEEDS_PROOF.
+                    retained = candidate.model_copy(update={"status": FindingStatus.NEEDS_PROOF})
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(retained)},
+                    )
+                    needs_proof_findings.append(retained)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.needs_proof",
+                        {"finding_id": candidate.id, "verdict": verdict},
+                    )
+                elif verdict == "rejected":
+                    # Drop — explicitly labelled, not an implicit fallthrough.
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.rejected",
+                        {"finding_id": candidate.id, "verdict": verdict},
+                    )
                 else:
+                    # Unknown verdict — treat as rejected; never silently discard.
                     await _append_workflow_event(
                         scan_input.db_path,
                         scan.id,
@@ -730,6 +774,8 @@ class RunScanWorkflow:
                             hunter_gaps,
                             scan_input.db_path,
                             existing_findings_summary,
+                            scan_input.gapfill_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -768,10 +814,11 @@ class RunScanWorkflow:
                                 args=[
                                     task,
                                     repo_path,
-                                    40,
+                                    scan_input.hunt_max_iterations,
                                     gf_budget_remaining,
                                     hunt_panel_json,
                                     scan_input.db_path,
+                                    scan_input.scan_seed,
                                 ],
                                 start_to_close_timeout=timedelta(hours=4),
                                 heartbeat_timeout=timedelta(minutes=3),
@@ -839,6 +886,8 @@ class RunScanWorkflow:
                             dd_budget_remaining,
                             dedup_panel_json,
                             scan_input.db_path,
+                            scan_input.dedup_max_iterations,
+                            scan_input.scan_seed,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -895,6 +944,9 @@ class RunScanWorkflow:
                 ),
                 manifest_json=scan_manifest.model_dump_json(),
                 model_invocations_json=model_invocations_json,
+                needs_proof_findings_json=(
+                    _model_list_json(needs_proof_findings) if needs_proof_findings else None
+                ),
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=self._retry_policy,

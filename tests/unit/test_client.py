@@ -128,7 +128,8 @@ async def test_start_scan_posts_scan_request(client_context: ClientTestContext) 
     assert scan_input.repo_path == "/tmp/example-repo"
     assert scan_input.scan_id == response["scan_id"]
     assert scan_input.target_url == "http://localhost:8000"
-    assert scan_input.output_dir == ".quarry"
+    # output_dir is derived from the server's db_path parent (not the client default)
+    assert scan_input.output_dir == str(client_context.db_path.parent)
     # panel_entries is now populated by the router from the resolved panel config
     assert isinstance(scan_input.panel_entries, list)
 
@@ -184,6 +185,7 @@ async def test_start_diff_scan_posts_diff_scan_request(
         repo_path="/tmp/example-repo",
         base_commit="abc123",
         head_commit="def456",
+        db_path=str(client_context.db_path),
     )
 
 

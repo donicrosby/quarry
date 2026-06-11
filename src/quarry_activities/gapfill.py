@@ -32,6 +32,7 @@ from quarry.schemas import (
     Provider,
     VulnerabilityClass,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -160,6 +161,7 @@ def gapfill_impl(
     provider_policy: ProviderPolicy | None = None,
     hunter_gaps: list[dict[str, Any]] | None = None,
     existing_findings: list[dict[str, Any]] | None = None,
+    event_sink: Any | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -233,6 +235,7 @@ def gapfill_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     # Merge hunter-reported gaps + agent gaps, deduped by (vuln_class, scope).
@@ -274,6 +277,8 @@ def gapfill_activity(
     hunter_gaps: list[dict[str, Any]] | None = None,
     db_path: str | None = None,
     existing_findings: list[dict[str, Any]] | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -308,6 +313,8 @@ def gapfill_activity(
             hunter_gaps,
             db_path,
             existing_findings,
+            max_iterations,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -325,6 +332,8 @@ def _gapfill_activity_impl(
     hunter_gaps: list[dict[str, Any]] | None = None,
     db_path: str | None = None,
     existing_findings: list[dict[str, Any]] | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -356,7 +365,7 @@ def _gapfill_activity_impl(
         client: Any = MockModelClient(default=GapfillResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
@@ -368,10 +377,12 @@ def _gapfill_activity_impl(
         repo_path=repo_path,
         scan_id=ledger.scan_id,
         client=client,
+        max_iterations=max_iterations,
         budget_spec=budget_spec,
         provider_policy=policy,
         hunter_gaps=hunter_gaps,
         existing_findings=existing_findings,
+        event_sink=make_event_sink(db_path, ledger.scan_id),
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

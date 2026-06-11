@@ -25,6 +25,7 @@ from quarry.schemas import (
 )
 from quarry_activities.inputs import RenderReportInput, RunDiffScanInput
 from quarry_activities.reporting import render_markdown_report_activity
+from quarry_activities.seed import resolve_seed as _resolve_scan_seed
 from quarry_persistence import QuarryRepository, ScanSummary
 from quarry_server.schemas import DiffScanRequest, ScanResponse, StartScanRequest
 from quarry_workflows.run_scan import RunScanInput
@@ -61,19 +62,29 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
         for role, cfg in resolved.items()
     ]
 
+    # Derive output_dir from the server-configured db_path so artifacts land
+    # alongside the database (e.g. /data when db_path=/data/quarry.db).
+    _server_data_dir = str(Path(settings.db_path).parent)
     await temporal_client.start_workflow(
         "RunScanWorkflow",
         RunScanInput(
             repo_path=body.repo_path,
             repo_url=body.repo_url,
             scan_id=scan_id,
-            db_path=body.db_path,
-            output_dir=body.output_dir,
+            db_path=settings.db_path,  # use server-configured path, not client default
+            output_dir=_server_data_dir,
             target_url=body.target_url,
             vuln_classes=list(body.vuln_classes),
             panel_entries=panel_entries,
             activity_max_attempts=quarry_config.retry.max_attempts,
             budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
+            hunt_max_iterations=quarry_config.scan_defaults.hunt_max_iterations,
+            hunt_max_concurrent=quarry_config.scan_defaults.hunt_max_concurrent,
+            validate_max_iterations=quarry_config.scan_defaults.validate_max_iterations,
+            gapfill_max_iterations=quarry_config.scan_defaults.gapfill_max_iterations,
+            recon_max_iterations=quarry_config.scan_defaults.recon_max_iterations,
+            dedup_max_iterations=quarry_config.scan_defaults.dedup_max_iterations,
+            scan_seed=_resolve_scan_seed(pinned=quarry_config.scan_defaults.seed, scan_id=scan_id),
         ),
         id=scan_id,
         task_queue=settings.task_queue,
@@ -126,7 +137,7 @@ async def start_diff_scan(request: Request, body: DiffScanRequest) -> ScanRespon
             repo_path=body.repo_path,
             base_commit=body.base_commit,
             head_commit=body.head_commit,
-            db_path=body.db_path,
+            db_path=settings.db_path,  # use server-configured path, not client default
             output_dir=body.output_dir,
             target_url=body.target_url,
         ),

@@ -31,6 +31,7 @@ from quarry.schemas import (
     SourceRef,
     VulnerabilityClass,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -133,6 +134,7 @@ def hunt_impl(
     client: Any,
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Any | None = None,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
@@ -194,6 +196,7 @@ def hunt_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     findings: list[CandidateFinding] = []
@@ -220,10 +223,11 @@ def hunt_impl(
 def hunt_activity(
     task: AgentTask | dict[str, Any],
     repo_path: str,
-    max_iterations: int = 40,
+    max_iterations: int = 12,
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
@@ -250,7 +254,13 @@ def hunt_activity(
 
     try:
         return _hunt_activity_impl(
-            task, repo_path, max_iterations, budget_cap_usd, panel_json, db_path
+            task,
+            repo_path,
+            max_iterations,
+            budget_cap_usd,
+            panel_json,
+            db_path,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -264,6 +274,7 @@ def _hunt_activity_impl(
     budget_cap_usd: float | None,
     panel_json: str | None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -278,7 +289,7 @@ def _hunt_activity_impl(
         client: Any = MockModelClient(default=_HuntResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
@@ -290,6 +301,7 @@ def _hunt_activity_impl(
         budget_spec=budget_spec,
         client=client,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, task.scan_id),
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

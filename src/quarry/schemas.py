@@ -35,6 +35,10 @@ class FindingStatus(StrEnum):
     VALIDATING = "validating"
     REJECTED = "rejected"
     VALIDATED = "validated"
+    # Retained pending proof: validator returned needs_proof or inconclusive.
+    # This is the carry-forward status the future prove stage consumes —
+    # filter by status == NEEDS_PROOF to find the candidates prove should run on.
+    NEEDS_PROOF = "needs_proof"
     PROVING = "proving"
     PROVED = "proved"
     FINAL = "final"
@@ -980,6 +984,8 @@ class AgentLoopResult(BaseModel):
         "guard_triggered",
         # ADR-020: all reasoning_max_retries for an action consumed; loop halted.
         "reasoning_rejected",
+        # All max_parse_retries for a turn consumed (schema/parse failure); loop halted.
+        "schema_rejected",
     ]
 
 

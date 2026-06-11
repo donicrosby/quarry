@@ -164,3 +164,260 @@ class TestEventTypeFiltering:
         filtered = [e for e in agent_events if e.event_type.startswith("agent.")]
         assert len(filtered) == 2
         assert all(e.event_type.startswith("agent.") for e in filtered)
+
+
+# ---------------------------------------------------------------------------
+# Loop event emission — the PRODUCER side (RED until loop.py is wired)
+# ---------------------------------------------------------------------------
+
+
+class TestLoopEventEmission:
+    """Verify run_agent_loop actually calls the event_sink with the right payloads.
+
+    These tests fail until event_sink is wired into run_agent_loop.
+    """
+
+    def _make_runner(self, tmp_path: Any) -> Any:
+        from quarry_models.types import BudgetSpec
+        from quarry_tools.builtins import BUILTIN_REGISTRY
+        from quarry_tools.runner import ToolRunner
+
+        return ToolRunner(
+            repo_root=tmp_path,
+            role="hunt",
+            registry=BUILTIN_REGISTRY,
+            budget_spec=BudgetSpec(max_cost_usd=10.0),
+        )
+
+    def test_accepted_action_emits_action_proposed_event(self, tmp_path: Any) -> None:
+        """Loop calls event_sink with agent.action_proposed after accepting an action."""
+        from pydantic import BaseModel
+
+        from quarry.schemas import ActionReasoning, ProposedAction
+        from quarry_models.loop import run_agent_loop
+        from quarry_models.types import BudgetSpec
+
+        class _HuntLike(BaseModel):
+            tool_calls: list[Any] = []
+            proposed_actions: list[Any] = []
+            final_answer: str = ""
+
+        class _AcceptedClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+                self.calls += 1
+                # First turn: one accepted proposed action (passes vagueness guard)
+                # Second turn: final answer
+                if self.calls == 1:
+                    action = ProposedAction(
+                        kind="read",
+                        tool_name="grep",
+                        args={"pattern": "exec", "path": "src/admin.js"},
+                        reasoning=ActionReasoning(
+                            hypothesis="Command injection via exec in src/admin.js:31",
+                            target_ref="src/admin.js:31",
+                            expected_evidence="shell metachar in exec args confirms injection",
+                            why_this_tool="grep finds the exact exec call site",
+                        ),
+                    )
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "parsed": response_model(
+                                proposed_actions=[action],
+                                tool_calls=[],
+                                final_answer="",
+                            )
+                        },
+                    )()
+                return type(
+                    "R",
+                    (),
+                    {
+                        "parsed": response_model(
+                            proposed_actions=[],
+                            tool_calls=[],
+                            final_answer="done",
+                        )
+                    },
+                )()
+
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
+            emitted.append((event_type, payload))
+
+        _result = run_agent_loop(
+            client=_AcceptedClient(),  # type: ignore[arg-type]
+            role="hunt",
+            agent_kind="hunt",
+            system_prompt="s",
+            initial_user_message="u",
+            runner=self._make_runner(tmp_path),
+            budget_spec=BudgetSpec(max_cost_usd=100.0),
+            response_model=_HuntLike,
+            max_iterations=5,
+            event_sink=sink,
+            task_context={"vuln_class": "command_injection"},
+        )
+
+        proposed_events = [e for e in emitted if e[0] == "agent.action_proposed"]
+        assert len(proposed_events) >= 1, (
+            "No agent.action_proposed events emitted — event_sink not wired"
+        )
+        _event_type, payload = proposed_events[0]
+        assert "reasoning_summary" in payload
+        assert "args" not in payload, "Raw args must not appear in event payload"
+
+    def test_rejected_reasoning_emits_reasoning_rejected_event(self, tmp_path: Any) -> None:
+        """Loop calls event_sink with agent.reasoning_rejected on vague reasoning."""
+        from pydantic import BaseModel
+
+        from quarry.schemas import ActionReasoning, ProposedAction
+        from quarry_models.loop import run_agent_loop
+        from quarry_models.types import BudgetSpec
+
+        class _HuntLike(BaseModel):
+            tool_calls: list[Any] = []
+            proposed_actions: list[Any] = []
+            final_answer: str = ""
+
+        class _VagueClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+                self.calls += 1
+                # Always produce vague reasoning to trigger rejection
+                action = ProposedAction(
+                    kind="read",
+                    tool_name="grep",
+                    args={"pattern": "x"},
+                    reasoning=ActionReasoning(
+                        hypothesis="test the exploit",  # banned phrase → rejected
+                        target_ref="src/",
+                        expected_evidence="it works",  # banned phrase
+                        why_this_tool="check endpoint",
+                    ),
+                )
+                return type(
+                    "R",
+                    (),
+                    {
+                        "parsed": response_model(
+                            proposed_actions=[action],
+                            tool_calls=[],
+                            final_answer="",
+                        )
+                    },
+                )()
+
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
+            emitted.append((event_type, payload))
+
+        _result = run_agent_loop(
+            client=_VagueClient(),  # type: ignore[arg-type]
+            role="hunt",
+            agent_kind="hunt",
+            system_prompt="s",
+            initial_user_message="u",
+            runner=self._make_runner(tmp_path),
+            budget_spec=BudgetSpec(max_cost_usd=100.0),
+            response_model=_HuntLike,
+            max_iterations=5,
+            reasoning_max_retries=1,
+            event_sink=sink,
+            task_context={"vuln_class": "command_injection"},
+        )
+
+        rejected_events = [e for e in emitted if e[0] == "agent.reasoning_rejected"]
+        assert len(rejected_events) >= 1, (
+            "No agent.reasoning_rejected events emitted — event_sink not wired"
+        )
+        _, payload = rejected_events[0]
+        assert "failed_checks" in payload
+
+    def test_event_payload_has_no_secret_values(self, tmp_path: Any) -> None:
+        """agent.action_proposed payload must not contain raw QUARRY_SECRET_* values."""
+        from pydantic import BaseModel
+
+        from quarry.schemas import ActionReasoning, ProposedAction
+        from quarry_models.loop import run_agent_loop
+        from quarry_models.types import BudgetSpec
+
+        class _HuntLike(BaseModel):
+            tool_calls: list[Any] = []
+            proposed_actions: list[Any] = []
+            final_answer: str = ""
+
+        class _SecretInReasoningClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+                self.calls += 1
+                if self.calls == 1:
+                    action = ProposedAction(
+                        kind="read",
+                        tool_name="grep",
+                        args={"pattern": "exec"},
+                        reasoning=ActionReasoning(
+                            # Hypothesis contains a recognizable secret (AWS key format)
+                            hypothesis=(
+                                "Found key AKIAIOSFODNN7EXAMPLE in exec path at src/admin.js:31"
+                            ),
+                            target_ref="src/admin.js:31",
+                            expected_evidence="exec call with user input found",
+                            why_this_tool="grep finds the exec call site",
+                        ),
+                    )
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "parsed": response_model(
+                                proposed_actions=[action],
+                                tool_calls=[],
+                                final_answer="",
+                            )
+                        },
+                    )()
+                return type(
+                    "R",
+                    (),
+                    {
+                        "parsed": response_model(
+                            proposed_actions=[], tool_calls=[], final_answer="done"
+                        )
+                    },
+                )()
+
+        emitted: list[tuple[str, dict[str, Any]]] = []
+
+        def sink(event_type: str, payload: dict[str, Any]) -> None:
+            emitted.append((event_type, payload))
+
+        run_agent_loop(
+            client=_SecretInReasoningClient(),  # type: ignore[arg-type]
+            role="hunt",
+            agent_kind="hunt",
+            system_prompt="s",
+            initial_user_message="u",
+            runner=self._make_runner(tmp_path),
+            budget_spec=BudgetSpec(max_cost_usd=100.0),
+            response_model=_HuntLike,
+            max_iterations=5,
+            event_sink=sink,
+            task_context={"vuln_class": "command_injection"},
+        )
+
+        for _, payload in emitted:
+            summary = str(payload.get("reasoning_summary", ""))
+            assert "AKIAIOSFODNN7EXAMPLE" not in summary, (
+                "Raw AWS key found in event payload — scrub() not applied"
+            )

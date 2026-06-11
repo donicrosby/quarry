@@ -26,6 +26,7 @@ from quarry.schemas import (
     Provider,
     ValidationResult,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -56,6 +57,7 @@ def validate_impl(
     budget_spec: BudgetSpec | None = None,
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Any | None = None,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -109,6 +111,7 @@ def validate_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     # Parse the ternary verdict from the loop result
@@ -162,6 +165,8 @@ def validate_activity(
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
@@ -185,7 +190,14 @@ def validate_activity(
 
     try:
         return _validate_activity_impl(
-            finding, repo_path, panel, budget_cap_usd, panel_json, db_path
+            finding,
+            repo_path,
+            panel,
+            budget_cap_usd,
+            panel_json,
+            db_path,
+            max_iterations,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -199,6 +211,8 @@ def _validate_activity_impl(
     budget_cap_usd: float | None,
     panel_json: str | None,
     db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -215,7 +229,7 @@ def _validate_activity_impl(
         client: Any = MockModelClient(default=ValidateResponse())
         policy: ProviderPolicy | None = None
     else:
-        client = build_model_client(role_cfg.provider)
+        client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
     result = validate_impl(
@@ -223,8 +237,10 @@ def _validate_activity_impl(
         repo_path=repo_path,
         panel=active_panel,
         client=client,
+        max_iterations=max_iterations,
         budget_spec=budget_spec,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, finding.scan_id),
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

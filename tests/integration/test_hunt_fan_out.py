@@ -59,6 +59,7 @@ def counting_hunt_activity(
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> list[object]:
     """Mock hunt activity that tracks peak concurrent execution."""
     with _lock:

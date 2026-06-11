@@ -105,7 +105,8 @@ async def test_start_scan_starts_temporal_workflow(scan_api: ScanApiTestContext)
     assert scan_input.repo_path == "/tmp/example-repo"
     assert scan_input.scan_id == body["scan_id"]
     assert scan_input.target_url == "http://localhost:8000"
-    assert scan_input.output_dir == "/tmp/quarry-output"
+    # output_dir is derived from settings.db_path parent, not the request body field
+    assert scan_input.output_dir == str(scan_api.db_path.parent)
     assert scan_input.db_path == str(scan_api.db_path)
     # panel_entries is populated by the router from the resolved panel config
     assert isinstance(scan_input.panel_entries, list)

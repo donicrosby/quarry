@@ -25,8 +25,9 @@ _log = logging.getLogger(__name__)
 class LiteLLMModelClient:
     """A `ModelClient` that dispatches to providers through LiteLLM."""
 
-    def __init__(self, *, temperature: float = 0.0) -> None:
+    def __init__(self, *, temperature: float = 0.0, seed: int | None = None) -> None:
         self.temperature = temperature
+        self.seed = seed
         self.invocations: list[ModelInvocation] = []
 
     def complete_structured[T: BaseModel](
@@ -38,12 +39,37 @@ class LiteLLMModelClient:
         model_string = model if "/" in model else f"{provider}/{model}"
         messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-        completion = litellm.completion(
-            model=model_string,
-            messages=messages,
-            temperature=self.temperature,
-            timeout=request.timeout_seconds,
-        )
+        # Request structured JSON output where the provider supports it.
+        # This reduces prose-wrapping and truncation from open models.
+        # The lenient parser (extract_json / parse_model_json) stays as the fallback
+        # for providers that ignore or don't support the response_format param.
+        _response_format: dict[str, Any] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": response_model.__name__.lower(),
+                "schema": response_model.model_json_schema(),
+                "strict": False,
+            },
+        }
+        _seed_kwargs: dict[str, Any] = {"seed": self.seed} if self.seed is not None else {}
+        try:
+            completion = litellm.completion(
+                model=model_string,
+                messages=messages,
+                temperature=self.temperature,
+                timeout=request.timeout_seconds,
+                response_format=_response_format,
+                **_seed_kwargs,
+            )
+        except Exception:
+            # Provider doesn't support response_format — fall back to unstructured.
+            completion = litellm.completion(
+                model=model_string,
+                messages=messages,
+                temperature=self.temperature,
+                timeout=request.timeout_seconds,
+                **_seed_kwargs,
+            )
 
         content = _content(completion)
         _log.debug("raw response [%s/%s]: %s", provider, model, content[:600])

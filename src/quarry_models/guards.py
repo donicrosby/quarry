@@ -73,7 +73,9 @@ _READ_ONLY_KINDS: frozenset[str] = frozenset(
 _HIGH_RISK_KINDS: frozenset[str] = frozenset({"http_request", "opengrep", "codeql_query"})
 _PROOF_KINDS: frozenset[str] = frozenset({"dynamic_validate", "prove"})
 
-# ── Defaults (overridden by [scan.reasoning_lexicon] in quarry.toml) ────────
+# ── Defaults (can be extended via [scan.reasoning_lexicon] in quarry.toml) ──
+# Pass custom tuples to check_vague_reasoning via the banned_phrases /
+# banned_evidence kwargs to override these at runtime.
 # NOTE: these are reviewed explicitly — a wrong rule silently rejects valid actions.
 # Keep the list short and target only fully-generic, zero-content phrases.
 _DEFAULT_BANNED_PHRASES: tuple[str, ...] = (
@@ -190,19 +192,28 @@ def _check_context_reference(reasoning: Any, vuln_class: str) -> list[str]:
     return failures
 
 
-def _check_lexicon(reasoning: Any) -> list[str]:
-    """Sub-check: reject reasoning dominated by banned generic phrases."""
+def _check_lexicon(
+    reasoning: Any,
+    banned_phrases: tuple[str, ...] = _DEFAULT_BANNED_PHRASES,
+    banned_evidence: tuple[str, ...] = _DEFAULT_BANNED_EVIDENCE,
+) -> list[str]:
+    """Sub-check: reject reasoning dominated by banned generic phrases.
+
+    ``banned_phrases`` and ``banned_evidence`` default to the module-level
+    constants; callers pass custom tuples to override (e.g. from
+    ``[scan.reasoning_lexicon]`` in quarry.toml).
+    """
     failures: list[str] = []
     hyp_lower = reasoning.hypothesis.lower()
     why_lower = reasoning.why_this_tool.lower()
     ev_lower = reasoning.expected_evidence.lower()
 
-    for phrase in _DEFAULT_BANNED_PHRASES:
+    for phrase in banned_phrases:
         if phrase in hyp_lower or phrase in why_lower:
             failures.append(f"banned generic phrase '{phrase}' in reasoning")
             break
 
-    for phrase in _DEFAULT_BANNED_EVIDENCE:
+    for phrase in banned_evidence:
         if (
             ev_lower.strip() == phrase
             or ev_lower.startswith(phrase + " ")
@@ -259,6 +270,9 @@ def check_vague_reasoning(
     action: ProposedAction,
     task_context: dict[str, Any],
     args: dict[str, Any],
+    *,
+    banned_phrases: tuple[str, ...] | None = None,
+    banned_evidence: tuple[str, ...] | None = None,
 ) -> ReasoningCheckResult:
     """Deterministic vagueness guard for a ProposedAction's ActionReasoning.
 
@@ -271,9 +285,20 @@ def check_vague_reasoning(
     Checks are **permissive** — false positives kill hunt iterations.
     Reject only clearly-vague reasoning.
 
-    Returns:
-        ReasoningCheckResult with passed=True if all applicable checks pass,
-        or passed=False with failed_checks populated and detail for re-prompt.
+    Parameters
+    ----------
+    banned_phrases:
+        Override the module-level ``_DEFAULT_BANNED_PHRASES``. Pass a custom
+        tuple loaded from ``[scan.reasoning_lexicon]`` in quarry.toml to
+        extend the lexicon for a specific scan.  When ``None``, defaults to
+        ``_DEFAULT_BANNED_PHRASES``.
+    banned_evidence:
+        Override ``_DEFAULT_BANNED_EVIDENCE`` (same semantics as above).
+
+    Returns
+    -------
+    ReasoningCheckResult with passed=True if all applicable checks pass,
+    or passed=False with failed_checks populated and detail for re-prompt.
     """
     reasoning = action.reasoning
     vuln_class = str(task_context.get("vuln_class", ""))
@@ -295,7 +320,9 @@ def check_vague_reasoning(
         detail_parts.extend(context_failures)
 
     # ── Sub-check 3: lexicon ────────────────────────────────────────────────
-    lexicon_failures = _check_lexicon(reasoning)
+    _bp = banned_phrases if banned_phrases is not None else _DEFAULT_BANNED_PHRASES
+    _be = banned_evidence if banned_evidence is not None else _DEFAULT_BANNED_EVIDENCE
+    lexicon_failures = _check_lexicon(reasoning, _bp, _be)
     if lexicon_failures:
         failed.append("lexicon")
         detail_parts.extend(lexicon_failures)

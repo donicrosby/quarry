@@ -15,6 +15,11 @@ Design:
   ``budget_spec.max_cost_usd`` (returns ``stop_reason="budget_exceeded"``).
 - After each turn the guard set is checked; a guard hit returns
   ``stop_reason="guard_triggered"``.
+- If the model emits unparseable or schema-violating JSON, the loop re-prompts in-place
+  (``parse_retries`` counter, separate from ``max_iterations``). On exhaustion:
+  ``stop_reason="schema_rejected"``. Non-parse failures (timeout, etc.) still burn an
+  iteration. The repair prompt text lives in ``prompts/_feedback/schema_repair.1.0.0.j2``
+  (ADR-019 — no prompt text inline).
 
 ADR-020 re-prompt sub-loop:
 - If the model response contains ``proposed_actions`` (a list of ProposedAction),
@@ -30,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError, model_validator
@@ -84,6 +90,18 @@ def _wrap_tool_result(tool_name: str, output: str) -> str:
     return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
 
 
+def _try_emit(
+    event_sink: Callable[[str, dict[str, Any]], None],
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Call the event sink, swallowing errors so a broken sink never crashes the loop."""
+    try:
+        event_sink(event_type, payload)
+    except Exception:
+        _log.warning("event_sink raised on %s; continuing", event_type, exc_info=True)
+
+
 def _render_vague_feedback(
     failed_checks: list[str],
     detail: str,
@@ -120,6 +138,38 @@ def _render_vague_feedback(
         )
 
 
+def _render_schema_repair_feedback(
+    error_detail: str,
+    retries_remaining: int,
+) -> str:
+    """Render the schema-repair feedback message from the registry template.
+
+    All prompt text lives in the .j2 file (ADR-019). This function only passes
+    variables to the template renderer.
+    """
+    registry = get_registry()
+    try:
+        prompt = build_prompt(
+            registry=registry,
+            role="_feedback",
+            name="schema_repair",
+            version="1.0.0",
+            variables={
+                "error_detail": error_detail,
+                "retries_remaining": retries_remaining,
+            },
+        )
+        # The feedback template has only a developer part, which lands in messages[1].
+        feedback_text = prompt.messages[1].content if len(prompt.messages) > 1 else ""
+        return feedback_text
+    except Exception:
+        # Fallback — should only happen if the template is missing; never inline text.
+        return (
+            f"Response did not match the required schema: {error_detail}. "
+            f"Return only a valid JSON object. Retries remaining: {retries_remaining}."
+        )
+
+
 def run_agent_loop(
     *,
     client: Any,
@@ -133,8 +183,10 @@ def run_agent_loop(
     max_iterations: int = 40,
     cost_per_iteration: float = 0.0,
     reasoning_max_retries: int = 2,
+    max_parse_retries: int = 2,
     task_context: dict[str, Any] | None = None,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -162,14 +214,27 @@ def run_agent_loop(
         Number of re-prompts allowed per turn when ``check_vague_reasoning`` rejects
         a proposed action. Default 2. On exhaustion: ``stop_reason="reasoning_rejected"``.
         Re-prompt turns do NOT count toward ``max_iterations``.
+    max_parse_retries:
+        Number of in-place re-prompts allowed per turn when the model response cannot
+        be parsed or does not match the schema (``ValidationError``). Default 2. On
+        exhaustion: ``stop_reason="schema_rejected"``. These retries do NOT count
+        toward ``max_iterations`` (separate counter, reset each real iteration).
+        Non-parse failures (timeout, network) still burn a real iteration.
     task_context:
         Context dict for the vagueness guard (e.g. ``{"vuln_class": "xss"}``).
+    event_sink:
+        Optional callable ``(event_type: str, payload: dict) -> None``. When provided,
+        the loop calls it after each accepted or rejected proposed action with scrubbed
+        payloads (``agent.action_proposed`` or ``agent.reasoning_rejected``). Raw
+        ``args`` and unredacted reasoning text are never passed through the sink.
+        Callers (activities) use this to persist ``WorkflowEvent`` rows to the scan DB.
 
     Returns
     -------
     AgentLoopResult
-        With one of five stop reasons: ``final_answer``, ``max_iterations``,
-        ``budget_exceeded``, ``guard_triggered``, or ``reasoning_rejected``.
+        With one of six stop reasons: ``final_answer``, ``max_iterations``,
+        ``budget_exceeded``, ``guard_triggered``, ``reasoning_rejected``, or
+        ``schema_rejected``.
     """
     steps: list[AgentStep] = []
     total_cost: float = 0.0
@@ -179,14 +244,18 @@ def run_agent_loop(
     ]
     final_answer: BaseModel | None = None
     ctx = task_context or {}
+    parsed: Any = None  # last parsed model response; referenced after loop exhaustion
 
     for iteration in range(1, max_iterations + 1):
-        # ── ADR-020 reasoning re-prompt sub-loop ────────────────────────────
-        # Re-prompt turns do NOT advance ``iteration`` (the real-iteration counter).
+        # ── Re-prompt sub-loop (reasoning + schema repair) ──────────────────
+        # Neither reasoning_retries nor parse_retries advance ``iteration`` (the
+        # real-iteration counter). They are separate per-action / per-turn counters.
         reasoning_retries = 0
-        # Set when the model call fails (bad JSON / provider error). Rather than
-        # halting the activity, we feed the problem back and consume this turn so
-        # the model retries on the next iteration — bounded only by max_iterations.
+        # Parse/schema re-prompt counter. Reset each real iteration. On exhaustion:
+        # stop_reason="schema_rejected". Does NOT advance the iteration counter.
+        parse_retries = 0
+        # Set when a non-parse provider failure (timeout, network) occurs. The loop
+        # feeds the problem back and consumes this iteration — bounded by max_iterations.
         model_call_failed = False
         # Collect refs for reasoning that was rejected and reprompted this iteration.
         reprompt_rejected_refs: list[str] = []
@@ -207,19 +276,54 @@ def run_agent_loop(
                 req_kwargs["provider_policy"] = provider_policy
             request = ModelRequest(**req_kwargs)  # type: ignore[arg-type]
             _log.info("[%s turn=%d] → model", agent_kind, iteration)
-            # Open models intermittently emit unparseable/non-conforming JSON, and
-            # providers occasionally time out or error. Do NOT halt the activity:
-            # feed the problem back and let the model try again on the next turn.
-            # It keeps retrying — consuming turns — until it produces a usable
-            # response or runs out of turns (max_iterations). Halting early would
-            # stop the activity making progress instead of giving it the chance to
-            # get it right.
+            # Open models intermittently emit unparseable/non-conforming JSON.
+            # Schema/parse failures → bounded re-prompt (parse_retries) that does NOT
+            # burn a real iteration, mirroring the ADR-020 reasoning-retry pattern.
+            # Provider/network failures (timeout, etc.) still burn an iteration so
+            # the loop naturally backs off on transient outages.
             try:
                 response = client.complete_structured(request, response_model)
-            except Exception as exc:
-                is_parse = isinstance(exc, ValidationError)
+            except ValidationError as exc:
+                # Schema / parse failure — re-prompt in-place without burning iteration.
+                parse_retries += 1
                 _log.warning(
-                    "[%s turn=%d] model response unusable (%s: %s); retrying next turn",
+                    "[%s turn=%d] schema/parse failure (retry %d/%d): %s",
+                    agent_kind,
+                    iteration,
+                    parse_retries,
+                    max_parse_retries,
+                    exc,
+                )
+                if parse_retries > max_parse_retries:
+                    # Exhausted parse retries — halt cleanly.
+                    steps.append(
+                        AgentStep(
+                            agent_kind=agent_kind,  # type: ignore[arg-type]
+                            iteration=iteration,
+                            tool_calls=[],
+                            model_invocation_id=str(uuid.uuid4()),
+                            estimated_cost=cost_per_iteration,
+                        )
+                    )
+                    return AgentLoopResult(
+                        final_answer=None,
+                        steps=steps,
+                        iterations_used=iteration,
+                        total_cost=total_cost,
+                        stop_reason="schema_rejected",
+                    )
+                # Render repair feedback from the registry template (ADR-019).
+                feedback = _render_schema_repair_feedback(
+                    error_detail=str(exc),
+                    retries_remaining=max_parse_retries - parse_retries,
+                )
+                history.append(ModelMessage(role="assistant", content="(unusable response)"))
+                history.append(ModelMessage(role="user", content=feedback))
+                continue  # re-prompt this turn (does NOT advance iteration)
+            except Exception as exc:
+                # Provider/network failure — burn this iteration, let the model retry later.
+                _log.warning(
+                    "[%s turn=%d] model call failed (%s: %s); retrying next turn",
                     agent_kind,
                     iteration,
                     type(exc).__name__,
@@ -229,16 +333,8 @@ def run_agent_loop(
                 history.append(
                     ModelMessage(
                         role="user",
-                        content=(
-                            "Your previous response could not be used "
-                            + (
-                                "(it was not valid JSON matching the required schema)"
-                                if is_parse
-                                else "(the request failed)"
-                            )
-                            + ". Respond with ONLY a single valid JSON object that matches the "
-                            "schema — no prose, no markdown code fences, no text before or after."
-                        ),
+                        content="The previous request failed (provider or network error). "
+                        "Try again with the same intent.",
                     )
                 )
                 model_call_failed = True
@@ -294,7 +390,8 @@ def run_agent_loop(
 
                 if failed_action is not None and failed_check_result is not None:
                     if reasoning_retries >= reasoning_max_retries:
-                        # Exhausted retries → halt with reasoning_rejected
+                        # Exhausted retries → halt with reasoning_rejected.
+                        # Carry the accumulated rejected refs so the audit trail is complete.
                         steps.append(
                             AgentStep(
                                 agent_kind=agent_kind,  # type: ignore[arg-type]
@@ -302,7 +399,7 @@ def run_agent_loop(
                                 tool_calls=[],
                                 model_invocation_id=str(uuid.uuid4()),
                                 estimated_cost=cost_per_iteration,
-                                rejected_reasoning_refs=[],
+                                rejected_reasoning_refs=list(reprompt_rejected_refs),
                             )
                         )
                         return AgentLoopResult(
@@ -326,12 +423,42 @@ def run_agent_loop(
                         retries_remaining=reasoning_max_retries - reasoning_retries,
                     )
                     history.append(ModelMessage(role="user", content=feedback))
+                    # Emit reasoning_rejected event (scrubbed — no raw args).
+                    if event_sink is not None:
+                        _try_emit(
+                            event_sink,
+                            "agent.reasoning_rejected",
+                            {
+                                "agent_kind": agent_kind,
+                                "iteration": str(iteration),
+                                "tool_name": failed_action.tool_name,
+                                "failed_checks": list(failed_check_result.failed_checks),
+                                "retries_remaining": reasoning_max_retries - reasoning_retries,
+                            },
+                        )
                     continue  # re-prompt this turn (does NOT advance iteration)
 
             # All proposed_actions passed the guard (or there were none).
-            # Capture the scrubbed hypothesis of the first accepted action.
+            # Capture the scrubbed hypothesis of the first accepted action and emit event.
             if proposed_actions:
-                accepted_reasoning_summary = scrub(proposed_actions[0].reasoning.hypothesis).text
+                first = proposed_actions[0]
+                scrub_result = scrub(first.reasoning.hypothesis)
+                accepted_reasoning_summary = scrub_result.text
+                # Emit action_proposed event (scrubbed reasoning only — no raw args).
+                if event_sink is not None:
+                    _try_emit(
+                        event_sink,
+                        "agent.action_proposed",
+                        {
+                            "agent_kind": agent_kind,
+                            "iteration": str(iteration),
+                            "tool_name": first.tool_name,
+                            "reasoning_summary": accepted_reasoning_summary,
+                            "scrubber_hits": scrub_result.hits,
+                            "check_result": {"passed": True, "failed_checks": []},
+                            "reasoning_retries": reasoning_retries,
+                        },
+                    )
             break
         # ── End of reasoning re-prompt sub-loop ─────────────────────────────
 
@@ -428,9 +555,12 @@ def run_agent_loop(
                 stop_reason="budget_exceeded",
             )
 
-    # Exhausted iterations
+    # Exhausted iterations — preserve findings from the last response if the model
+    # never submitted a clean final answer (no tool_calls). This prevents losing
+    # findings that the model reported alongside tool_calls in its last turn.
+    _last_response = parsed if isinstance(parsed, response_model) else None
     return AgentLoopResult(
-        final_answer=None,
+        final_answer=_last_response,
         steps=steps,
         iterations_used=max_iterations,
         total_cost=total_cost,

@@ -68,6 +68,13 @@ class ScanDefaultsConfig(BaseModel):
     focus_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     hunt_max_iterations: int = 12
     hunt_max_concurrent: int = 8
+    validate_max_iterations: int = 20
+    gapfill_max_iterations: int = 20
+    recon_max_iterations: int = 40
+    dedup_max_iterations: int = 8
+    # Optional fixed seed. When None, each scan derives a deterministic seed
+    # from its scan_id UUID so runs are reproducible without pinning a global value.
+    seed: int | None = None
 
 
 class RetryConfig(BaseModel):
@@ -86,6 +93,28 @@ class RetryConfig(BaseModel):
         return max(1, v)
 
 
+class ReasoningLexiconConfig(BaseModel):
+    """Custom banned-phrase/evidence lists for the vagueness guard.
+
+    When populated from ``[scan.reasoning_lexicon]`` in quarry.toml, these
+    lists are passed to ``check_vague_reasoning`` as the ``banned_phrases``
+    and ``banned_evidence`` overrides, replacing the module-level defaults.
+
+    Keep entries short and generic — any phrase that would appear in *vague*
+    reasoning but never in *specific* reasoning. Wrong entries silently reject
+    valid hunt actions and waste iterations.
+    """
+
+    banned_phrases: list[str] = Field(default_factory=list)
+    banned_evidence: list[str] = Field(default_factory=list)
+
+
+class ScanConfig(BaseModel):
+    """Per-scan runtime configuration from ``[scan]`` in quarry.toml."""
+
+    reasoning_lexicon: ReasoningLexiconConfig | None = None
+
+
 class QuarryConfig(BaseModel):
     """Top-level parsed quarry.toml configuration."""
 
@@ -93,6 +122,7 @@ class QuarryConfig(BaseModel):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     scan_defaults: ScanDefaultsConfig = Field(default_factory=ScanDefaultsConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    scan: ScanConfig = Field(default_factory=ScanConfig)
 
 
 def _check_for_credentials(raw: dict[str, Any]) -> None:

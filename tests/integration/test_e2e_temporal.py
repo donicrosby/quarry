@@ -29,13 +29,18 @@ from quarry.schemas import (
     Target,
     local_scan_profile,
 )
+from quarry_activities.coverage import build_coverage_ledger_activity
+from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.target import start_local_target, terminate_local_target
+from quarry_activities.validate import validate_activity
 from quarry_activities.validation import validate_secret_candidate
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
@@ -143,6 +148,7 @@ def slow_hunt_activity(
     budget_cap_usd: float | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    scan_seed: int | None = None,
 ) -> list[object]:
     for index in range(200):
         with suppress(RuntimeError):
@@ -410,6 +416,11 @@ async def test_e2e_cancel_sets_cancelled_status(
             emit_agent_tasks,
             slow_hunt_activity,
             validate_secret_candidate,
+            validate_activity,
+            gapfill_activity,
+            deduplicate_activity,
+            build_coverage_ledger_activity,
+            deliver_integrations_activity,
             render_markdown_report_activity,
             build_scan_manifest_activity,
         ],

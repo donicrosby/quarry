@@ -8,8 +8,13 @@
 # --------------------------------------------------------------------------
 # [scan_defaults]
 # focus_classes = ["ssrf", "xss"]
-# hunt_max_iterations = 12   # tool-call iterations per hunter agent (default: 12)
-# hunt_max_concurrent = 8    # maximum hunters running in parallel (default: 8)
+# hunt_max_iterations = 12       # tool-call iterations per hunter agent (default: 12)
+# hunt_max_concurrent = 8        # maximum hunters running in parallel (default: 8)
+# validate_max_iterations = 20   # iterations per validator agent (default: 20)
+# gapfill_max_iterations = 20    # iterations for the gapfill coverage agent (default: 20)
+# recon_max_iterations = 40      # iterations for the recon subsystem agent (default: 40)
+# dedup_max_iterations = 8       # iterations per dedup cluster agent (default: 8)
+# seed = 42                      # fix model seed for reproducible runs (omit to derive from scan ID)
 
 # --------------------------------------------------------------------------
 # Model panels
@@ -53,3 +58,13 @@
 # [budget]
 # max_cost_per_scan_usd = 5.0
 # max_tokens_per_scan = 500000
+
+# --------------------------------------------------------------------------
+# Reasoning lexicon overrides (optional)
+# Extend the vagueness guard with phrases specific to your codebase or org.
+# Keep entries short and generic — phrases that appear only in vague reasoning
+# and never in specific reasoning. Wrong entries silently reject valid actions.
+# --------------------------------------------------------------------------
+# [scan.reasoning_lexicon]
+# banned_phrases = ["just try it", "run the scan", "look at the code"]
+# banned_evidence = ["seems vulnerable", "might work"]

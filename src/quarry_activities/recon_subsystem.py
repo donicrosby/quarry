@@ -18,6 +18,7 @@ from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -45,6 +46,8 @@ def recon_subsystem_activity(
     budget_spec: BudgetSpec | None = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 40,
+    scan_seed: int | None = None,
 ) -> Subsystem:
     """Run the recon agent loop for one subsystem and return a Subsystem.
 
@@ -69,7 +72,14 @@ def recon_subsystem_activity(
 
     try:
         return _recon_subsystem_impl(
-            assignment, repo_root, scan_id, budget_spec, panel_json, db_path
+            assignment,
+            repo_root,
+            scan_id,
+            budget_spec,
+            panel_json,
+            db_path,
+            max_iterations,
+            scan_seed,
         )
     finally:
         stop_heartbeat.set()
@@ -83,6 +93,8 @@ def _recon_subsystem_impl(
     budget_spec: BudgetSpec | None,
     panel_json: str | None,
     db_path: str | None = None,
+    max_iterations: int = 40,
+    scan_seed: int | None = None,
 ) -> Subsystem:
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
@@ -118,7 +130,7 @@ def _recon_subsystem_impl(
             ),
         )
     else:
-        client = build_model_client(provider)
+        client = build_model_client(provider, seed=scan_seed)
         policy = ProviderPolicy(provider=recon_role.provider.value, model=recon_role.model)
 
     registry = get_registry()
@@ -149,8 +161,9 @@ def _recon_subsystem_impl(
         runner=runner,
         budget_spec=budget_spec,
         response_model=SubsystemAnalysis,
-        max_iterations=40,
+        max_iterations=max_iterations,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, scan_id),
     )
 
     persist_model_invocations(db_path, scan_id, client)
