@@ -389,7 +389,8 @@ def run_agent_loop(
 
                 if failed_action is not None and failed_check_result is not None:
                     if reasoning_retries >= reasoning_max_retries:
-                        # Exhausted retries → halt with reasoning_rejected
+                        # Exhausted retries → halt with reasoning_rejected.
+                        # Carry the accumulated rejected refs so the audit trail is complete.
                         steps.append(
                             AgentStep(
                                 agent_kind=agent_kind,  # type: ignore[arg-type]
@@ -397,7 +398,7 @@ def run_agent_loop(
                                 tool_calls=[],
                                 model_invocation_id=str(uuid.uuid4()),
                                 estimated_cost=cost_per_iteration,
-                                rejected_reasoning_refs=[],
+                                rejected_reasoning_refs=list(reprompt_rejected_refs),
                             )
                         )
                         return AgentLoopResult(

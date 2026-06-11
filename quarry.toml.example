@@ -53,3 +53,13 @@
 # [budget]
 # max_cost_per_scan_usd = 5.0
 # max_tokens_per_scan = 500000
+
+# --------------------------------------------------------------------------
+# Reasoning lexicon overrides (optional)
+# Extend the vagueness guard with phrases specific to your codebase or org.
+# Keep entries short and generic — phrases that appear only in vague reasoning
+# and never in specific reasoning. Wrong entries silently reject valid actions.
+# --------------------------------------------------------------------------
+# [scan.reasoning_lexicon]
+# banned_phrases = ["just try it", "run the scan", "look at the code"]
+# banned_evidence = ["seems vulnerable", "might work"]
