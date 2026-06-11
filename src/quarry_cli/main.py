@@ -48,6 +48,10 @@ def run_scan(
         bool,
         typer.Option("--async", help="Return immediately"),
     ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Stream agent events to stdout as the scan runs."),
+    ] = False,
 ) -> None:
     focus_classes: list[VulnerabilityClass] | None = None
     if focus is not None:
@@ -60,7 +64,9 @@ def run_scan(
 
     settings = QuarrySettings()
     try:
-        lines = asyncio.run(_run_scan_command(settings, repo, target, async_mode, focus_classes))
+        lines = asyncio.run(
+            _run_scan_command(settings, repo, target, async_mode, focus_classes, verbose)
+        )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
     _echo_lines(lines)
@@ -153,6 +159,7 @@ async def _run_scan_command(
     target: str | None,
     async_mode: bool,
     focus_classes: list[VulnerabilityClass] | None = None,
+    verbose: bool = False,
 ) -> list[str]:
     # A git URL (--repo https://… / git@… / ssh://…) is cloned by the workflow;
     # a local path is scanned in place.
@@ -166,7 +173,28 @@ async def _run_scan_command(
             return [scan_id]
 
         lines = [f"Scan {scan_id} started..."]
+        last_event_id: str | None = None
         while True:
+            if verbose:
+                # Poll for new agent.* events and print them as structured log lines.
+                events = await client.poll_events(
+                    scan_id, event_types=["agent.action_proposed", "agent.reasoning_rejected"],
+                    after_id=last_event_id,
+                )
+                for event in events:
+                    import json as _json
+                    typer.echo(
+                        _json.dumps(
+                            {
+                                "event": event.event_type,
+                                "scan_id": event.scan_id,
+                                "payload": event.payload,
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                    last_event_id = event.id
+
             status = await client.get_scan_status(scan_id)
             lines.extend(_format_key_values(status))
             if _is_terminal_status(status):

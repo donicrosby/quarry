@@ -31,6 +31,7 @@ from quarry.schemas import (
     SourceRef,
     VulnerabilityClass,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -133,6 +134,7 @@ def hunt_impl(
     client: Any,
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Any | None = None,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
@@ -194,6 +196,7 @@ def hunt_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     findings: list[CandidateFinding] = []
@@ -290,6 +293,7 @@ def _hunt_activity_impl(
         budget_spec=budget_spec,
         client=client,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, task.scan_id),
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

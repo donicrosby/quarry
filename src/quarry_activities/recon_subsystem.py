@@ -18,6 +18,7 @@ from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -151,6 +152,7 @@ def _recon_subsystem_impl(
         response_model=SubsystemAnalysis,
         max_iterations=40,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, scan_id),
     )
 
     persist_model_invocations(db_path, scan_id, client)

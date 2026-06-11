@@ -32,6 +32,7 @@ from quarry.schemas import (
     Provider,
     VulnerabilityClass,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -160,6 +161,7 @@ def gapfill_impl(
     provider_policy: ProviderPolicy | None = None,
     hunter_gaps: list[dict[str, Any]] | None = None,
     existing_findings: list[dict[str, Any]] | None = None,
+    event_sink: Any | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -233,6 +235,7 @@ def gapfill_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     # Merge hunter-reported gaps + agent gaps, deduped by (vuln_class, scope).
@@ -372,6 +375,7 @@ def _gapfill_activity_impl(
         provider_policy=policy,
         hunter_gaps=hunter_gaps,
         existing_findings=existing_findings,
+        event_sink=make_event_sink(db_path, ledger.scan_id),
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

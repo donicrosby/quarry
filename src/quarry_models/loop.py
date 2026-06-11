@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError, model_validator
@@ -87,6 +88,18 @@ def _wrap_tool_result(tool_name: str, output: str) -> str:
     """Wrap a tool result in <target_content> tags after scrubbing."""
     scrubbed = scrub(output).text
     return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
+
+
+def _try_emit(
+    event_sink: Callable[[str, dict[str, Any]], None],
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Call the event sink, swallowing errors so a broken sink never crashes the loop."""
+    try:
+        event_sink(event_type, payload)
+    except Exception:
+        _log.warning("event_sink raised on %s; continuing", event_type, exc_info=True)
 
 
 def _render_vague_feedback(
@@ -173,6 +186,7 @@ def run_agent_loop(
     max_parse_retries: int = 2,
     task_context: dict[str, Any] | None = None,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -208,6 +222,12 @@ def run_agent_loop(
         Non-parse failures (timeout, network) still burn a real iteration.
     task_context:
         Context dict for the vagueness guard (e.g. ``{"vuln_class": "xss"}``).
+    event_sink:
+        Optional callable ``(event_type: str, payload: dict) -> None``. When provided,
+        the loop calls it after each accepted or rejected proposed action with scrubbed
+        payloads (``agent.action_proposed`` or ``agent.reasoning_rejected``). Raw
+        ``args`` and unredacted reasoning text are never passed through the sink.
+        Callers (activities) use this to persist ``WorkflowEvent`` rows to the scan DB.
 
     Returns
     -------
@@ -401,12 +421,42 @@ def run_agent_loop(
                         retries_remaining=reasoning_max_retries - reasoning_retries,
                     )
                     history.append(ModelMessage(role="user", content=feedback))
+                    # Emit reasoning_rejected event (scrubbed — no raw args).
+                    if event_sink is not None:
+                        _try_emit(
+                            event_sink,
+                            "agent.reasoning_rejected",
+                            {
+                                "agent_kind": agent_kind,
+                                "iteration": str(iteration),
+                                "tool_name": failed_action.tool_name,
+                                "failed_checks": list(failed_check_result.failed_checks),
+                                "retries_remaining": reasoning_max_retries - reasoning_retries,
+                            },
+                        )
                     continue  # re-prompt this turn (does NOT advance iteration)
 
             # All proposed_actions passed the guard (or there were none).
-            # Capture the scrubbed hypothesis of the first accepted action.
+            # Capture the scrubbed hypothesis of the first accepted action and emit event.
             if proposed_actions:
-                accepted_reasoning_summary = scrub(proposed_actions[0].reasoning.hypothesis).text
+                first = proposed_actions[0]
+                scrub_result = scrub(first.reasoning.hypothesis)
+                accepted_reasoning_summary = scrub_result.text
+                # Emit action_proposed event (scrubbed reasoning only — no raw args).
+                if event_sink is not None:
+                    _try_emit(
+                        event_sink,
+                        "agent.action_proposed",
+                        {
+                            "agent_kind": agent_kind,
+                            "iteration": str(iteration),
+                            "tool_name": first.tool_name,
+                            "reasoning_summary": accepted_reasoning_summary,
+                            "scrubber_hits": scrub_result.hits,
+                            "check_result": {"passed": True, "failed_checks": []},
+                            "reasoning_retries": reasoning_retries,
+                        },
+                    )
             break
         # ── End of reasoning re-prompt sub-loop ─────────────────────────────
 

@@ -26,6 +26,7 @@ from quarry.schemas import (
     Provider,
     ValidationResult,
 )
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -56,6 +57,7 @@ def validate_impl(
     budget_spec: BudgetSpec | None = None,
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Any | None = None,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -109,6 +111,7 @@ def validate_impl(
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
+        event_sink=event_sink,
     )
 
     # Parse the ternary verdict from the loop result
@@ -225,6 +228,7 @@ def _validate_activity_impl(
         client=client,
         budget_spec=budget_spec,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, finding.scan_id),
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

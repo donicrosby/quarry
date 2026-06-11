@@ -27,6 +27,7 @@ from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import CandidateFinding, Provider
+from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -77,6 +78,7 @@ def dedup_impl(
     repo_path: str = "",
     scan_log: list[str] | None = None,
     provider_policy: ProviderPolicy | None = None,
+    event_sink: Any | None = None,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
@@ -157,6 +159,7 @@ def dedup_impl(
             max_iterations=max_iterations,
             cost_per_iteration=cost_per_iteration,
             provider_policy=provider_policy,
+            event_sink=event_sink,
         )
 
         if loop_result.final_answer and isinstance(loop_result.final_answer, DedupeResponse):
@@ -235,6 +238,10 @@ def _deduplicate_activity_impl(
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
     scan_log: list[str] = []
 
+    # Extract scan_id from the first candidate so the event sink can stamp events.
+    # None is safe — make_event_sink returns None when scan_id is absent.
+    scan_id: str | None = parsed[0].scan_id if parsed else None
+
     result = dedup_impl(
         candidates=parsed,
         client=client,
@@ -242,6 +249,7 @@ def _deduplicate_activity_impl(
         repo_path=repo_path,
         scan_log=scan_log,
         provider_policy=policy,
+        event_sink=make_event_sink(db_path, scan_id),
     )
 
     scan_id = parsed[0].scan_id if parsed else ""
