@@ -1,0 +1,64 @@
+name: Release
+
+# Cut a release by pushing a semver tag from a green `main`:
+#   git tag v1.2.3 && git push origin v1.2.3
+# This builds + publishes version-tagged server/worker images and creates the
+# GitHub Release with auto-generated notes. (CI already gates main, so releases
+# are cut from validated history; the image build here is the final guard.)
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push images to GHCR
+
+jobs:
+  release:
+    name: publish images + GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so release notes can diff from the last tag
+      - uses: docker/setup-buildx-action@v3
+      - name: Lowercase owner
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Derive image tags from the git tag: v1.2.3 -> 1.2.3, 1.2, 1 (+ latest for
+      # non-prerelease, via the default latest=auto flavor), for both images.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ steps.owner.outputs.name }}/quarry-server
+            ghcr.io/${{ steps.owner.outputs.name }}/quarry-worker
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+      - name: Build and push version-tagged images
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Only after the images publish: create the GitHub Release for this tag.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" --verify-tag --generate-notes
