@@ -55,6 +55,7 @@ class QuarryClient:
         repo_url: str | None = None,
         dynamic_validation_enabled: bool = False,
         live_prove_enabled: bool = False,
+        auth_profiles_json: str | None = None,
     ) -> dict[str, str]:
         response = await self._client.post(
             "/scans",
@@ -65,6 +66,7 @@ class QuarryClient:
                 "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
                 "dynamic_validation_enabled": dynamic_validation_enabled,
                 "live_prove_enabled": live_prove_enabled,
+                "auth_profiles_json": auth_profiles_json,
             },
         )
         response.raise_for_status()

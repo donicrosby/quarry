@@ -4,16 +4,19 @@ import asyncio
 import signal
 import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
+from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 import typer
 
 from quarry.benchmark import compare, load_ground_truth
 from quarry.config import QuarrySettings
-from quarry.panel_config import resolve_focus
-from quarry.schemas import FinalFinding, ScanSummary, VulnerabilityClass
+from quarry.panel_config import resolve_auth, resolve_focus
+from quarry.schemas import FinalFinding, ScanSummary, Target, VulnerabilityClass
 from quarry_activities.clone import is_git_url
 from quarry_activities.target import start_local_target, terminate_local_target
 from quarry_client.client import QuarryClient
@@ -75,6 +78,13 @@ def run_scan(
             ),
         ),
     ] = False,
+    auth_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--auth-config",
+            help="Path to an auth-profiles TOML file (ADR-018).",
+        ),
+    ] = None,
 ) -> None:
     if (dynamic_validation or live_prove) and target is None:
         typer.echo(
@@ -92,6 +102,19 @@ def run_scan(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from exc
 
+    auth_profiles_json: str | None = None
+    if auth_config is not None:
+        _cli_target = _build_cli_target(target, repo)
+        try:
+            _profile_set = resolve_auth(auth_config, _cli_target)
+        except (FileNotFoundError, OSError) as exc:
+            typer.echo(f"Error: --auth-config: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        except ValueError as exc:
+            typer.echo(f"Error: --auth-config: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        auth_profiles_json = _profile_set.model_dump_json()
+
     settings = QuarrySettings()
     try:
         lines = asyncio.run(
@@ -104,6 +127,7 @@ def run_scan(
                 verbose,
                 dynamic_validation_enabled=dynamic_validation,
                 live_prove_enabled=live_prove,
+                auth_profiles_json=auth_profiles_json,
             )
         )
     except httpx.ConnectError:
@@ -201,6 +225,7 @@ async def _run_scan_command(
     verbose: bool = False,
     dynamic_validation_enabled: bool = False,
     live_prove_enabled: bool = False,
+    auth_profiles_json: str | None = None,
 ) -> list[str]:
     # A git URL (--repo https://… / git@… / ssh://…) is cloned by the workflow;
     # a local path is scanned in place.
@@ -213,6 +238,7 @@ async def _run_scan_command(
             repo_url=repo_url,
             dynamic_validation_enabled=dynamic_validation_enabled,
             live_prove_enabled=live_prove_enabled,
+            auth_profiles_json=auth_profiles_json,
         )
         scan_id = result["scan_id"]
         if async_mode:
@@ -309,6 +335,24 @@ def _echo_lines(lines: list[str]) -> None:
 def _exit_server_not_reachable(settings: QuarrySettings) -> NoReturn:
     typer.echo(f"Error: Quarry server not reachable at {settings.server_url}", err=True)
     raise typer.Exit(1)
+
+
+def _build_cli_target(target_url: str | None, repo_path: str) -> Target:
+    """Build a minimal Target for resolve_auth host validation."""
+    allowed_hosts: list[str] = []
+    if target_url:
+        _parsed = urlparse(target_url)
+        _host = _parsed.hostname or ""
+        if _host:
+            allowed_hosts = [_host, "127.0.0.1"] if _host != "127.0.0.1" else ["127.0.0.1"]
+    return Target(
+        id=str(uuid4()),
+        workspace_id="cli",
+        repo_path=repo_path,
+        target_url=target_url,
+        allowed_hosts=allowed_hosts,
+        created_at=datetime.now(UTC),
+    )
 
 
 @app.command("worker")

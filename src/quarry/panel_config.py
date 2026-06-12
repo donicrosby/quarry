@@ -7,15 +7,25 @@ class focus for a scan.
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
-from quarry.schemas import Provider, Target, TargetAuthorization, VulnerabilityClass
+from quarry.schemas import (
+    AuthProfile,
+    AuthProfileKind,
+    AuthProfileSet,
+    Provider,
+    Target,
+    TargetAuthorization,
+    VulnerabilityClass,
+)
 
 
 def _empty_vuln_classes() -> list[VulnerabilityClass]:
@@ -319,3 +329,51 @@ def resolve_dynamic(
         dynamic_validation_enabled=dynamic_validation_enabled,
         live_prove_enabled=live_prove_enabled,
     )
+
+
+def _assert_env_var_exists(env_name: str) -> None:
+    if not os.environ.get(env_name):
+        msg = (
+            f"Required environment variable '{env_name}' is not set. "
+            "Set it in the worker environment before running a scan "
+            "with authenticated dynamic validation."
+        )
+        raise OSError(msg)
+
+
+def _assert_login_host_in_allowlist(profile: AuthProfile, target: Target) -> None:
+    if not target.target_url:
+        msg = (
+            f"Login-flow profile '{profile.name}' requires a target URL to determine "
+            "the login host. Set target.target_url before loading auth profiles."
+        )
+        raise ValueError(msg)
+    parsed = urlparse(target.target_url)
+    login_host = parsed.hostname or ""
+    if login_host not in target.allowed_hosts:
+        msg = (
+            f"Login-flow profile '{profile.name}' would POST to host '{login_host}', "
+            f"which is not in Target.allowed_hosts {target.allowed_hosts!r}. "
+            "Add the host to allowed_hosts before loading this auth profile."
+        )
+        raise ValueError(msg)
+
+
+def resolve_auth(config: str | Path, target: Target) -> AuthProfileSet:
+    path = Path(config)
+    text = path.read_text(encoding="utf-8")
+    raw: dict[str, object] = tomllib.loads(text)
+    profile_set = AuthProfileSet.model_validate(raw)
+    _secret_re = r"\$\{secret:([A-Z0-9_]+)\}"
+    for profile in profile_set.profiles:
+        if profile.secret_ref is not None:
+            _assert_env_var_exists(profile.secret_ref.env)
+        if profile.totp is not None:
+            _assert_env_var_exists(profile.totp.seed_ref.env)
+        if profile.login is not None:
+            for val in profile.login.field_template.values():
+                for match in re.finditer(_secret_re, val):
+                    _assert_env_var_exists(match.group(1))
+        if profile.kind == AuthProfileKind.LOGIN_FLOW:
+            _assert_login_host_in_allowlist(profile, target)
+    return profile_set
