@@ -197,3 +197,108 @@ class TestRetentionHelpers:
         # Only the free scan should appear in GC-eligible output
         assert "s-free" in result.output
         assert "s-cli-gc" not in result.output  # legal_hold scan excluded
+
+
+# ---------------------------------------------------------------------------
+# quarry provenance gc-run --- dry-run and apply behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestGcRunCommand:
+    def test_gc_run_command_exists(self) -> None:
+        from quarry_cli.main import app
+
+        result = _runner.invoke(app, ["provenance", "gc-run", "--help"])
+        assert result.exit_code == 0, result.output
+
+    def test_gc_run_dry_run_prints_eligible_ids_not_held(self, tmp_path: Path) -> None:
+        import json
+
+        from quarry_cli.main import app
+
+        held = _make_scan(legal_hold=True)
+        free = _make_scan(legal_hold=False)
+        free = free.model_copy(update={"id": "s-gc-run-free"})
+        scans_file = tmp_path / "scans.json"
+        scans_file.write_text(
+            json.dumps([held.model_dump(mode="json"), free.model_dump(mode="json")])
+        )
+
+        result = _runner.invoke(app, ["provenance", "gc-run", str(scans_file)])
+        assert result.exit_code == 0, result.output
+        assert "s-gc-run-free" in result.output
+        assert held.id not in result.output
+
+    def test_gc_run_dry_run_does_not_call_execute_gc(self, tmp_path: Path) -> None:
+        import json
+        from unittest.mock import patch
+
+        from quarry_cli.main import app
+
+        free = _make_scan(legal_hold=False)
+        scans_file = tmp_path / "scans.json"
+        scans_file.write_text(json.dumps([free.model_dump(mode="json")]))
+
+        with patch("quarry_cli.retention.execute_gc") as mock_gc:
+            result = _runner.invoke(app, ["provenance", "gc-run", str(scans_file)])
+
+        assert result.exit_code == 0, result.output
+        mock_gc.assert_not_called()
+
+    def test_gc_run_apply_calls_execute_gc_and_prints_ids(self, tmp_path: Path) -> None:
+        import json
+
+        from quarry.schemas import Target
+        from quarry_cli.main import app
+        from quarry_persistence import QuarryRepository
+
+        free = _make_scan(legal_hold=False)
+        free = free.model_copy(update={"id": "s-run-apply-1"})
+        target = Target(
+            id="t-apply-1",
+            workspace_id="ws-1",
+            repo_path="/tmp/repo",
+            created_at=_NOW,
+        )
+        db_path = tmp_path / "quarry.db"
+        repo = QuarryRepository(str(db_path))
+        repo.create_scan(free, target)
+
+        scans_file = tmp_path / "scans.json"
+        scans_file.write_text(json.dumps([free.model_dump(mode="json")]))
+
+        result = _runner.invoke(
+            app,
+            ["provenance", "gc-run", str(scans_file), "--apply", "--db", str(db_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "s-run-apply-1" in result.output
+
+    def test_gc_run_legal_hold_not_in_apply_output(self, tmp_path: Path) -> None:
+        import json
+
+        from quarry.schemas import Target
+        from quarry_cli.main import app
+        from quarry_persistence import QuarryRepository
+
+        held = _make_scan(legal_hold=True)
+        held = held.model_copy(update={"id": "s-held-apply-1"})
+        target = Target(
+            id="t-held-apply",
+            workspace_id="ws-1",
+            repo_path="/tmp/repo",
+            created_at=_NOW,
+        )
+        db_path = tmp_path / "quarry.db"
+        repo = QuarryRepository(str(db_path))
+        repo.create_scan(held, target)
+
+        scans_file = tmp_path / "scans.json"
+        scans_file.write_text(json.dumps([held.model_dump(mode="json")]))
+
+        result = _runner.invoke(
+            app,
+            ["provenance", "gc-run", str(scans_file), "--apply", "--db", str(db_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "s-held-apply-1" not in result.output
