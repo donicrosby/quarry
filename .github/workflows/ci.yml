@@ -31,7 +31,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
-      - run: uv sync --extra dev --frozen
+      - run: uv sync --group dev --frozen
       - name: uv lockfile is in sync
         run: uv lock --check
       - name: ruff lint
@@ -58,7 +58,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
-      - run: uv sync --extra dev --frozen
+      - run: uv sync --group dev --frozen
       # Self-contained: conftest spins up an in-process Temporal test env
       # (start_time_skipping), so no external services are needed. pytest config
       # already sets -n auto + 300s per-test timeout + ResourceWarning-as-error.

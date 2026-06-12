@@ -78,15 +78,15 @@ class TestProveStageOrder:
 
         assert "PROVE" in COMPLETED_STAGE_ORDER
 
-    def test_prove_inserted_after_agentic_validate(self) -> None:
+    def test_prove_inserted_after_dedup(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER
 
-        assert COMPLETED_STAGE_ORDER["PROVE"] == COMPLETED_STAGE_ORDER["AGENTIC_VALIDATE"] + 1
+        assert COMPLETED_STAGE_ORDER["PROVE"] == COMPLETED_STAGE_ORDER["DEDUP"] + 1
 
-    def test_gapfill_renumbered_after_prove(self) -> None:
+    def test_prove_before_coverage(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER
 
-        assert COMPLETED_STAGE_ORDER["GAPFILL"] > COMPLETED_STAGE_ORDER["PROVE"]
+        assert COMPLETED_STAGE_ORDER["PROVE"] < COMPLETED_STAGE_ORDER["COVERAGE"]
 
     def test_stage_order_is_strictly_monotonic(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER

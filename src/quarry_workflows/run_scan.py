@@ -24,6 +24,7 @@ from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
+    CallGraph,
     CandidateFinding,
     DynamicEvidenceLink,
     FinalFinding,
@@ -37,6 +38,7 @@ from quarry.schemas import (
     RedactionStatus,
     Report,
     RepositorySnapshot,
+    SandboxExecCapture,
     Scan,
     ScanManifest,
     ScanStatus,
@@ -44,6 +46,7 @@ from quarry.schemas import (
     SubsystemAssignment,
     Target,
     TargetEndpoint,
+    Trace,
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
@@ -65,12 +68,16 @@ from quarry_activities.inputs import (
     PersistScanStateInput,
     RenderReportInput,
     RenderReportOutput,
+    SandboxExecActivityInput,
     ValidateCandidateInput,
 )
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
+from quarry_tools.call_graph_python import build_python_call_graph
+from quarry_workflows.prove_stage import filter_needs_proof
+from quarry_workflows.tracer_stage import apply_trace_severity_reranking
 
 # Default orchestration retry policy (overridden per-run from RunScanInput at the
 # start of the workflow). State-persistence writes keep their own fixed policy.
@@ -83,10 +90,10 @@ COMPLETED_STAGE_ORDER = {
     "HUNT": 3,
     "VALIDATION": 4,
     "AGENTIC_VALIDATE": 5,
-    "PROVE": 6,  # agentic proof-of-concept generation (ADR-017 §5/§7)
-    "TRACER": 7,  # reachability verdict + severity re-ranking (ADR-016)
-    "GAPFILL": 8,
-    "DEDUP": 9,
+    "GAPFILL": 6,
+    "DEDUP": 7,
+    "PROVE": 8,  # agentic proof-of-concept generation (ADR-017 §5/§7)
+    "TRACER": 9,  # reachability verdict + severity re-ranking (ADR-017)
     "COVERAGE": 10,
     "REPORT": 11,
     "INTEGRATING": 12,
@@ -1053,6 +1060,176 @@ class RunScanWorkflow:
                 },
             )
 
+        # ── PROVE stage ──────────────────────────────────────────────────────
+        # Agentic proof-of-concept generation for NEEDS_PROOF findings.
+        # The prove agent proposes exec/HTTP specs; this block dispatches them.
+        # Gated by scan_input.proof_enabled — skipped (but persisted) if False.
+        if not _stage_completed(completed_stage, "PROVE"):
+            self._current_stage = "PROVE"
+            if scan_input.proof_enabled:
+                prove_panel_json = panel_json_for_role(scan, "prove")
+                pv_spent = (
+                    await _scan_cost_so_far(scan_input.db_path, scan.id)
+                    if scan.budget_cap_usd is not None
+                    else 0.0
+                )
+                _, pv_budget_remaining = budget_decision(scan.budget_cap_usd, pv_spent)
+                for finding in filter_needs_proof(needs_proof_findings):
+                    try:
+                        prove_raw = await workflow.execute_activity(
+                            "prove-finding",
+                            args=[
+                                finding.model_dump(mode="json"),
+                                repo_path,
+                                None,
+                                pv_budget_remaining,
+                                prove_panel_json,
+                                scan_input.db_path,
+                                20,
+                                scan_input.scan_seed,
+                            ],
+                            start_to_close_timeout=timedelta(hours=2),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                        prove_dict = cast("dict[str, Any]", prove_raw)
+                        exec_inputs, http_inputs = build_prove_dispatch_inputs(
+                            proposed_exec_specs=prove_dict.get("proposed_exec_specs", []),
+                            proposed_http_specs=prove_dict.get("proposed_http_specs", []),
+                            scan_id=scan.id,
+                            finding_id=finding.id,
+                            artifact_root=artifact_root,
+                            target_endpoint_json=(
+                                build_target_endpoint_from_url(
+                                    scan_input.target_url
+                                ).model_dump_json()
+                                if scan_input.target_url
+                                else None
+                            ),
+                            allowed_hosts=scan_input.allowed_hosts,
+                        )
+                        for exec_inp in exec_inputs:
+                            try:
+                                exec_raw = await workflow.execute_activity(
+                                    "sandbox-exec",
+                                    args=[exec_inp],
+                                    start_to_close_timeout=timedelta(minutes=10),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                )
+                                proof_artifacts.append(
+                                    build_proof_artifact(
+                                        finding,
+                                        exec_raw
+                                        if not isinstance(exec_raw, dict)
+                                        else SandboxExecCapture.model_validate(exec_raw),
+                                        "cli_exec",
+                                        scan.id,
+                                        workflow.now(),
+                                    )
+                                )
+                            except Exception:
+                                pass
+                        for http_inp in http_inputs:
+                            try:
+                                http_raw = await workflow.execute_activity(
+                                    "http-request",
+                                    args=[http_inp],
+                                    start_to_close_timeout=timedelta(minutes=2),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                )
+                                proof_artifacts.append(
+                                    build_proof_artifact(
+                                        finding,
+                                        http_raw
+                                        if not isinstance(http_raw, dict)
+                                        else HttpResponseCapture.model_validate(http_raw),
+                                        "dynamic_http",
+                                        scan.id,
+                                        workflow.now(),
+                                    )
+                                )
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "prove.failed",
+                            {"finding_id": finding.id, "error": _describe_failure(exc)},
+                        )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "PROVE")
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "prove.completed",
+                {
+                    "findings_attempted": str(len(filter_needs_proof(needs_proof_findings)))
+                    if scan_input.proof_enabled
+                    else "0",
+                    "proof_artifact_count": str(len(proof_artifacts)),
+                },
+            )
+
+        # ── TRACER stage ─────────────────────────────────────────────────────
+        # Reachability verdict per finding — one tracer-finding activity per
+        # CandidateFinding.  Single-repo trace: builds Python call graph from
+        # the primary repo, fans out to one tracer instance per finding.
+        # Cross-repo fan-out (quarry.toml consumer_repos) is a follow-on.
+        if not _stage_completed(completed_stage, "TRACER"):
+            self._current_stage = "TRACER"
+            if candidate_findings:
+                call_graph: CallGraph = build_python_call_graph(
+                    scan_id=scan.id,
+                    repo_path=repo_path,
+                )
+                tracer_panel_json = panel_json_for_role(scan, "trace")
+                for finding in candidate_findings:
+                    try:
+                        trace_raw = await workflow.execute_activity(
+                            "tracer-finding",
+                            args=[
+                                finding.model_dump(mode="json"),
+                                call_graph.model_dump(mode="json"),
+                                repo_path,
+                                None,
+                                None,
+                                tracer_panel_json,
+                                scan_input.db_path,
+                                10,
+                                scan_input.scan_seed,
+                            ],
+                            start_to_close_timeout=timedelta(hours=1),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                        trace = Trace.model_validate(
+                            trace_raw if isinstance(trace_raw, dict) else trace_raw
+                        )
+                        apply_trace_severity_reranking(finding, trace)
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "tracer.verdict",
+                            {
+                                "finding_id": finding.id,
+                                "verdict": trace.reachable.value,
+                            },
+                        )
+                    except Exception as exc:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "tracer.failed",
+                            {"finding_id": finding.id, "error": _describe_failure(exc)},
+                        )
+            await _persist_scan_stage(scan_input.db_path, scan.id, "TRACER")
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "tracer.completed",
+                {"finding_count": str(len(candidate_findings))},
+            )
+
         self._current_stage = "COVERAGE"
         coverage_ledger_json = await self._record_coverage(
             scan_input,
@@ -1853,6 +2030,60 @@ def build_proof_artifact(
         redaction_status=redaction_status,
         created_at=now,
     )
+
+
+def build_prove_dispatch_inputs(
+    proposed_exec_specs: list[dict[str, Any]],
+    proposed_http_specs: list[dict[str, Any]],
+    *,
+    scan_id: str,
+    finding_id: str,
+    artifact_root: str,
+    target_endpoint_json: str | None,
+    allowed_hosts: tuple[str, ...],
+) -> "tuple[list[Any], list[Any]]":
+    """Convert a ProveResponse's proposed specs into activity input objects.
+
+    Returns ``(exec_inputs, http_inputs)`` where each item is a
+    :class:`~quarry_activities.inputs.SandboxExecActivityInput` or
+    :class:`~quarry_activities.inputs.HttpRequestActivityInput` ready to
+    pass to ``workflow.execute_activity``.
+
+    HTTP specs are silently dropped when *target_endpoint_json* is None —
+    live HTTP probes require a target endpoint.
+
+    Pure function — no I/O, safe to call from within workflow code.
+    """
+    import json as _json
+
+    exec_inputs: list[Any] = []
+    for spec_dict in proposed_exec_specs:
+        exec_inputs.append(
+            SandboxExecActivityInput(
+                spec_json=_json.dumps(spec_dict),
+                target_endpoint_json=target_endpoint_json,
+                allowed_hosts=allowed_hosts,
+                artifact_store_path=artifact_root,
+                scan_id=scan_id,
+                candidate_finding_id=finding_id,
+            )
+        )
+
+    http_inputs: list[Any] = []
+    if target_endpoint_json is not None:
+        for spec_dict in proposed_http_specs:
+            http_inputs.append(
+                HttpRequestActivityInput(
+                    spec_json=_json.dumps(spec_dict),
+                    target_endpoint_json=target_endpoint_json,
+                    allowed_hosts=allowed_hosts,
+                    artifact_store_path=artifact_root,
+                    scan_id=scan_id,
+                    candidate_finding_id=finding_id,
+                )
+            )
+
+    return exec_inputs, http_inputs
 
 
 def split_hunt_result(result: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

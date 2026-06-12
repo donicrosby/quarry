@@ -23,6 +23,7 @@ scan_app = typer.Typer(help="Run scans.")
 target_app = typer.Typer(help="Manage local targets.")
 report_app = typer.Typer(help="Inspect reports.")
 benchmark_app = typer.Typer(help="Run local benchmarks.")
+provenance_app = typer.Typer(help="Prompt-provenance verification and GC retention.")
 POLL_INTERVAL_SECONDS = 1.0
 TERMINAL_SCAN_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CANCELED"})
 
@@ -30,6 +31,7 @@ app.add_typer(scan_app, name="scan")
 app.add_typer(target_app, name="target")
 app.add_typer(report_app, name="report")
 app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(provenance_app, name="provenance")
 
 
 @scan_app.command("run")
@@ -503,3 +505,98 @@ async def _benchmark_local_command(
     ]
     benchmark = compare(final_findings, truth, runtime_seconds=runtime_seconds)
     return [f"scan_id={scan_id}", *benchmark.summary_lines()]
+
+
+# ---------------------------------------------------------------------------
+# quarry provenance sub-commands (ADR-019)
+# ---------------------------------------------------------------------------
+
+
+@provenance_app.command("verify")
+def provenance_verify(
+    invocation_file: Annotated[
+        Path,
+        typer.Argument(help="Path to a ModelInvocation JSON file."),
+    ],
+    system_hash: Annotated[
+        str | None,
+        typer.Option("--system-hash", help="Expected SHA-256 of the system prompt."),
+    ] = None,
+    template_sha: Annotated[
+        str | None,
+        typer.Option("--template-sha", help="Expected SHA-256 of the prompt template."),
+    ] = None,
+    user_hash: Annotated[
+        str | None,
+        typer.Option("--user-hash", help="Expected SHA-256 of the user prompt."),
+    ] = None,
+) -> None:
+    """Verify prompt-provenance hashes for a stored ModelInvocation.
+
+    Reads the invocation from INVOCATION_FILE (a JSON file produced by a scan),
+    then checks that the stored per-part hashes match the provided expected
+    values.  Exits 0 on success, 1 on mismatch or missing file.
+    """
+    from quarry.schemas import ModelInvocation
+    from quarry_cli.provenance import verify_invocation
+
+    if not invocation_file.exists():
+        typer.echo(f"Error: file not found: {invocation_file}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        inv = ModelInvocation.model_validate_json(invocation_file.read_text())
+    except Exception as exc:
+        typer.echo(f"Error: could not parse invocation file: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    ok = verify_invocation(
+        inv,
+        expected_system_hash=system_hash,
+        expected_template_sha256=template_sha,
+        expected_user_prompt_hash=user_hash,
+    )
+    if ok:
+        typer.echo(f"OK  {inv.id}  hashes match")
+    else:
+        typer.echo(f"FAIL  {inv.id}  hash mismatch", err=True)
+        raise typer.Exit(code=1)
+
+
+@provenance_app.command("gc-check")
+def provenance_gc_check(
+    scans_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to a JSON file containing a list of Scan objects. "
+            "Outputs scan IDs that are eligible for GC (legal_hold=False)."
+        ),
+    ],
+) -> None:
+    """List scans eligible for GC retention sweep (legal_hold=False).
+
+    Reads a JSON array of Scan objects from SCANS_FILE and prints the IDs
+    of scans that may be purged.  Scans with ``legal_hold=True`` are omitted.
+    """
+    import json
+
+    from quarry.schemas import Scan
+    from quarry_cli.provenance import should_gc_scan
+
+    if not scans_file.exists():
+        typer.echo(f"Error: file not found: {scans_file}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        raw = json.loads(scans_file.read_text())
+        scans = [Scan.model_validate(item) for item in raw]
+    except Exception as exc:
+        typer.echo(f"Error: could not parse scans file: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    eligible = [s for s in scans if should_gc_scan(s)]
+    if not eligible:
+        typer.echo("No scans eligible for GC.")
+        return
+    for scan in eligible:
+        typer.echo(scan.id)
