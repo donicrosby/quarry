@@ -18,8 +18,8 @@ def _request(**kwargs: object) -> ModelRequest:
         "task_name": "hunt-secrets",
         "scan_id": "scan-1",
         "role": "hunt",
-        "prompt_version": "hunter-v1",
-        "prompt_hash": "c" * 64,
+        "template_sha256": "c" * 64,
+        "system_prompt_hash": "f" * 64,
         "scrubber_hits": 3,
     }
     base.update(kwargs)
@@ -47,8 +47,8 @@ def test_records_model_invocation_provenance() -> None:
     inv = client.invocations[0]
     assert inv.role == "hunt"
     assert inv.provider == "anthropic"
-    assert inv.prompt_version == "hunter-v1"
-    assert inv.prompt_hash == "c" * 64
+    assert inv.template_sha256 == "c" * 64
+    assert inv.system_prompt_hash == "f" * 64
     assert inv.scrubber_hits == 3
     assert inv.redaction_status is RedactionStatus.REDACTED
 

@@ -19,6 +19,28 @@ from quarry_prompts.registry import LoadedTemplate, PromptRegistry, PromptTempla
 # Sentinel markers emitted by _envelope/*.j2 templates to delimit the four parts.
 _SENTINEL_RE = re.compile(r"<!-- QUARRY:PART:(\w+) -->")
 
+
+class MissingCanonicalPartError(ValueError):
+    """Raised when a canonical prompt part is absent from a rendered template.
+
+    The ``system`` part is canonical: every *full-role* prompt MUST have a
+    non-empty system section.  Absence means the template is malformed or the
+    wrong template was loaded.  This guard is fail-closed — an empty system
+    message is a silent security risk (the model operates without role or
+    objective instructions).
+
+    Partial-template roles (``task``, ``_feedback``, ``_envelope``) are exempt:
+    they carry only a developer section and are injected into a larger message
+    structure — they are never themselves the system prompt.
+    """
+
+
+# Roles whose templates carry only a developer section and therefore do not
+# require (or contain) a system part.  These are partial templates — their
+# rendered text is injected into a broader message structure rather than being
+# sent directly as the system message.
+_PARTIAL_TEMPLATE_ROLES: frozenset[str] = frozenset({"task", "_feedback", "_envelope"})
+
 _PROVENANCE_HEADER_START = "# QUARRY PROMPT PROVENANCE"
 _PROVENANCE_HEADER_END = "# END QUARRY PROMPT PROVENANCE"
 
@@ -145,6 +167,22 @@ def build_prompt(
     # Assemble messages.
     # Convention: "system" part → system role; everything else → user role messages.
     system_text = parts.get("system", "")
+
+    # Fail-closed guard: a missing or empty system part means the template is
+    # malformed.  Raise before any message is assembled so callers never receive
+    # a prompt without role/objective instructions (ADR-019 provenance addendum).
+    # Partial-template roles (task, _feedback, _envelope) carry only a developer
+    # section by design — they are injected into a larger structure, so exempt
+    # them from this guard.
+    if not system_text.strip() and role not in _PARTIAL_TEMPLATE_ROLES:
+        msg = (
+            f"Template '{role}/{name}.{version}.j2' is missing the canonical "
+            "'system' part (<!-- QUARRY:PART:system --> sentinel is absent or "
+            "renders to empty).  All Quarry prompts must have a non-empty system "
+            "section.  Fix the template or use the correct role/name/version."
+        )
+        raise MissingCanonicalPartError(msg)
+
     developer_text = parts.get("developer", "")
     evidence_text = parts.get("evidence", "")
     schema_text = parts.get("output_schema", "")

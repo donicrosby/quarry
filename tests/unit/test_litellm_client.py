@@ -22,8 +22,8 @@ def _request() -> ModelRequest:
         task_name="hunt-secrets",
         scan_id="scan-1",
         role="hunt",
-        prompt_version="hunter-v1",
-        prompt_hash="d" * 64,
+        template_sha256="d" * 64,
+        system_prompt_hash="e" * 64,
         messages=[ModelMessage(role="user", content="analyze")],
     )
 
@@ -65,7 +65,7 @@ def test_records_invocation() -> None:
 
     assert len(client.invocations) == 1
     assert client.invocations[0].provider == "anthropic"
-    assert client.invocations[0].prompt_hash == "d" * 64
+    assert client.invocations[0].template_sha256 == "d" * 64
 
 
 def test_normalize_usage_openai_shape() -> None:

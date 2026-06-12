@@ -1,6 +1,6 @@
 """Deduplicate activity — deterministic clustering + agentic merge.
 
-Algorithm (from week-13.md):
+Algorithm (ADR-020):
 1. Group CandidateFindings by root_cause_key.
    - Clusters of size 1 are kept unchanged — no model call (deterministic).
    - Clusters of size 2–5: agent receives cluster fingerprints and reasons about

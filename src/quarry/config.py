@@ -42,3 +42,10 @@ class QuarrySettings(BaseSettings):
     artifact_backend: str = ""  # env: QUARRY_ARTIFACT_BACKEND
     redis_url: str = ""  # env: QUARRY_REDIS_URL      (used when backend=redis)
     s3_bucket: str = ""  # env: QUARRY_S3_BUCKET      (used when backend=s3)
+
+    # Sandbox execution backend (ADR-022 §A).
+    # "" or "local"     => LocalSubprocessSandbox (default, dev/test, no Docker required).
+    # "container"       => ContainerSandbox Tier 2 (Docker/Podman, production default).
+    # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
+    sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
+    sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)

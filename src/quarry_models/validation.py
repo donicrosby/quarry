@@ -50,8 +50,8 @@ ROLE_ALLOWED_ACTION_KINDS: dict[str, frozenset[str]] = {
 }
 
 
-# ProposedAction was defined here through week 12. It moved to quarry.schemas in ADR-020
-# (week 13 addendum) to gain the mandatory ActionReasoning field. It is re-exported above
+# ProposedAction was defined here originally. It moved to quarry.schemas in ADR-020
+# to gain the mandatory ActionReasoning field. It is re-exported above
 # so existing callers `from quarry_models.validation import ProposedAction` keep working.
 #
 # The _check_actions guard below validates action kind from model output JSON, which uses

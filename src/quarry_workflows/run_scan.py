@@ -84,12 +84,13 @@ COMPLETED_STAGE_ORDER = {
     "VALIDATION": 4,
     "AGENTIC_VALIDATE": 5,
     "PROVE": 6,  # agentic proof-of-concept generation (ADR-017 §5/§7)
-    "GAPFILL": 7,
-    "DEDUP": 8,
-    "COVERAGE": 9,
-    "REPORT": 10,
-    "INTEGRATING": 11,
-    "COMPLETED": 12,
+    "TRACER": 7,  # reachability verdict + severity re-ranking (ADR-016)
+    "GAPFILL": 8,
+    "DEDUP": 9,
+    "COVERAGE": 10,
+    "REPORT": 11,
+    "INTEGRATING": 12,
+    "COMPLETED": 13,
 }
 
 
@@ -991,7 +992,7 @@ class RunScanWorkflow:
 
         # ── DEDUP stage ──────────────────────────────────────────────────────
         # Deterministic clustering by root_cause_key + agentic merge for
-        # ambiguous clusters (plan: week-13.md algorithm).
+        # ambiguous clusters (ADR-020 algorithm).
         if not _stage_completed(completed_stage, "DEDUP"):
             self._current_stage = "DEDUP"
             dd_spent = (

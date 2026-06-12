@@ -110,14 +110,19 @@ def test_idor_found() -> None:
 
 def test_benchmark_local_accepts_dynamic_flags() -> None:
     """benchmark local must expose --dynamic-validation and --live-prove options."""
+    import re
+
     from typer.testing import CliRunner
 
     from quarry_cli.main import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["benchmark", "local", "--help"])
-    assert "--dynamic-validation" in result.output
-    assert "--live-prove" in result.output
+    # Strip ANSI escape codes — FORCE_COLOR in CI causes Rich to emit bold/color sequences
+    # that split option names and break plain substring checks.
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--dynamic-validation" in clean
+    assert "--live-prove" in clean
 
 
 def test_benchmark_local_dynamic_flags_default_false() -> None:

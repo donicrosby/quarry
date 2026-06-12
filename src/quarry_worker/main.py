@@ -31,6 +31,7 @@ from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.sandbox_exec import sandbox_exec_activity
+from quarry_activities.tracer import tracer_activity
 from quarry_activities.validate import validate_activity as validate_candidate_finding_activity
 from quarry_activities.validation import (
     promote_to_final_finding_metadata,
@@ -78,6 +79,7 @@ async def run_worker() -> None:
             http_request_activity,
             sandbox_exec_activity,
             prove_activity,
+            tracer_activity,
         ],
         activity_executor=ThreadPoolExecutor(max_workers=10),
         graceful_shutdown_timeout=timedelta(seconds=30),
