@@ -1,4 +1,4 @@
-"""Coverage floor enforcement (ADR-021 / Week 13).
+"""Coverage floor enforcement (ADR-021).
 
 Pure model-layer logic: no Temporal, no I/O. The Temporal activity
 (quarry_activities/coverage.py) handles the database-side ledger.
@@ -6,7 +6,7 @@ Pure model-layer logic: no Temporal, no I/O. The Temporal activity
 The coverage floor is a correctness invariant: every vuln_class in the
 operator's focused set must have at least min_per_class tasks per scan.
 This is checked in Python after model output — it is NOT delegated to the
-prompt (Dangerous rabbit holes: week-13.md:63).
+prompt.
 """
 
 from __future__ import annotations

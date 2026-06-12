@@ -1,7 +1,7 @@
 """treesitter_query extension tool.
 
 Runs a tree-sitter S-expression query against all source files of a given
-language within the repository scope.  Supported languages this week:
+language within the repository scope.  Supported languages:
 javascript, c, go.
 
 Unsupported languages raise ToolUnavailableError with a message directing

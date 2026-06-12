@@ -73,7 +73,7 @@ class VulnerabilityClass(StrEnum):
     SQL_INJECTION = "sql_injection"
     XSS = "xss"
     FILE_UPLOAD = "file_upload"
-    # OWASP-aligned + common taint-friendly classes (Week 13+ expansion).
+    # OWASP-aligned + common taint-friendly vulnerability classes.
     PATH_TRAVERSAL = "path_traversal"
     OPEN_REDIRECT = "open_redirect"
     SSTI = "ssti"
@@ -329,6 +329,9 @@ class Scan(BaseModel):
     completed_at: datetime | None = None
     error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # GC exemption: scans marked legal_hold=True are never purged by the retention sweep.
+    # Required for evidence-grade audit trails (e.g. proof artifacts, prompt provenance).
+    legal_hold: bool = False
 
 
 class ScanSummary(BaseModel):
@@ -417,7 +420,7 @@ class WorkflowEvent(BaseModel):
     Finding-grained (existing):
       ``finding.candidate``, ``finding.validated``, ``finding.promoted``
 
-    Iteration-grained (ADR-020 / Week 13 addendum):
+    Iteration-grained (ADR-020):
       ``agent.action_proposed`` — emitted per proposed action after the vagueness check.
         Payload: ``agent_kind``, ``iteration``, ``tool_name``, ``reasoning_summary``
         (hypothesis, scrubbed), ``check_result`` (passed/failed), ``reasoning_retries``.
@@ -569,10 +572,9 @@ class ModelInvocation(BaseModel):
     role: str
     provider: str
     model: str
-    # Legacy flat fields — kept for backward compat with existing DB records.
-    prompt_version: str = ""
-    prompt_hash: str = ""
     # Template provenance fields (ADR-019).
+    # Legacy flat fields (prompt_version, prompt_hash) removed — old DB records
+    # that contain them deserialize fine because Pydantic ignores extra fields.
     prompt_template_id: str = ""
     prompt_template_version: str = ""
     template_sha256: str = ""
@@ -871,7 +873,7 @@ class DiffScanResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Agentic harness schemas (Week 11 — Milestone 2)
+# Agentic harness schemas
 # ---------------------------------------------------------------------------
 
 
@@ -991,7 +993,7 @@ class AgentLoopResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Action reasoning and vagueness-guard schemas (ADR-020 / Week 13 addendum)
+# Action reasoning and vagueness-guard schemas (ADR-020)
 # ---------------------------------------------------------------------------
 
 
@@ -1061,7 +1063,7 @@ class ReasoningCheckResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Validator-independence boundary (ADR-021 / Week 13)
+# Validator-independence boundary (ADR-021)
 # ---------------------------------------------------------------------------
 
 
@@ -1082,7 +1084,7 @@ class ValidatorClaim(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Live-dynamic validation schemas (ADR-017 / Week 13 schema-only)
+# Live-dynamic validation schemas (ADR-017)
 # ---------------------------------------------------------------------------
 
 # Patterns that look like inline credentials; auth_profile must never carry them.

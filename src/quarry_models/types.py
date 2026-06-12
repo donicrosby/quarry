@@ -72,6 +72,13 @@ class ModelRequest(BaseModel):
     prompt_version: str = "v1"
     prompt_hash: str = ""
     scrubber_hits: int = 0
+    # Per-part prompt provenance hashes (ADR-019 provenance addendum).
+    # Populated from RenderedPrompt.part_hashes + ref.sha256 by the activity.
+    template_sha256: str = ""
+    system_prompt_hash: str = ""
+    developer_prompt_hash: str | None = None
+    user_prompt_hash: str = ""
+    evidence_hashes: list[str] = Field(default_factory=_empty_strings)
 
 
 class ModelResponse[T: BaseModel](BaseModel):

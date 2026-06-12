@@ -14,8 +14,8 @@ def test_model_invocation_round_trips() -> None:
         role="hunt",
         provider="anthropic",
         model="claude-opus-4-8",
-        prompt_version="hunter-secrets-v1",
-        prompt_hash="a" * 64,
+        template_sha256="a" * 64,
+        system_prompt_hash="b" * 64,
         token_input=1200,
         token_output=300,
         cached_tokens=1024,
@@ -30,7 +30,8 @@ def test_model_invocation_round_trips() -> None:
     assert loaded.role == "hunt"
     assert loaded.provider == "anthropic"
     assert loaded.model == "claude-opus-4-8"
-    assert loaded.prompt_version == "hunter-secrets-v1"
+    assert loaded.template_sha256 == "a" * 64
+    assert loaded.system_prompt_hash == "b" * 64
     assert loaded.temperature == 0.0
     assert loaded.cached_tokens == 1024
     assert loaded.scrubber_hits == 2
@@ -46,8 +47,6 @@ def test_model_invocation_defaults() -> None:
         role="validate",
         provider="openai",
         model="gpt-4.1-mini",
-        prompt_version="validator-v1",
-        prompt_hash="b" * 64,
         created_at=datetime.now(UTC),
     )
 

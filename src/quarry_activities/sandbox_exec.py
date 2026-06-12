@@ -28,7 +28,13 @@ from quarry.schemas import (
     TargetEndpoint,
 )
 from quarry_activities.inputs import SandboxExecActivityInput
-from quarry_activities.sandbox import LocalSubprocessSandbox, SandboxResult
+from quarry_activities.sandbox import (
+    ContainerSandbox,
+    K8sJobSandbox,
+    LocalSubprocessSandbox,
+    SandboxBackend,
+    SandboxResult,
+)
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.redaction import Scrubber
 
@@ -84,10 +90,38 @@ def _resolve_credentials(auth_profile_set_json: str | None) -> dict[str, str]:
     return {}
 
 
+def _build_sandbox_backend() -> SandboxBackend:
+    """Return the configured SandboxBackend.
+
+    Reads QUARRY_SANDBOX_BACKEND (via QuarrySettings):
+      ""  / "local"     — LocalSubprocessSandbox (default; dev/test, no Docker)
+      "container"       — ContainerSandbox Tier 2 (Docker/Podman; production default)
+      "k8s_job"         — K8sJobSandbox Tier 3 (deferred; raises NotImplementedError)
+
+    QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
+    """
+    from quarry.config import QuarrySettings
+
+    settings = QuarrySettings()
+    backend = (settings.sandbox_backend or "").lower().strip()
+    if backend in ("", "local"):
+        return LocalSubprocessSandbox()
+    if backend == "container":
+        image = settings.sandbox_image or ContainerSandbox.DEFAULT_IMAGE
+        return ContainerSandbox(image=image)
+    if backend == "k8s_job":
+        return K8sJobSandbox()
+    msg = (
+        f"Unknown QUARRY_SANDBOX_BACKEND='{backend}'. "
+        "Valid values: '' (or 'local'), 'container', 'k8s_job' (deferred)."
+    )
+    raise ValueError(msg)
+
+
 def _run_sandbox(
     spec: SandboxExecSpec,
     *,
-    sandbox: LocalSubprocessSandbox,
+    sandbox: SandboxBackend,
     work_dir: Path,
     resolved_env: dict[str, str],
     target_endpoint: TargetEndpoint | None,
@@ -126,7 +160,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
         target_endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
 
     store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
-    sandbox = LocalSubprocessSandbox()
+    sandbox = _build_sandbox_backend()
 
     with tempfile.TemporaryDirectory(prefix="quarry-sandbox-") as _work_dir:
         work_dir = Path(_work_dir)
