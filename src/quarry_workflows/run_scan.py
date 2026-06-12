@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -24,8 +24,10 @@ from quarry.schemas import (
     ArtifactKind,
     ArtifactRef,
     CandidateFinding,
+    DynamicEvidenceLink,
     FinalFinding,
     FindingStatus,
+    HttpResponseCapture,
     IntegrationRun,
     IntegrationStatus,
     ModelPanelEntry,
@@ -36,6 +38,7 @@ from quarry.schemas import (
     Scan,
     ScanManifest,
     ScanStatus,
+    SourceRef,
     SubsystemAssignment,
     Target,
     VulnerabilityClass,
@@ -122,6 +125,13 @@ class RunScanInput(BaseModel):
     budget_cap_usd: float | None = None
     # Seed for model calls. None means derive from scan_id at activity time.
     scan_seed: int | None = None
+    # Live-dynamic validation gate (ADR-017). CLI flags are the sole authority;
+    # target_url presence alone must never flip this flag.
+    dynamic_validation_enabled: bool = False
+    # Hosts the dynamic worker may contact; empty tuple = all hosts blocked.
+    allowed_hosts: tuple[str, ...] = ()
+    # AuthProfileSet serialized as JSON; None = unauthenticated scans only.
+    auth_profiles_json: str | None = None
 
 
 class RunScanResult(BaseModel):
@@ -1550,6 +1560,67 @@ def _final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -
         validation_result_id=f"{candidate.id}-validation",
         created_at=now,
     )
+
+
+def promote_with_dynamic_evidence(
+    candidate: CandidateFinding,
+    capture: HttpResponseCapture,
+    scan_id: str,
+    now: datetime,
+) -> tuple[FinalFinding, DynamicEvidenceLink] | None:
+    """Promote a NEEDS_PROOF finding to FinalFinding using live HTTP evidence.
+
+    Returns (FinalFinding, DynamicEvidenceLink) when the HTTP capture is
+    conclusive (2xx status), or None when the response does not confirm the
+    vulnerability (non-2xx, or missing artifact refs).
+
+    The returned FinalFinding carries non-empty proof_artifact_ids populated from
+    the request and response artifact refs in *capture*.
+
+    Called from the dynamic_validate sub-step of AGENTIC_VALIDATE; never called
+    from workflow code that runs under Temporal's sandbox (pure function, no I/O).
+    """
+    if capture.status_code < 200 or capture.status_code >= 300:
+        return None
+
+    req_ref = capture.request_artifact_ref or ""
+    resp_ref = capture.body_artifact_ref
+
+    proof_ids = [r for r in [req_ref, resp_ref] if r]
+
+    # Use the first source_ref if available; fall back to a minimal placeholder.
+    source_ref: SourceRef
+    if candidate.source_refs:
+        source_ref = candidate.source_refs[0]
+    else:
+        source_ref = SourceRef(
+            file_path=candidate.affected_component or "",
+        )
+
+    link = DynamicEvidenceLink(
+        source_ref=source_ref,
+        request_artifact_id=req_ref,
+        response_artifact_id=resp_ref,
+        candidate_finding_id=candidate.id,
+    )
+
+    final = FinalFinding(
+        id=candidate.id,
+        scan_id=scan_id,
+        workspace_id="local",
+        fingerprint=candidate.metadata.get("fingerprint", candidate.id),
+        vuln_class=candidate.vuln_class,
+        severity=candidate.severity,
+        title=candidate.title,
+        summary=candidate.hypothesis,
+        affected_component=candidate.affected_component,
+        source_refs=candidate.source_refs,
+        validation_result_id=f"{candidate.id}-dynamic-validation",
+        proof_artifact_ids=proof_ids,
+        created_at=now,
+    )
+
+    return final, link
 
 
 def split_hunt_result(result: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

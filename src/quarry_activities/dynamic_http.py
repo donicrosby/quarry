@@ -131,7 +131,7 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
     elapsed_ms = int(time.monotonic() * 1000) - start_ms
 
     # Capture request artifact (auth headers already redacted by http_utils)
-    capture_request_artifact(store, request)
+    req_artifact = capture_request_artifact(store, request)
 
     # Cap and scrub response body before storing
     raw_body = response.text[:MAX_BODY_BYTES] if response.text else ""
@@ -150,4 +150,5 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         elapsed_ms=elapsed_ms,
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
+        request_artifact_ref=req_artifact.id,
     )

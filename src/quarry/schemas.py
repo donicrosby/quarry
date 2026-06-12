@@ -1133,6 +1133,8 @@ class HttpResponseCapture(BaseModel):
     elapsed_ms: int
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
+    # ArtifactRef id for the captured request (set by http_request_activity).
+    request_artifact_ref: str | None = None
 
 
 class DynamicEvidenceLink(BaseModel):
