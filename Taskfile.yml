@@ -93,6 +93,18 @@ tasks:
       - bash scripts/demo.sh
 
   benchmark-local:
-    desc: Run the local vulnerable-app benchmark.
+    desc: |
+      Run the local vulnerable-app benchmark.
+      Pass DYNAMIC=1 to enable live dynamic validation (requires target on port 9000).
+      Pass TARGET_HOST to override the host used to reach the target from inside Docker
+      (default: host.docker.internal; Colima users: host.lima.internal; Linux: 172.17.0.1).
+    vars:
+      DYNAMIC: '{{.DYNAMIC | default ""}}'
+      TARGET_HOST: '{{.TARGET_HOST | default "host.docker.internal"}}'
     cmds:
-      - uv run quarry benchmark local
+      - |
+        if [ -n "{{.DYNAMIC}}" ]; then
+          uv run quarry benchmark local --target http://{{.TARGET_HOST}}:9000 --dynamic-validation --live-prove
+        else
+          uv run quarry benchmark local
+        fi

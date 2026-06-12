@@ -58,6 +58,7 @@ def validate_impl(
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
+    turn_timeout_seconds: int = 120,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -112,6 +113,7 @@ def validate_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        turn_timeout_seconds=turn_timeout_seconds,
     )
 
     # Parse the ternary verdict from the loop result
@@ -241,6 +243,7 @@ def _validate_activity_impl(
         budget_spec=budget_spec,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
+        turn_timeout_seconds=role_cfg.turn_timeout_seconds,
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

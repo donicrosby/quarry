@@ -1,0 +1,136 @@
+"""http_request_activity — live HTTP corroboration on the quarry-dynamic queue.
+
+This activity is the sole point where an HTTP socket is opened by the agentic
+pipeline.  It enforces allowed_hosts independently (Layer 6 of ADR-017's six
+safety layers) and runs on the ``quarry-dynamic`` Temporal task queue, separate
+from ``quarry-control`` so workflow determinism is preserved (ADR-014).
+
+Non-idempotent HTTP methods (POST, PUT, DELETE, PATCH) must not be auto-retried
+by Temporal — the workflow dispatches these activities as non-retryable.
+
+The response body is scrubbed and wrapped in ``<target_content>`` tags before
+re-entering any prompt (ADR-017 "Untrusted-evidence handling").
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import httpx
+from temporalio import activity
+
+from quarry.schemas import (
+    HttpRequestSpec,
+    HttpResponseCapture,
+    RedactionStatus,
+    TargetEndpoint,
+)
+from quarry_activities.inputs import HttpRequestActivityInput
+from quarry_artifacts.http_utils import capture_request_artifact, capture_response_artifact
+from quarry_artifacts.local import LocalArtifactStore
+from quarry_models.redaction import Scrubber
+
+# Body cap — applied before scrubbing so prompts never receive huge payloads.
+MAX_BODY_BYTES = 10 * 1024  # 10KB
+
+
+def enforce_allowed_hosts(host: str, allowed_hosts: tuple[str, ...]) -> None:
+    """Raise ValueError if *host* is not in *allowed_hosts*.
+
+    This is Layer 6's independent enforcement — it runs inside the activity
+    worker, separate from any ToolRunner or workflow check.  An empty
+    allowed_hosts list blocks all hosts (fail-closed).
+    """
+    if not allowed_hosts:
+        msg = (
+            f"Request to '{host}' blocked: allowed_hosts is empty. "
+            "Set Target.allowed_hosts to authorize live HTTP requests."
+        )
+        raise ValueError(msg)
+    if host not in allowed_hosts:
+        msg = (
+            f"Request to '{host}' is outside the allowed scope. "
+            f"Allowed hosts: {list(allowed_hosts)}"
+        )
+        raise ValueError(msg)
+
+
+def scrub_and_wrap_body(body: str, scrubber: Scrubber | None = None) -> str:
+    """Scrub *body* and wrap in ``<target_content>`` tags.
+
+    HTTP response bodies are attacker-controlled content.  They must be
+    scrubbed before re-entering any model prompt.  The ``<target_content>``
+    boundary is mandatory — there is no fallback.
+    """
+    s = scrubber or Scrubber()
+    result = s.scrub(body)
+    return f"<target_content>{result.text}</target_content>"
+
+
+@activity.defn(name="http-request")
+async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCapture:
+    """Execute a scoped live HTTP request and return the captured response.
+
+    Safety:
+    - Enforces allowed_hosts independently (Layer 6).
+    - Scrubs the response body before returning.
+    - Does not auto-retry non-idempotent methods (handled by workflow dispatch).
+    """
+    spec = HttpRequestSpec.model_validate_json(inp.spec_json)
+    endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
+
+    # Layer 6: independent allowed_hosts enforcement in the worker.
+    enforce_allowed_hosts(endpoint.host, inp.allowed_hosts)
+
+    base_url = (
+        f"{endpoint.scheme}://{endpoint.host}:{endpoint.port}{endpoint.base_path.rstrip('/')}"
+    )
+    url = f"{base_url}{spec.path}"
+
+    store = LocalArtifactStore(
+        Path(inp.artifact_store_path) / inp.scan_id,
+    )
+
+    # Per-run scrubber.  If credential resolution is wired later, the resolved
+    # secret value is registered here before the request is sent (ADR-018 §4.4).
+    run_scrubber = Scrubber()
+
+    # Build request headers (no auth injection yet — handled in Phase 5)
+    headers: dict[str, str] = dict(spec.headers)
+
+    start_ms = int(time.monotonic() * 1000)
+
+    with httpx.Client(timeout=10.0) as client:
+        request = client.build_request(
+            method=spec.method,
+            url=url,
+            headers=headers,
+            content=spec.body.encode() if spec.body else None,
+        )
+        response = client.send(request)
+
+    elapsed_ms = int(time.monotonic() * 1000) - start_ms
+
+    # Capture request artifact (auth headers already redacted by http_utils)
+    req_artifact = capture_request_artifact(store, request)
+
+    # Cap and scrub response body before storing
+    raw_body = response.text[:MAX_BODY_BYTES] if response.text else ""
+    scrub_result = run_scrubber.scrub(raw_body)
+    scrubber_hits = scrub_result.hits
+    redaction_status = (
+        RedactionStatus.REDACTED if scrubber_hits > 0 else RedactionStatus.NOT_REQUIRED
+    )
+
+    resp_artifact = capture_response_artifact(store, response)
+
+    return HttpResponseCapture(
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        body_artifact_ref=resp_artifact.id,
+        elapsed_ms=elapsed_ms,
+        scrubber_hits=scrubber_hits,
+        redaction_status=redaction_status,
+        request_artifact_ref=req_artifact.id,
+    )

@@ -79,6 +79,7 @@ def dedup_impl(
     scan_log: list[str] | None = None,
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
+    turn_timeout_seconds: int = 120,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
@@ -160,6 +161,7 @@ def dedup_impl(
             cost_per_iteration=cost_per_iteration,
             provider_policy=provider_policy,
             event_sink=event_sink,
+            turn_timeout_seconds=turn_timeout_seconds,
         )
 
         if loop_result.final_answer and isinstance(loop_result.final_answer, DedupeResponse):
@@ -261,6 +263,7 @@ def _deduplicate_activity_impl(
         scan_log=scan_log,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, scan_id),
+        turn_timeout_seconds=role_cfg.turn_timeout_seconds,
     )
 
     scan_id = parsed[0].scan_id if parsed else ""

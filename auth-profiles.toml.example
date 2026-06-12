@@ -1,0 +1,86 @@
+# auth-profiles.toml.example — copy to auth-profiles.toml and fill in env-var names.
+#
+# NEVER put actual token values here.  All secret values must live in environment
+# variables (QUARRY_SECRET_* prefix convention, ADR-018).  This file is safe to commit;
+# the live auth-profiles.toml is gitignored.
+#
+# Pass to quarry via --auth-profiles auth-profiles.toml  (coming in Phase 6 wiring).
+
+# ---------------------------------------------------------------------------
+# Bearer token (e.g. JWT, API key carried as Authorization: Bearer <token>)
+# ---------------------------------------------------------------------------
+[[profiles]]
+name = "user1"
+kind = "bearer"
+
+[profiles.secret_ref]
+env = "QUARRY_SECRET_USER1_TOKEN"   # export QUARRY_SECRET_USER1_TOKEN=<token>
+
+# ---------------------------------------------------------------------------
+# HTTP Basic auth (username + password)
+# ---------------------------------------------------------------------------
+[[profiles]]
+name = "basic-admin"
+kind = "basic"
+username = "admin"   # non-secret; ok to commit
+
+[profiles.secret_ref]
+env = "QUARRY_SECRET_ADMIN_PASSWORD"  # export QUARRY_SECRET_ADMIN_PASSWORD=<password>
+
+# ---------------------------------------------------------------------------
+# Static custom header  (e.g. X-Api-Key: <value>)
+# ---------------------------------------------------------------------------
+[[profiles]]
+name = "api-key"
+kind = "static_header"
+name_hint = "X-Api-Key"
+
+[profiles.secret_ref]
+env = "QUARRY_SECRET_API_KEY"   # export QUARRY_SECRET_API_KEY=<key>
+
+# ---------------------------------------------------------------------------
+# Login flow — POST credentials to get a session token
+# ---------------------------------------------------------------------------
+[[profiles]]
+name = "login-user1"
+kind = "login_flow"
+
+[profiles.login]
+path = "/auth/login"
+ttl_seconds = 3600          # re-login after 1 hour or on 401
+
+[profiles.login.field_template]
+username = "user1@example.com"
+password = "${secret:QUARRY_SECRET_USER1_PASSWORD}"
+
+[profiles.login.extract]
+from_json = "$.access_token"
+inject_as = "bearer"
+
+# ---------------------------------------------------------------------------
+# Login flow with TOTP
+# ---------------------------------------------------------------------------
+[[profiles]]
+name = "login-admin-totp"
+kind = "login_flow"
+
+[profiles.login]
+path = "/auth/login"
+ttl_seconds = 1800
+
+[profiles.login.field_template]
+username = "admin@example.com"
+password = "${secret:QUARRY_SECRET_ADMIN_PASSWORD}"
+otp_code = "${totp}"
+
+[profiles.login.extract]
+from_json = "$.token"
+inject_as = "bearer"
+
+[profiles.totp]
+digits = 6
+period_seconds = 30
+algorithm = "SHA1"
+
+[profiles.totp.seed_ref]
+env = "QUARRY_SECRET_ADMIN_TOTP_SEED"  # base32-encoded TOTP seed

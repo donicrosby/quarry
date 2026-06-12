@@ -20,6 +20,10 @@ class StartScanRequest(BaseModel):
     output_dir: str = ".quarry"
     db_path: str = ".quarry/quarry.db"
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_server_vuln_classes)
+    # Live dynamic validation flags (ADR-017). CLI gates are authoritative;
+    # target_url presence alone must NOT enable live validation.
+    dynamic_validation_enabled: bool = False
+    live_prove_enabled: bool = False
 
 
 class DiffScanRequest(BaseModel):

@@ -52,7 +52,35 @@ def run_scan(
         bool,
         typer.Option("--verbose", help="Stream agent events to stdout as the scan runs."),
     ] = False,
+    dynamic_validation: Annotated[
+        bool,
+        typer.Option(
+            "--dynamic-validation",
+            help=(
+                "Enable live HTTP validation against the target URL (ADR-017). "
+                "Requires --target. CLI flag is the sole authority — "
+                "--target alone does not enable live traffic."
+            ),
+        ),
+    ] = False,
+    live_prove: Annotated[
+        bool,
+        typer.Option(
+            "--live-prove",
+            help=(
+                "Enable live HTTP proof-of-concept requests for NEEDS_PROOF findings (ADR-017). "
+                "Requires --target and --dynamic-validation."
+            ),
+        ),
+    ] = False,
 ) -> None:
+    if (dynamic_validation or live_prove) and target is None:
+        typer.echo(
+            "Error: --target is required when --dynamic-validation or --live-prove is set.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     focus_classes: list[VulnerabilityClass] | None = None
     if focus is not None:
         tokens = [t.strip() for t in focus.split(",") if t.strip()]
@@ -65,7 +93,16 @@ def run_scan(
     settings = QuarrySettings()
     try:
         lines = asyncio.run(
-            _run_scan_command(settings, repo, target, async_mode, focus_classes, verbose)
+            _run_scan_command(
+                settings,
+                repo,
+                target,
+                async_mode,
+                focus_classes,
+                verbose,
+                dynamic_validation_enabled=dynamic_validation,
+                live_prove_enabled=live_prove,
+            )
         )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
@@ -160,13 +197,20 @@ async def _run_scan_command(
     async_mode: bool,
     focus_classes: list[VulnerabilityClass] | None = None,
     verbose: bool = False,
+    dynamic_validation_enabled: bool = False,
+    live_prove_enabled: bool = False,
 ) -> list[str]:
     # A git URL (--repo https://… / git@… / ssh://…) is cloned by the workflow;
     # a local path is scanned in place.
     repo_url = repo if is_git_url(repo) else None
     async with QuarryClient(base_url=settings.server_url) as client:
         result = await client.start_scan(
-            repo_path=repo, target_url=target, vuln_classes=focus_classes, repo_url=repo_url
+            repo_path=repo,
+            target_url=target,
+            vuln_classes=focus_classes,
+            repo_url=repo_url,
+            dynamic_validation_enabled=dynamic_validation_enabled,
+            live_prove_enabled=live_prove_enabled,
         )
         scan_id = result["scan_id"]
         if async_mode:
@@ -372,11 +416,28 @@ def benchmark_local(
         str, typer.Option("--ground-truth", help="Path to ground truth JSON")
     ] = "tests/golden/ground_truth/vulnerable-fastapi.json",
     target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
+    dynamic_validation: Annotated[
+        bool,
+        typer.Option(
+            "--dynamic-validation/--no-dynamic-validation", help="Enable live dynamic validation"
+        ),
+    ] = False,
+    live_prove: Annotated[
+        bool,
+        typer.Option(
+            "--live-prove/--no-live-prove",
+            help="Probe confirmed findings to collect proof artifacts",
+        ),
+    ] = False,
 ) -> None:
     """Scan the demo app via the server and compare findings to ground truth."""
     settings = QuarrySettings()
     try:
-        lines = asyncio.run(_benchmark_local_command(settings, repo, ground_truth, target))
+        lines = asyncio.run(
+            _benchmark_local_command(
+                settings, repo, ground_truth, target, dynamic_validation, live_prove
+            )
+        )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
     except FileNotFoundError:
@@ -406,6 +467,8 @@ async def _benchmark_local_command(
     repo: str,
     ground_truth: str,
     target: str | None,
+    dynamic_validation: bool = False,
+    live_prove: bool = False,
 ) -> list[str]:
     if ground_truth_is_inside_repo(repo, ground_truth):
         raise ValueError(
@@ -420,7 +483,11 @@ async def _benchmark_local_command(
     async with QuarryClient(base_url=settings.server_url) as client:
         started = time.monotonic()
         result = await client.start_scan(
-            repo_path=repo, target_url=target, vuln_classes=truth_classes
+            repo_path=repo,
+            target_url=target,
+            vuln_classes=truth_classes,
+            dynamic_validation_enabled=dynamic_validation,
+            live_prove_enabled=live_prove,
         )
         scan_id = result["scan_id"]
         while True:

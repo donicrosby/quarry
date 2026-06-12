@@ -108,6 +108,29 @@ def test_idor_found() -> None:
     assert result.expected >= 4  # secrets, idor, command_injection, ssrf
 
 
+def test_benchmark_local_accepts_dynamic_flags() -> None:
+    """benchmark local must expose --dynamic-validation and --live-prove options."""
+    from typer.testing import CliRunner
+
+    from quarry_cli.main import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["benchmark", "local", "--help"])
+    assert "--dynamic-validation" in result.output
+    assert "--live-prove" in result.output
+
+
+def test_benchmark_local_dynamic_flags_default_false() -> None:
+    """--dynamic-validation and --live-prove must default to False."""
+    import inspect
+
+    from quarry_cli.main import benchmark_local
+
+    sig = inspect.signature(benchmark_local)
+    assert sig.parameters["dynamic_validation"].default is False
+    assert sig.parameters["live_prove"].default is False
+
+
 def test_ground_truth_inside_repo_is_detected() -> None:
     """The benchmark guard flags an answer key sitting inside the scanned repo."""
     from quarry_cli.main import ground_truth_is_inside_repo

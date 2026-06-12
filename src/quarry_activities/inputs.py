@@ -220,3 +220,42 @@ class ValidateCommandInjectionInput(BaseModel):
     target_url: str | None = None
     allowed_hosts: tuple[str, ...] = ()
     artifact_store_path: str | None = None
+
+
+class HttpRequestActivityInput(BaseModel):
+    """Input payload for http_request_activity (ADR-017, Layer 6).
+
+    All values are JSON-serializable primitives at the Temporal boundary.
+    Richer domain objects are reconstructed inside the activity.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    spec_json: str  # HttpRequestSpec serialized
+    target_endpoint_json: str  # TargetEndpoint serialized
+    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
+    artifact_store_path: str  # path for LocalArtifactStore
+    scan_id: str
+    candidate_finding_id: str
+    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+
+
+class SandboxExecActivityInput(BaseModel):
+    """Input payload for sandbox_exec_activity (ADR-017 §5 — transport-agnostic prove).
+
+    Mirrors HttpRequestActivityInput: all values are JSON-serializable primitives at the
+    Temporal boundary.  Richer domain objects (SandboxExecSpec, TargetEndpoint,
+    ProveCorpus, AuthProfileSet) are reconstructed inside the activity.
+    target_endpoint_json is None for CLI-only prove (no network egress).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    spec_json: str  # SandboxExecSpec serialized
+    target_endpoint_json: str | None  # TargetEndpoint serialized; None = no-network (CLI prove)
+    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement (empty for CLI prove)
+    artifact_store_path: str  # path for LocalArtifactStore
+    scan_id: str
+    candidate_finding_id: str
+    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+    prove_corpus_json: str | None = None  # ProveCorpus serialized; None = HTTP prove

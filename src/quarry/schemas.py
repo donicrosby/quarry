@@ -279,6 +279,7 @@ class ModelPanelEntry(BaseModel):
     provider: str
     model: str
     rate_limit_rpm: int = 30
+    turn_timeout_seconds: int = 120
 
 
 class ScopeExclusion(BaseModel):
@@ -1133,6 +1134,8 @@ class HttpResponseCapture(BaseModel):
     elapsed_ms: int
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
+    # ArtifactRef id for the captured request (set by http_request_activity).
+    request_artifact_ref: str | None = None
 
 
 class DynamicEvidenceLink(BaseModel):
@@ -1145,10 +1148,236 @@ class DynamicEvidenceLink(BaseModel):
     candidate_finding_id: str
 
 
+# ---------------------------------------------------------------------------
+# Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
+# ---------------------------------------------------------------------------
+
+
+class EnvProfile(StrEnum):
+    """Named, vetted environment profiles for sandbox execution.
+
+    The prove agent picks a NAME, never raw env-var values.  Credential injection
+    (QUARRY_INJECTED_CRED_*) is the sole exception and is resolved worker-side (ADR-018).
+    """
+
+    NONE = "none"  # empty env — default; tightest containment
+    REPO_READONLY = "repo_readonly"  # minimal PATH + repo root only, no credentials
+
+
+class SandboxExecSpec(BaseModel):
+    """A CLI/binary invocation the prove agent proposes.  No live I/O in agent context.
+
+    Parallels HttpRequestSpec: carries no inline secrets; auth_profile and env_profile
+    are NAMES resolved worker-side at dispatch (ADR-018).  input_files are crafted
+    attacker-controlled files staged into the sandbox working dir before execution.
+    """
+
+    command: str
+    args: list[str] = Field(default_factory=list)
+    stdin: str | None = None
+    env_profile: EnvProfile = EnvProfile.NONE
+    cwd: str = "."  # relative to sandbox working dir; restricted worker-side
+    input_files: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = 30  # hard-capped worker-side (max 60 s)
+    auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("auth_profile")
+    @classmethod
+    def _reject_inline_credential(cls, v: str | None) -> str | None:
+        if v is not None and _CREDENTIAL_RE.match(v):
+            msg = (
+                f"auth_profile looks like an inline credential: '{v[:12]}…'. "
+                "Use a named credential reference, never an inline token."
+            )
+            raise ValueError(msg)
+        return v
+
+
+class SandboxExecCapture(BaseModel):
+    """Captured result of a sandbox execution.  Parallels HttpResponseCapture.
+
+    stdout/stderr stored as artifacts (TOOL_STDOUT/TOOL_STDERR), never inline.
+    Both streams pass through Scrubber.scrub() + <target_content> wrap before
+    any prompt re-entry (same policy as HTTP response bodies).
+    """
+
+    exit_code: int
+    stdout_artifact_ref: str  # ArtifactRef id — scrubbed, size-capped TOOL_STDOUT
+    stderr_artifact_ref: str  # ArtifactRef id — scrubbed, size-capped TOOL_STDERR
+    elapsed_ms: int
+    scrubber_hits: int = 0
+    redaction_status: RedactionStatus
+    timed_out: bool = False
+
+
+class ProveCorpus(BaseModel):
+    """A dataset the prove sandbox materializes as the CLI's working input.
+
+    The CLI target cannot be proven in isolation — it needs a corpus to operate on
+    (e.g. a dbt project for dbt Core, a sample repo for a linter).  This is staged
+    into the sandbox working dir alongside any crafted input_files.
+    """
+
+    source: str  # local path or git URL
+    materialize_as: str = "project"  # subdir created inside the sandbox working dir
+    setup_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
+
+    @field_validator("materialize_as")
+    @classmethod
+    def _reject_non_relative(cls, v: str) -> str:
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute() or ".." in p.parts:
+            msg = (
+                f"materialize_as must be a simple relative path, got '{v}'. "
+                "Absolute paths and path traversal (..) are rejected."
+            )
+            raise ValueError(msg)
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Target authentication schemas (ADR-018)
+# ---------------------------------------------------------------------------
+
+# Extend the inline-credential pattern to cover common token formats.
+_SECRET_REF_ENV_CREDENTIAL_RE = re.compile(
+    r"^(sk-[A-Za-z0-9\-_]{8,}|ghp_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9._\-]{10,}"
+    r"|cpk_[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9._\-]{20,})$"
+)
+
+# Env var prefixes whose values are always treated as secrets by the scrubber.
+SENSITIVE_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "QUARRY_SECRET_",  # prefix convention (ADR-018)
+        "CHUTES_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GITHUB_TOKEN",
+        "GIT_CLONE_TOKEN",
+    }
+)
+
+
+class SecretRef(BaseModel):
+    """Pointer to a secret value held in an environment variable.
+
+    The value is never stored here — only the env-var name.
+    """
+
+    env: str  # e.g. "QUARRY_SECRET_ADMIN_TOKEN"
+
+    @field_validator("env")
+    @classmethod
+    def _env_nonempty(cls, v: str) -> str:
+        if not v:
+            msg = "SecretRef.env must be a non-empty environment variable name."
+            raise ValueError(msg)
+        return v
+
+
+class TotpConfig(BaseModel):
+    """TOTP configuration for OTP-gated login flows (RFC 6238)."""
+
+    seed_ref: SecretRef  # base32 TOTP seed in env
+    digits: int = 6
+    period_seconds: int = 30
+    algorithm: Literal["SHA1", "SHA256", "SHA512"] = "SHA1"
+
+
+class CredentialExtract(BaseModel):
+    """Where to find the credential in the login response."""
+
+    from_json: str | None = None  # JSONPath expression, e.g. "$.access_token"
+    from_cookie: str | None = None  # cookie name
+    from_header: str | None = None  # response header name
+    inject_as: Literal["bearer", "cookie", "header"]  # how to attach to subsequent requests
+
+
+class LoginStep(BaseModel):
+    """A single login flow (POST credentials, receive token/cookie)."""
+
+    path: str  # login endpoint path, relative to target base_path
+    field_template: dict[str, str]  # placeholders: ${secret:ENV}, ${totp}, ${username}
+    extract: CredentialExtract
+    ttl_seconds: int | None = None  # cache TTL; re-login on expiry or 401
+
+
+class AuthProfileKind(StrEnum):
+    BEARER = "bearer"
+    BASIC = "basic"
+    STATIC_HEADER = "static_header"
+    COOKIE = "cookie"
+    LOGIN_FLOW = "login_flow"
+
+
+class AuthProfile(BaseModel):
+    """Declares how to authenticate to a target.  No inline secrets ever.
+
+    Secret values live in env vars under QUARRY_SECRET_*.  The profile name
+    is what HttpRequestSpec.auth_profile carries; the concrete credential is
+    resolved worker-side at dispatch time and never returned to the agent.
+    """
+
+    name: str
+    kind: AuthProfileKind
+    secret_ref: SecretRef | None = None  # bearer / basic / static_header / cookie
+    username: str | None = None  # non-secret (basic auth / login template)
+    name_hint: str | None = None  # custom header or cookie name
+    login: LoginStep | None = None  # required when kind == login_flow
+    totp: TotpConfig | None = None  # TOTP when login is OTP-gated
+
+    @field_validator("secret_ref")
+    @classmethod
+    def _reject_inline_secret_env(cls, v: SecretRef | None) -> SecretRef | None:
+        if v is not None and _SECRET_REF_ENV_CREDENTIAL_RE.match(v.env):
+            msg = (
+                f"SecretRef.env looks like an inline credential: '{v.env[:12]}…'. "
+                "Use an environment variable name (e.g. QUARRY_SECRET_TOKEN), "
+                "never an inline token value."
+            )
+            raise ValueError(msg)
+        return v
+
+
+class AuthProfileSet(BaseModel):
+    """The complete set of auth profiles for a scan, loaded from auth-profiles.toml."""
+
+    profiles: list[AuthProfile] = Field(default_factory=lambda: [])
+
+    @field_validator("profiles")
+    @classmethod
+    def _reject_duplicate_names(cls, v: list[AuthProfile]) -> list[AuthProfile]:
+        names = [p.name for p in v]
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                msg = f"AuthProfileSet contains duplicate profile name: '{name}'."
+                raise ValueError(msg)
+            seen.add(name)
+        return v
+
+    def get(self, name: str) -> AuthProfile | None:
+        """Return the profile with the given name, or None."""
+        for p in self.profiles:
+            if p.name == name:
+                return p
+        return None
+
+
 def local_scan_profile(
     target_url: str | None = None,
     vuln_classes: list[VulnerabilityClass] | None = None,
+    dynamic_validation_enabled: bool = False,
 ) -> ScanProfile:
+    """Build a local fast-scan profile.
+
+    dynamic_validation_enabled is explicitly controlled by the caller
+    (e.g. the CLI's --dynamic-validation flag).  A bare target_url does NOT
+    flip the live-HTTP gate — that was an explicitly-rejected alternative in
+    ADR-017, section "Alternatives considered".
+    """
     return ScanProfile(
         id="local-fast",
         name="Local Fast",
@@ -1158,6 +1387,6 @@ def local_scan_profile(
             VulnerabilityClass.IDOR,
             VulnerabilityClass.COMMAND_INJECTION,
         ],
-        dynamic_validation_enabled=target_url is not None,
+        dynamic_validation_enabled=dynamic_validation_enabled,
         integrations_enabled=True,  # dry-run by default (dry_run_integrations=True)
     )

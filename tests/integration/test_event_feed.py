@@ -172,3 +172,59 @@ class TestEventsEndpoint:
         for event in data:
             # All payloads must be JSON dicts
             assert isinstance(event["payload"], dict)
+
+
+class TestEventsSseEndpoint:
+    """SSE upgrade: same endpoint, negotiated via Accept: text/event-stream."""
+
+    async def test_sse_response_has_event_stream_content_type(
+        self, app_with_mock_repo: httpx.AsyncClient, test_events: list[WorkflowEvent]
+    ) -> None:
+        """Requesting text/event-stream returns the correct content-type."""
+        response = await app_with_mock_repo.get(
+            "/scans/scan-feed-test/events",
+            headers={"Accept": "text/event-stream"},
+        )
+        assert response.status_code == 200
+        ct = response.headers.get("content-type", "")
+        assert "text/event-stream" in ct
+
+    async def test_sse_response_body_contains_data_lines(
+        self, app_with_mock_repo: httpx.AsyncClient, test_events: list[WorkflowEvent]
+    ) -> None:
+        """Each event is emitted as a 'data: {...}\\n\\n' SSE frame."""
+        response = await app_with_mock_repo.get(
+            "/scans/scan-feed-test/events",
+            headers={"Accept": "text/event-stream"},
+        )
+        assert response.status_code == 200
+        body = response.text
+        data_lines = [line for line in body.splitlines() if line.startswith("data:")]
+        assert len(data_lines) == len(test_events)
+
+    async def test_sse_data_lines_are_valid_json(
+        self, app_with_mock_repo: httpx.AsyncClient
+    ) -> None:
+        """Every 'data:' SSE frame must parse as valid JSON."""
+        import json
+
+        response = await app_with_mock_repo.get(
+            "/scans/scan-feed-test/events",
+            headers={"Accept": "text/event-stream"},
+        )
+        assert response.status_code == 200
+        for line in response.text.splitlines():
+            if line.startswith("data:"):
+                payload_str = line[len("data:") :].strip()
+                parsed = json.loads(payload_str)
+                assert "event_type" in parsed
+
+    async def test_json_poll_still_works_alongside_sse(
+        self, app_with_mock_repo: httpx.AsyncClient, test_events: list[WorkflowEvent]
+    ) -> None:
+        """Backward compat: plain GET without Accept header returns JSON list."""
+        response = await app_with_mock_repo.get("/scans/scan-feed-test/events")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == len(test_events)  # type: ignore[arg-type]

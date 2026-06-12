@@ -162,6 +162,7 @@ def gapfill_impl(
     hunter_gaps: list[dict[str, Any]] | None = None,
     existing_findings: list[dict[str, Any]] | None = None,
     event_sink: Any | None = None,
+    turn_timeout_seconds: int = 120,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -236,6 +237,7 @@ def gapfill_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        turn_timeout_seconds=turn_timeout_seconds,
     )
 
     # Merge hunter-reported gaps + agent gaps, deduped by (vuln_class, scope).
@@ -383,6 +385,7 @@ def _gapfill_activity_impl(
         hunter_gaps=hunter_gaps,
         existing_findings=existing_findings,
         event_sink=make_event_sink(db_path, ledger.scan_id),
+        turn_timeout_seconds=role_cfg.turn_timeout_seconds,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

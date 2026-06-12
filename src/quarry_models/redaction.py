@@ -5,6 +5,11 @@ model prompt. Secret values are replaced with stable ``[REDACTED_SECRET_N]``
 placeholders: the same secret value maps to the same placeholder within one
 scrub pass, so analysis context is preserved without leaking the value. Hosted
 models must never receive raw secrets.
+
+``Scrubber`` is a stateful per-run instance that extends the built-in patterns
+with a per-instance denylist (``register_secret``).  The module-level ``scrub``
+function is a convenience wrapper around a shared stateless instance and is
+unchanged for all existing callers.
 """
 
 from __future__ import annotations
@@ -45,34 +50,82 @@ class ScrubResult:
     placeholders: dict[str, str] = field(default_factory=_empty_placeholders)
 
 
+class Scrubber:
+    """Stateful scrubber with a per-instance secret denylist.
+
+    Use ``register_secret(value)`` to add a concrete credential value so it is
+    redacted from all subsequent ``scrub()`` calls on this instance, even if it
+    matches no built-in pattern.  Registering an empty string is silently ignored
+    to prevent blanket redaction of the empty string.
+
+    Each ``Scrubber`` instance has its own independent denylist; instances do not
+    share state.  Use the module-level ``scrub()`` function for stateless scrubbing
+    (it delegates to a shared default instance with no denylist).
+    """
+
+    def __init__(self) -> None:
+        self._denylist: list[str] = []
+
+    def register_secret(self, value: str) -> None:
+        """Add *value* to this instance's denylist.
+
+        The value will be redacted from all subsequent ``scrub()`` calls.
+        Registering an empty string is a no-op.
+        """
+        if value and value not in self._denylist:
+            self._denylist.append(value)
+
+    def scrub(self, text: str) -> ScrubResult:
+        """Redact built-in secret patterns plus all registered denylist values."""
+        placeholders: dict[str, str] = {}
+
+        def placeholder_for(secret: str) -> str:
+            existing = placeholders.get(secret)
+            if existing is not None:
+                return existing
+            token = f"[REDACTED_SECRET_{len(placeholders) + 1}]"
+            placeholders[secret] = token
+            return token
+
+        def replace_value(match: re.Match[str]) -> str:
+            key, sep, open_quote, secret, close_quote = match.group(1, 2, 3, 4, 5)
+            return f"{key}{sep}{open_quote}{placeholder_for(secret)}{close_quote}"
+
+        redacted = _ASSIGNMENT_PATTERN.sub(replace_value, text)
+
+        for pattern in _PATTERNS[:-1]:
+
+            def replace_whole(match: re.Match[str]) -> str:
+                return placeholder_for(match.group(0))
+
+            redacted = pattern.sub(replace_whole, redacted)
+
+        # Denylist pass: explicit secrets registered by the caller.
+        for secret in self._denylist:
+            if secret in redacted:
+                token = placeholder_for(secret)
+                redacted = redacted.replace(secret, token)
+
+        # Consistency pass: once a value is known to be a secret, scrub any remaining
+        # bare occurrences too. A value redacted once must never appear in the clear.
+        for secret, token in placeholders.items():
+            redacted = redacted.replace(secret, token)
+
+        return ScrubResult(text=redacted, hits=len(placeholders), placeholders=placeholders)
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience (unchanged API for all existing callers)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SCRUBBER = Scrubber()
+
+
 def scrub(text: str) -> ScrubResult:
-    """Replace secret-like substrings with stable ``[REDACTED_SECRET_N]`` tokens."""
-    placeholders: dict[str, str] = {}
+    """Replace secret-like substrings with stable ``[REDACTED_SECRET_N]`` tokens.
 
-    def placeholder_for(secret: str) -> str:
-        existing = placeholders.get(secret)
-        if existing is not None:
-            return existing
-        token = f"[REDACTED_SECRET_{len(placeholders) + 1}]"
-        placeholders[secret] = token
-        return token
-
-    def replace_value(match: re.Match[str]) -> str:
-        key, sep, open_quote, secret, close_quote = match.group(1, 2, 3, 4, 5)
-        return f"{key}{sep}{open_quote}{placeholder_for(secret)}{close_quote}"
-
-    redacted = _ASSIGNMENT_PATTERN.sub(replace_value, text)
-
-    for pattern in _PATTERNS[:-1]:
-
-        def replace_whole(match: re.Match[str]) -> str:
-            return placeholder_for(match.group(0))
-
-        redacted = pattern.sub(replace_whole, redacted)
-
-    # Consistency pass: once a value is known to be a secret, scrub any remaining
-    # bare occurrences too. A value redacted once must never appear in the clear.
-    for secret, token in placeholders.items():
-        redacted = redacted.replace(secret, token)
-
-    return ScrubResult(text=redacted, hits=len(placeholders), placeholders=placeholders)
+    This is a stateless function that applies only the built-in patterns.
+    For per-run scrubbing with a registered denylist, use ``Scrubber`` directly.
+    """
+    # Delegate to a fresh Scrubber so each call is independent (no shared state).
+    return Scrubber().scrub(text)
