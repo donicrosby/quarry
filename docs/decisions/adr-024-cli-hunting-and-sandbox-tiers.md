@@ -1,4 +1,4 @@
-# ADR-022: CLI hunting path — sandbox tiers, network blob artifact store, and find-side CLI-awareness
+# ADR-024: CLI hunting path — sandbox tiers, network blob artifact store, and find-side CLI-awareness
 
 **Status:** Draft (follow-on to ADR-017; implements the deferred §5 tiers and CLI-unblocking work)  
 **Date:** 2026-06-12  
