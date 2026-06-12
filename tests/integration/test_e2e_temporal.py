@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from temporalio import activity
 from temporalio.client import Client, WorkflowFailureError
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import CancelledError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -29,20 +30,33 @@ from quarry.schemas import (
     Target,
     local_scan_profile,
 )
+from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
+from quarry_activities.diff import git_diff_commits
+from quarry_activities.dynamic_validation import (
+    validate_command_injection_candidate_activity,
+    validate_idor_candidate_activity,
+)
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.hunt import hunt_activity
 from quarry_activities.integrations import deliver_integrations_activity
+from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
+from quarry_activities.recon_subsystem import recon_subsystem_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
 from quarry_activities.repo import create_repository_snapshot, persist_scan_state
 from quarry_activities.reporting import render_markdown_report_activity
 from quarry_activities.target import start_local_target, terminate_local_target
 from quarry_activities.validate import validate_activity
-from quarry_activities.validation import validate_secret_candidate
+from quarry_activities.validation import (
+    promote_to_final_finding_metadata,
+    validate_secret_candidate,
+)
 from quarry_persistence import QuarryRepository
+from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 from quarry_workflows import RunScanInput, RunScanWorkflow
 from quarry_workflows.diff_scan import RunDiffScanInput, RunDiffScanWorkflow
 
@@ -552,11 +566,14 @@ async def test_e2e_resume_does_not_duplicate_findings(
 
 
 async def test_e2e_concurrent_scans(
-    temporal_client: Client,
-    temporal_worker: Worker,
     tmp_path: Path,
 ) -> None:
-    """Two concurrent full scans complete independently with their own results."""
+    """Two concurrent full scans complete independently with their own results.
+
+    Uses its own start_local environment (not the shared time-skipping env) to
+    avoid a race in the time-skip server where concurrent workflow history sizes
+    diverge when two workflows advance simultaneously.
+    """
     repo_path = tmp_path / "repo"
     _create_repo_with_secrets(repo_path)
 
@@ -565,28 +582,68 @@ async def test_e2e_concurrent_scans(
     out_1 = tmp_path / "out1"
     out_2 = tmp_path / "out2"
 
-    h1 = await temporal_client.start_workflow(
-        RunScanWorkflow.run,
-        RunScanInput(
-            repo_path=str(repo_path),
-            db_path=str(db_1),
-            output_dir=str(out_1),
-        ),
-        id="e2e-concurrent-1",
-        task_queue="quarry-control",
+    task_queue = "quarry-concurrent-test"
+    env = await WorkflowEnvironment.start_local(
+        data_converter=pydantic_data_converter,
     )
-    h2 = await temporal_client.start_workflow(
-        RunScanWorkflow.run,
-        RunScanInput(
-            repo_path=str(repo_path),
-            db_path=str(db_2),
-            output_dir=str(out_2),
-        ),
-        id="e2e-concurrent-2",
-        task_queue="quarry-control",
-    )
-
-    r1, r2 = await asyncio.gather(h1.result(), h2.result())
+    executor = ThreadPoolExecutor(max_workers=10)
+    try:
+        worker = Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[RunScanWorkflow],
+            activities=[
+                create_repository_snapshot,
+                clone_repository_activity,
+                persist_scan_state,
+                git_diff_commits,
+                scan_repo_for_secrets,
+                map_impacted_regions,
+                validate_secret_candidate,
+                validate_idor_candidate_activity,
+                validate_command_injection_candidate_activity,
+                promote_to_final_finding_metadata,
+                build_coverage_ledger_activity,
+                deliver_integrations_activity,
+                build_scan_manifest_activity,
+                render_markdown_report_activity,
+                recon_orchestrator_activity,
+                recon_subsystem_activity,
+                recon_synthesis_activity,
+                emit_agent_tasks,
+                hunt_activity,
+                validate_activity,
+                gapfill_activity,
+                deduplicate_activity,
+            ],
+            activity_executor=executor,
+            graceful_shutdown_timeout=timedelta(seconds=5),
+        )
+        async with worker:
+            h1 = await env.client.start_workflow(
+                RunScanWorkflow.run,
+                RunScanInput(
+                    repo_path=str(repo_path),
+                    db_path=str(db_1),
+                    output_dir=str(out_1),
+                ),
+                id="e2e-concurrent-1",
+                task_queue=task_queue,
+            )
+            h2 = await env.client.start_workflow(
+                RunScanWorkflow.run,
+                RunScanInput(
+                    repo_path=str(repo_path),
+                    db_path=str(db_2),
+                    output_dir=str(out_2),
+                ),
+                id="e2e-concurrent-2",
+                task_queue=task_queue,
+            )
+            r1, r2 = await asyncio.gather(h1.result(), h2.result())
+    finally:
+        await env.shutdown()
+        executor.shutdown(wait=True)
 
     # Pure-agentic: MockModelClient produces 0 findings; scans are independent.
     assert r1.scan_id != r2.scan_id
