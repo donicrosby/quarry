@@ -53,6 +53,8 @@ class QuarryClient:
         target_url: str | None = None,
         vuln_classes: list[VulnerabilityClass] | None = None,
         repo_url: str | None = None,
+        dynamic_validation_enabled: bool = False,
+        live_prove_enabled: bool = False,
     ) -> dict[str, str]:
         response = await self._client.post(
             "/scans",
@@ -61,6 +63,8 @@ class QuarryClient:
                 "repo_url": repo_url,
                 "target_url": target_url,
                 "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
+                "dynamic_validation_enabled": dynamic_validation_enabled,
+                "live_prove_enabled": live_prove_enabled,
             },
         )
         response.raise_for_status()

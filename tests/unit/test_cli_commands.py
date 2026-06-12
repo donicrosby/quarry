@@ -46,6 +46,8 @@ class FakeQuarryClient:
         target_url: str | None = None,
         vuln_classes: list[VulnerabilityClass] | None = None,
         repo_url: str | None = None,
+        dynamic_validation_enabled: bool = False,
+        live_prove_enabled: bool = False,
     ) -> dict[str, str]:
         if self.connect_error_on == "start":
             raise httpx.ConnectError("server unavailable")
