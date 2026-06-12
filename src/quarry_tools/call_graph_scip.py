@@ -42,7 +42,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from quarry.schemas import CallGraph
+from quarry.schemas import CallEdge, CallGraph, EntryPoint
+from quarry_tools.scip_pb2 import Document as _ScipDocument
+from quarry_tools.scip_pb2 import Index as _ScipIndex
 
 _LOG = logging.getLogger(__name__)
 
@@ -57,6 +59,93 @@ _LANGUAGE_BINARIES: dict[str, str] = {
     "java": "scip-java",
     "rust": "scip-rust",
 }
+
+
+_SCIP_DEFINITION_ROLE = 1
+
+_HTTP_HANDLER_NAMES: frozenset[str] = frozenset({"Handle", "ServeHTTP", "Handler"})
+
+
+def _detect_entry_points_from_document(doc: _ScipDocument, repo_name: str) -> list[EntryPoint]:
+    # Entry-point detection heuristics for Go SCIP symbols:
+    #   - display_name "main"               -> kind="main"  (Go program entry point)
+    #   - display_name in _HTTP_HANDLER_NAMES -> kind="http_handler"
+    #     (Go http.Handler interface: Handle, ServeHTTP; common handler pattern: Handler)
+    # These are name-based; SCIP does not encode framework annotations.
+    entry_points: list[EntryPoint] = []
+    for sym in doc.symbols:
+        display = sym.display_name or _symbol_short_name(sym.symbol)
+        if display == "main":
+            entry_points.append(
+                EntryPoint(repo=repo_name, file=doc.relative_path, function=display, kind="main")
+            )
+        elif display in _HTTP_HANDLER_NAMES:
+            entry_points.append(
+                EntryPoint(
+                    repo=repo_name, file=doc.relative_path, function=display, kind="http_handler"
+                )
+            )
+    return entry_points
+
+
+def _symbol_short_name(symbol: str) -> str:
+    parts = symbol.rstrip(")").split("/")
+    if parts:
+        name = parts[-1].rstrip("().")
+        if name:
+            return name
+    return symbol
+
+
+def _build_sym_info(index: _ScipIndex) -> dict[str, tuple[str, str]]:
+    info: dict[str, tuple[str, str]] = {}
+    for doc in index.documents:
+        for sym in doc.symbols:
+            display = sym.display_name or _symbol_short_name(sym.symbol)
+            info[sym.symbol] = (doc.relative_path, display)
+    for sym in index.external_symbols:
+        display = sym.display_name or _symbol_short_name(sym.symbol)
+        info[sym.symbol] = ("", display)
+    return info
+
+
+def _extract_edges_from_document(
+    doc: _ScipDocument, repo_name: str, sym_info: dict[str, tuple[str, str]]
+) -> list[CallEdge]:
+    defs: list[tuple[int, str]] = []
+    for occ in doc.occurrences:
+        if occ.symbol_roles & _SCIP_DEFINITION_ROLE:
+            row = occ.range[0] if len(occ.range) >= 1 else 0
+            defs.append((row, occ.symbol))
+    defs.sort()
+    edges: list[CallEdge] = []
+    for occ in doc.occurrences:
+        if occ.symbol_roles & _SCIP_DEFINITION_ROLE:
+            continue
+        ref_row = occ.range[0] if len(occ.range) >= 1 else 0
+        enclosing_sym: str | None = None
+        for def_row, def_sym in defs:
+            if def_row <= ref_row:
+                enclosing_sym = def_sym
+            else:
+                break
+        if enclosing_sym is None:
+            continue
+        c_file, c_fn = sym_info.get(
+            enclosing_sym, (doc.relative_path, _symbol_short_name(enclosing_sym))
+        )
+        e_file, e_fn = sym_info.get(occ.symbol, ("", _symbol_short_name(occ.symbol)))
+        edges.append(
+            CallEdge(
+                caller_repo=repo_name,
+                caller_file=c_file or doc.relative_path,
+                caller_function=c_fn,
+                callee_repo=repo_name,
+                callee_file=e_file or doc.relative_path,
+                callee_function=e_fn,
+            )
+        )
+    return edges
 
 
 def is_scip_available(language: str) -> bool:
@@ -180,14 +269,40 @@ def _run_indexer(
             _LOG.debug("SCIP indexer produced no output file")
             return _empty_graph(scan_id)
 
-        # TODO(scip-parse): parse index.scip via `scip print --json` or the
-        # scip-python protobuf bindings to extract call edges and entry points.
-        # For now, return the scan_id + index_kind so the tracer knows a SCIP
-        # index was attempted (even if edges are empty).
-        return CallGraph(
-            scan_id=scan_id,
-            index_kind="scip",
-        )
+        return parse_scip_index(output_path, scan_id, repo_name)
+
+
+def parse_scip_index(index_path: Path, scan_id: str, repo_name: str) -> CallGraph:
+    """Parse a SCIP binary index file and return a CallGraph.
+
+    Gracefully returns an empty CallGraph on missing file, empty file, or
+    protobuf decode error so that CI without a SCIP toolchain still passes.
+    """
+    try:
+        data = index_path.read_bytes()
+    except OSError as exc:
+        _LOG.debug("Failed to read SCIP index at %s: %s", index_path, exc)
+        return _empty_graph(scan_id)
+
+    if not data:
+        _LOG.debug("SCIP index at %s is empty", index_path)
+        return _empty_graph(scan_id)
+
+    try:
+        index = _ScipIndex()
+        index.ParseFromString(data)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("Failed to parse SCIP index at %s: %s", index_path, exc)
+        return _empty_graph(scan_id)
+
+    _LOG.debug("Parsed SCIP index for %s: %d document(s)", repo_name, len(index.documents))
+    sym_info = _build_sym_info(index)
+    edges: list[CallEdge] = []
+    entry_points: list[EntryPoint] = []
+    for doc in index.documents:
+        edges.extend(_extract_edges_from_document(doc, repo_name, sym_info))
+        entry_points.extend(_detect_entry_points_from_document(doc, repo_name))
+    return CallGraph(scan_id=scan_id, index_kind="scip", edges=edges, entry_points=entry_points)
 
 
 def _empty_graph(scan_id: str) -> CallGraph:

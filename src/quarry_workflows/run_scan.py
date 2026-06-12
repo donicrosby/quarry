@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -76,11 +77,14 @@ from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
 from quarry_tools.call_graph_python import build_python_call_graph
+from quarry_tools.call_graph_scip import build_scip_call_graph, is_scip_available
 from quarry_workflows.prove_stage import filter_needs_proof
 from quarry_workflows.tracer_stage import apply_trace_severity_reranking
 
 # Default orchestration retry policy (overridden per-run from RunScanInput at the
 # start of the workflow). State-persistence writes keep their own fixed policy.
+_LOG = logging.getLogger(__name__)
+
 ACTIVITY_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 _PERSIST_RETRY_POLICY = RetryPolicy(maximum_attempts=1)
 COMPLETED_STAGE_ORDER = {
@@ -149,6 +153,9 @@ class RunScanInput(BaseModel):
     allowed_hosts: tuple[str, ...] = ()
     # AuthProfileSet serialized as JSON; None = unauthenticated scans only.
     auth_profiles_json: str | None = None
+    # Primary language drives TRACER backend selection: "python" uses AST-grep;
+    # any other value routes to the SCIP backend when the indexer is on PATH.
+    target_language: str = "python"
 
 
 class RunScanResult(BaseModel):
@@ -262,6 +269,7 @@ class RunScanWorkflow:
                     "origin_url": origin_url or "",
                     "origin_commit_sha": origin_commit_sha or "",
                     "current_stage": "CREATED",
+                    "target_language": scan_input.target_language,
                 },
             )
             await _persist_scan_state(
@@ -1178,9 +1186,9 @@ class RunScanWorkflow:
         if not _stage_completed(completed_stage, "TRACER"):
             self._current_stage = "TRACER"
             if candidate_findings:
-                call_graph: CallGraph = build_python_call_graph(
-                    scan_id=scan.id,
-                    repo_path=repo_path,
+                _target_lang = str(scan.metadata.get("target_language") or "python")
+                call_graph: CallGraph = _build_call_graph_for_language(
+                    scan.id, repo_path, _target_lang
                 )
                 tracer_panel_json = panel_json_for_role(scan, "trace")
                 for finding in candidate_findings:
@@ -1487,6 +1495,32 @@ class RunScanWorkflow:
                 cancellation_type=workflow.ActivityCancellationType.ABANDON,
             )
         )
+
+
+def _build_call_graph_for_language(
+    scan_id: str,
+    repo_path: str | Path,
+    language: str,
+) -> CallGraph:
+    """Select and invoke the right call-graph backend for *language*.
+
+    Routing rules:
+    - "python" -> build_python_call_graph (AST-grep, index_kind="ast_grep")
+    - any other language where is_scip_available() is True -> build_scip_call_graph
+    - any other language where is_scip_available() is False -> empty CallGraph with
+      a logged warning; no exception raised (scip backend's graceful fallback)
+    """
+    lang = language.lower()
+    if lang == "python":
+        return build_python_call_graph(scan_id=scan_id, repo_path=repo_path)
+    if is_scip_available(lang):
+        return build_scip_call_graph(scan_id=scan_id, repo_path=Path(repo_path), language=lang)
+    _LOG.warning(
+        "SCIP indexer not available for language %r; using empty CallGraph for scan %s",
+        lang,
+        scan_id,
+    )
+    return CallGraph(scan_id=scan_id, index_kind="scip")
 
 
 def _describe_failure(exc: BaseException) -> str:

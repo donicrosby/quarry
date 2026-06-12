@@ -1,3 +1,5 @@
+from datetime import UTC
+
 from quarry.schemas import VulnerabilityClass, local_scan_profile
 from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER, RunScanInput, budget_decision
 
@@ -83,3 +85,91 @@ def test_split_hunt_result_tolerates_dict_list_and_exceptions() -> None:
     # Exception result (return_exceptions=True): a failed hunter contributes nothing.
     f, g = split_hunt_result(TimeoutError("request timed out"))
     assert f == [] and g == []
+
+
+class TestTracerLanguageDispatch:
+    def test_go_language_routes_to_scip(self, tmp_path: str) -> None:
+        from unittest.mock import patch
+
+        from quarry.schemas import CallGraph
+        from quarry_workflows.run_scan import (
+            _build_call_graph_for_language,  # type: ignore[attr-defined]
+        )
+
+        fake_cg = CallGraph(scan_id="s1", index_kind="scip")
+        with (
+            patch("quarry_workflows.run_scan.is_scip_available", return_value=True) as mock_avail,
+            patch(
+                "quarry_workflows.run_scan.build_scip_call_graph", return_value=fake_cg
+            ) as mock_scip,
+            patch("quarry_workflows.run_scan.build_python_call_graph") as mock_py,
+        ):
+            result = _build_call_graph_for_language("s1", str(tmp_path), "go")
+        mock_avail.assert_called_once_with("go")
+        mock_scip.assert_called_once()
+        mock_py.assert_not_called()
+        assert result is fake_cg
+
+    def test_python_language_routes_to_python_backend(self, tmp_path: str) -> None:
+        from unittest.mock import patch
+
+        from quarry.schemas import CallGraph
+        from quarry_workflows.run_scan import (
+            _build_call_graph_for_language,  # type: ignore[attr-defined]
+        )
+
+        fake_cg = CallGraph(scan_id="s1", index_kind="ast_grep")
+        with (
+            patch(
+                "quarry_workflows.run_scan.build_python_call_graph", return_value=fake_cg
+            ) as mock_py,
+            patch("quarry_workflows.run_scan.is_scip_available") as mock_avail,
+        ):
+            result = _build_call_graph_for_language("s1", str(tmp_path), "python")
+        mock_py.assert_called_once()
+        mock_avail.assert_not_called()
+        assert result is fake_cg
+
+    def test_unavailable_scip_returns_empty_call_graph(self, tmp_path: str) -> None:
+        from unittest.mock import patch
+
+        from quarry.schemas import CallGraph
+        from quarry_workflows.run_scan import (
+            _build_call_graph_for_language,  # type: ignore[attr-defined]
+        )
+
+        with (
+            patch("quarry_workflows.run_scan.is_scip_available", return_value=False),
+            patch("quarry_workflows.run_scan.build_scip_call_graph") as mock_scip,
+            patch("quarry_workflows.run_scan.build_python_call_graph") as mock_py,
+        ):
+            result = _build_call_graph_for_language("s1", str(tmp_path), "go")
+        mock_scip.assert_not_called()
+        mock_py.assert_not_called()
+        assert isinstance(result, CallGraph)
+        assert result.scan_id == "s1"
+
+    def test_cpp_indeterminate_override_still_fires(self) -> None:
+        from datetime import datetime
+
+        from quarry.schemas import CallGraph, CandidateFinding, VulnerabilityClass
+        from quarry_activities.tracer import (
+            _apply_cpp_indeterminate_override,  # type: ignore[attr-defined]
+        )
+
+        finding = CandidateFinding(
+            id="f1",
+            scan_id="s1",
+            workspace_id="local",
+            vuln_class=VulnerabilityClass.COMMAND_INJECTION,
+            title="cmd inject",
+            hypothesis="test",
+            created_by="test",
+            created_at=datetime.now(tz=UTC),
+            metadata={"language": "c"},
+        )
+        ast_grep_cg = CallGraph(scan_id="s1", index_kind="ast_grep")
+        result = _apply_cpp_indeterminate_override(
+            "not_reachable", call_graph=ast_grep_cg, finding=finding
+        )
+        assert result == "indeterminate"

@@ -383,3 +383,166 @@ class TestScipSupportedLanguages:
 
         with pytest.raises(ValueError, match="unsupported"):
             build_scip_call_graph(scan_id="s-bad-lang", repo_path=tmp_path, language="cobol")
+
+
+_SCIP_FIXTURE = Path(__file__).parent.parent / "fixtures" / "scip" / "go_simple.scip"
+
+
+class TestScipIndexParser:
+    def test_parse_returns_call_graph(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-parse-1", "test-repo")
+        assert isinstance(result, CallGraph)
+
+    def test_parse_index_kind_is_scip(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-parse-2", "test-repo")
+        assert result.index_kind == "scip"
+
+    def test_parse_scan_id_propagated(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-parse-xyz", "test-repo")
+        assert result.scan_id == "scan-parse-xyz"
+
+    def test_parse_edges_non_none(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-parse-3", "test-repo")
+        assert result.edges is not None
+
+    def test_parse_entry_points_non_none(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-parse-4", "test-repo")
+        assert result.entry_points is not None
+
+    def test_parse_missing_file_returns_empty_graph(self, tmp_path: Path) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        missing = tmp_path / "nonexistent.scip"
+        result = parse_scip_index(missing, "scan-missing", "test-repo")
+        assert isinstance(result, CallGraph)
+        assert result.index_kind == "scip"
+        assert result.edges == []
+
+    def test_parse_empty_file_returns_empty_graph(self, tmp_path: Path) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        empty = tmp_path / "empty.scip"
+        empty.write_bytes(b"")
+        result = parse_scip_index(empty, "scan-empty", "test-repo")
+        assert isinstance(result, CallGraph)
+        assert result.edges == []
+
+    def test_parse_invalid_proto_returns_empty_graph(self, tmp_path: Path) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        bad = tmp_path / "bad.scip"
+        bad.write_bytes(b"not valid protobuf data")
+        result = parse_scip_index(bad, "scan-bad", "test-repo")
+        assert isinstance(result, CallGraph)
+        assert result.edges == []
+
+
+class TestScipEdgeExtraction:
+    def test_edges_not_empty_for_go_simple_fixture(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-edges-1", "test-repo")
+        assert result.edges, "go_simple.scip should yield at least one CallEdge"
+
+    def test_edge_has_main_caller_and_fetchuser_callee(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-edges-2", "test-repo")
+        matches = [
+            e
+            for e in result.edges
+            if e.caller_function == "main" and e.callee_function == "fetchUser"
+        ]
+        assert matches, f"Expected CallEdge main->fetchUser; got: {result.edges}"
+
+    def test_edges_are_call_edge_instances(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-edges-3", "test-repo")
+        assert result.edges
+        for edge in result.edges:
+            assert isinstance(edge, CallEdge)
+
+    def test_index_kind_is_scip(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-edges-4", "test-repo")
+        assert result.index_kind == "scip"
+
+    def test_edge_fields_populated(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-edges-5", "test-repo")
+        assert result.edges
+        edge = result.edges[0]
+        assert edge.caller_repo != ""
+        assert edge.caller_file != ""
+        assert edge.caller_function != ""
+        assert edge.callee_repo != ""
+        assert edge.callee_file != ""
+        assert edge.callee_function != ""
+
+    def test_graceful_fallback_empty_file_still_empty_edges(self, tmp_path: Path) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        empty = tmp_path / "empty.scip"
+        empty.write_bytes(b"")
+        result = parse_scip_index(empty, "scan-edges-empty", "test-repo")
+        assert result.edges == []
+
+
+class TestScipEntryPointDetection:
+    def test_entry_points_not_empty_for_go_simple_fixture(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-ep-1", "test-repo")
+        assert result.entry_points, (
+            f"go_simple.scip should yield at least one EntryPoint; got: {result.entry_points}"
+        )
+
+    def test_main_symbol_yields_main_entry_point(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-ep-2", "test-repo")
+        main_eps = [ep for ep in result.entry_points if ep.kind == "main" and ep.function == "main"]
+        assert main_eps, (
+            f"Expected EntryPoint(kind='main', function='main'); got: {result.entry_points}"
+        )
+
+    def test_entry_points_are_entry_point_instances(self) -> None:
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        result = parse_scip_index(_SCIP_FIXTURE, "scan-ep-3", "test-repo")
+        assert result.entry_points
+        for ep in result.entry_points:
+            assert isinstance(ep, EntryPoint)
+
+    def test_http_handler_symbol_yields_http_handler_entry_point(self, tmp_path: Path) -> None:
+        from quarry_tools import scip_pb2
+        from quarry_tools.call_graph_scip import parse_scip_index
+
+        serve_sym = scip_pb2.SymbolInformation(
+            symbol="go . main/handler.ServeHTTP().", display_name="ServeHTTP"
+        )
+        def_occ = scip_pb2.Occurrence(symbol="go . main/handler.ServeHTTP().", symbol_roles=1)
+        def_occ.range.extend([0, 0, 0, 9])
+        doc = scip_pb2.Document(relative_path="server.go", language="go")
+        doc.symbols.append(serve_sym)
+        doc.occurrences.append(def_occ)
+        index = scip_pb2.Index()
+        index.documents.append(doc)
+        fixture = tmp_path / "serve.scip"
+        fixture.write_bytes(index.SerializeToString())
+        result = parse_scip_index(fixture, "scan-ep-http", "test-repo")
+        http_eps = [ep for ep in result.entry_points if ep.kind == "http_handler"]
+        assert http_eps, f"Expected http_handler entry point; got: {result.entry_points}"
