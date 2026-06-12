@@ -40,7 +40,15 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError, model_validator
 
-from quarry.schemas import AgentLoopResult, AgentStep, ProposedAction, ReasoningCheckResult
+from quarry.schemas import (
+    ActionReasoning,
+    AgentLoopResult,
+    AgentStep,
+    ArtifactKind,
+    ProposedAction,
+    ReasoningCheckResult,
+)
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest, ProviderPolicy
@@ -48,6 +56,29 @@ from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 
 _log = logging.getLogger(__name__)
+
+
+def _store_rejected_reasoning(
+    reasoning: ActionReasoning,
+    tool_name: str,
+    iteration: int,
+    retry: int,
+    store: LocalArtifactStore | None,
+    scan_id: str | None,
+) -> str:
+    """Persist a rejected ActionReasoning as an artifact and return its ArtifactRef.id.
+
+    Falls back to the legacy placeholder string when *store* is None.
+    """
+    if store is None:
+        return f"rejected-reasoning:{tool_name}:{iteration}:{retry}"
+    try:
+        key = f"reasoning/rejected/{scan_id or 'unknown'}/{iteration}/{retry}-{tool_name}"
+        ref = store.put_json(key, reasoning, kind=ArtifactKind.REASONING)
+        return ref.id
+    except Exception:
+        # Non-critical: fall back to placeholder rather than breaking the loop.
+        return f"rejected-reasoning:{tool_name}:{iteration}:{retry}"
 
 
 class ToolCallRequest(BaseModel):
@@ -187,6 +218,12 @@ def run_agent_loop(
     task_context: dict[str, Any] | None = None,
     provider_policy: ProviderPolicy | None = None,
     event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+    # ArtifactStore integration (ADR-020 Phase 7a).  When provided, rejected
+    # reasoning is stored as a JSON artifact and the ArtifactRef.id is used as
+    # the ref instead of the placeholder string.  Callers that don't pass these
+    # get the old placeholder-string behaviour (backward compatible).
+    artifact_store_path: str | None = None,
+    scan_id: str | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -245,6 +282,11 @@ def run_agent_loop(
     final_answer: BaseModel | None = None
     ctx = task_context or {}
     parsed: Any = None  # last parsed model response; referenced after loop exhaustion
+
+    # Build the ArtifactStore lazily if a path was provided.  None = no store.
+    _store: LocalArtifactStore | None = (
+        LocalArtifactStore(artifact_store_path) if artifact_store_path else None
+    )
 
     for iteration in range(1, max_iterations + 1):
         # ── Re-prompt sub-loop (reasoning + schema repair) ──────────────────
@@ -412,9 +454,18 @@ def run_agent_loop(
 
                     # Re-prompt: render feedback (ADR-019 — all text in .j2)
                     reasoning_retries += 1
-                    # Record this rejection for audit (simplified ref — no ArtifactStore yet).
+                    # Record this rejection for audit.
+                    # When an ArtifactStore is available, persist the reasoning as
+                    # a JSON artifact and use the ArtifactRef.id as the ref (Phase 7a).
                     reprompt_rejected_refs.append(
-                        f"rejected-reasoning:{failed_action.tool_name}:{iteration}:{reasoning_retries}"
+                        _store_rejected_reasoning(
+                            failed_action.reasoning,
+                            failed_action.tool_name,
+                            iteration,
+                            reasoning_retries,
+                            _store,
+                            scan_id,
+                        )
                     )
                     feedback = _render_vague_feedback(
                         failed_checks=list(failed_check_result.failed_checks),

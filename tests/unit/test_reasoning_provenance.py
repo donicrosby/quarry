@@ -10,6 +10,7 @@ Tests:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -261,3 +262,85 @@ class TestValidatorIndependenceReasoning:
         prompt_text = self._capture_prompt(modified)
 
         assert "PROVIDER_SENTINEL_99" not in prompt_text
+
+
+# ---------------------------------------------------------------------------
+# 4. ArtifactStore IDs for rejected-reasoning refs (Phase 7a)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectedReasoningArtifactRefs:
+    """When run_agent_loop is given an artifact_store_path, rejected-reasoning
+    refs must be real ArtifactRef.id UUIDs, not the old placeholder strings."""
+
+    def test_rejected_reasoning_refs_are_uuids_when_store_provided(self, tmp_path: Path) -> None:
+        """Rejected reasoning is stored as an artifact; ref is a UUID, not a string label."""
+        import re
+
+        client = _SequentialMockClient(
+            [
+                _LoopAnswer(
+                    proposed_actions=[_VAGUE_ACTION],
+                    tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
+                )
+            ]
+            * 5
+        )
+
+        result = run_agent_loop(
+            client=client,
+            role="hunt",
+            agent_kind="hunt",
+            system_prompt="Hunt for vulnerabilities.",
+            initial_user_message="Find XSS.",
+            runner=_NoopRunner(),
+            budget_spec=BudgetSpec(),
+            response_model=_LoopAnswer,
+            max_iterations=10,
+            reasoning_max_retries=2,
+            task_context={"vuln_class": "xss"},
+            artifact_store_path=str(tmp_path),
+            scan_id="scan-prov-7a",
+        )
+
+        assert result.stop_reason == "reasoning_rejected"
+        # Refs are in the last AgentStep's rejected_reasoning_refs.
+        all_refs = [ref for step in result.steps for ref in step.rejected_reasoning_refs]
+        assert len(all_refs) > 0, "Expected non-empty rejected_reasoning_refs in steps"
+        uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        for ref in all_refs:
+            assert uuid_re.match(ref), (
+                f"Expected UUID ref, got: {ref!r}. "
+                "ArtifactStore must be used when artifact_store_path is provided."
+            )
+
+    def test_rejected_reasoning_fallback_string_when_no_store(self) -> None:
+        """Without artifact_store_path, the old string-ref fallback is still acceptable."""
+        client = _SequentialMockClient(
+            [
+                _LoopAnswer(
+                    proposed_actions=[_VAGUE_ACTION],
+                    tool_calls=[ToolCallRequest(tool="read_file", inputs={"path": "src/app.py"})],
+                )
+            ]
+            * 5
+        )
+
+        result = run_agent_loop(
+            client=client,
+            role="hunt",
+            agent_kind="hunt",
+            system_prompt="Hunt for vulnerabilities.",
+            initial_user_message="Find XSS.",
+            runner=_NoopRunner(),
+            budget_spec=BudgetSpec(),
+            response_model=_LoopAnswer,
+            max_iterations=10,
+            reasoning_max_retries=2,
+            task_context={"vuln_class": "xss"},
+        )
+
+        assert result.stop_reason == "reasoning_rejected"
+        # No artifact_store_path: refs are acceptable as any non-empty strings.
+        all_refs = [ref for step in result.steps for ref in step.rejected_reasoning_refs]
+        assert len(all_refs) > 0, "Expected non-empty rejected_reasoning_refs in steps"
