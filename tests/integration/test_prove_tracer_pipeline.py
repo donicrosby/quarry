@@ -66,10 +66,10 @@ class TestTracerStageOrder:
 
         assert COMPLETED_STAGE_ORDER["TRACER"] == COMPLETED_STAGE_ORDER["PROVE"] + 1
 
-    def test_gapfill_after_tracer(self) -> None:
+    def test_prove_after_dedup(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER
 
-        assert COMPLETED_STAGE_ORDER["GAPFILL"] > COMPLETED_STAGE_ORDER["TRACER"]
+        assert COMPLETED_STAGE_ORDER["PROVE"] == COMPLETED_STAGE_ORDER["DEDUP"] + 1
 
     def test_stage_order_strictly_monotonic(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER

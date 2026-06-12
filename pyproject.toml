@@ -28,8 +28,8 @@ dependencies = [
   "uvicorn>=0.34.3",
 ]
 
-[project.optional-dependencies]
-dev = [
+[dependency-groups]                                                                                                            
+  dev = [
   "pre-commit>=4.5.0",
   "pyright>=1.1.401",
   "pytest>=8.3.5",
@@ -96,3 +96,4 @@ extraPaths = ["src", "scripts"]
 venv = ".venv"
 venvPath = "."
 reportUnknownMemberType = "none"
+

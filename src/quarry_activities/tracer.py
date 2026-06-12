@@ -9,7 +9,7 @@ Safety rule — the C/C++ indeterminate override:
   language is in ``UNRESOLVED_GRAPH_LANGUAGES`` AND the model emits
   ``not_reachable``, the verdict is FORCED to ``indeterminate`` in Python code.
   This is an explicit conditional branch, not a prompt instruction.  The model
-  cannot bypass it.  See ADR-016.
+  cannot bypass it.  See ADR-017.
 
 Severity re-ranking:
   A ``not_reachable`` verdict downgrades the finding's severity by one level
