@@ -1,112 +1,23 @@
 {
   "project": "quarry",
-  "branchName": "ralph/live-dynamic-hardening",
-  "description": "Live dynamic validation hardening — golden tests for the live prove path, example target fixture, runner-level host guard, script-tag stripping, and removal of the dead quarry-dynamic queue promise.",
+  "branchName": "ralph/adr-022-renumber",
+  "description": "Resolve ADR-022 number collision \u2014 rename adr-022-cli-hunting-and-sandbox-tiers.md to adr-024-cli-hunting-and-sandbox-tiers.md so each ADR number is unique",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Add target_url.toml fixture for vulnerable-fastapi example",
-      "description": "As an operator, I want a ready target_url.toml so I can run a live scan against the bundled vulnerable-fastapi example without manual configuration.",
+      "title": "Renumber adr-022-cli-hunting-and-sandbox-tiers.md to adr-024",
+      "description": "As a maintainer, I want a unique number per ADR so references in code comments, docs, and PRD files are unambiguous.",
       "acceptanceCriteria": [
-        "Create examples/vulnerable-fastapi/target_url.toml declaring target_url = \"http://localhost:8000\" and allowed_hosts = [\"localhost\"]",
-        "Write a test that loads the file and asserts resolve_dynamic() accepts it without raising, producing a TargetEndpoint with a non-empty allowed_hosts",
-        "Tests pass",
+        "Confirm the next free ADR number is 024 (current max in docs/decisions/ is 023)",
+        "Rename docs/decisions/adr-022-cli-hunting-and-sandbox-tiers.md to docs/decisions/adr-024-cli-hunting-and-sandbox-tiers.md",
+        "Update the internal '# ADR-022' header inside the renamed file to '# ADR-024'",
+        "Update any Status, Amends, or See also references inside the renamed file to use ADR-024",
+        "grep -r 'adr-022-cli-hunting' docs/ tests/ src/ returns no results",
+        "ls docs/decisions/ | grep 'adr-022' returns exactly one line (adr-022-iterative-coverage-loop.md)",
+        "If an ADR index or README exists in docs/decisions/, update any entry for adr-022-cli-hunting to adr-024-cli-hunting",
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-002",
-      "title": "Add runner-level allowed_hosts rejection guard",
-      "description": "As a security reviewer, I want the ToolRunner to reject http_request tool calls to out-of-scope hosts independently of the activity layer, so a single-layer bypass cannot reach an unauthorized host.",
-      "acceptanceCriteria": [
-        "Write a failing test: an http_request tool call to a host not in allowed_hosts is rejected by the runner guard before dispatch",
-        "Add host-allowlist guard to quarry_tools/runner.py alongside _check_scope_exclusion; fail-closed when allowed_hosts is empty",
-        "Existing enforce_allowed_hosts in dynamic_http.py:38-56 is unchanged — both layers remain active",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 2,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-003",
-      "title": "Strip script tags from HTML response bodies",
-      "description": "As a security reviewer, I want <script> tag content removed from captured HTTP response bodies before the body is wrapped and shown to the model, so injected scripts cannot reach the model as executable instructions.",
-      "acceptanceCriteria": [
-        "Write a failing test: a response body containing <script>alert(1)</script> has the script element and its contents removed while surrounding HTML text is preserved",
-        "Apply stripping inside scrub_and_wrap_body (or a new helper called from it) in dynamic_http.py, before the <target_content> wrap",
-        "Use re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL) — no new HTML-parsing dependency",
-        "Secret scrubbing and the body cap still execute in the correct order after this change",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 3,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-004",
-      "title": "Remove the quarry-dynamic queue promise",
-      "description": "As a maintainer, I want the codebase to stop referencing a quarry-dynamic task queue that no worker binds, eliminating a confusing discrepancy between docstrings and reality.",
-      "acceptanceCriteria": [
-        "Remove the unused dynamic_task_queue field from quarry/config.py (or annotate it as reserved/unbound with a clear comment)",
-        "Update docstrings in dynamic_http.py, sandbox_tool.py, and http_tool.py to state that activities run on the quarry-control queue",
-        "Update test_worker_registration_parity.py to remove any assertion that references quarry-dynamic",
-        "grep -r 'quarry-dynamic' src/ tests/ returns no results (or a single clearly-labelled future-work note)",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 4,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-005",
-      "title": "Live IDOR golden test",
-      "description": "As a maintainer, I want a golden test that drives the live HTTP prove path for an IDOR finding so any regression in the dynamic path is caught before merge.",
-      "acceptanceCriteria": [
-        "Add a new golden test under tests/golden/ that invokes the dynamic HTTP prove path (not just the static report renderer) using a mocked/stubbed HTTP transport",
-        "Test asserts a two-user IDOR probe produces a DynamicEvidenceLink with the expected status_code and the correct finding verdict",
-        "Test uses MockModelClient — no real network calls",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-006",
-      "title": "Live prompt-injection golden test",
-      "description": "As a maintainer, I want a golden test for the live prompt-injection prove path that confirms the payload is captured, wrapped, and script content neutralized before the model verdict is recorded.",
-      "acceptanceCriteria": [
-        "Add a golden test under tests/golden/ that drives the live path with an HTML response body containing a <script> injection payload",
-        "Test asserts the body arrives at the model wrapped in <target_content> with <script> content neutralized (relies on US-003 script-stripping being in place)",
-        "Test asserts the model verdict and evidence artifact are recorded as expected",
-        "Test uses MockModelClient — no real network calls",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "Depends on US-003 (script-tag stripping) being merged first."
-    },
-    {
-      "id": "US-007",
-      "title": "Backward-compat golden (dynamic flags off)",
-      "description": "As a maintainer, I want proof that a scan run with --dynamic-validation and --live-prove both disabled dispatches no dynamic activities and matches the static baseline.",
-      "acceptanceCriteria": [
-        "Add a golden test that runs the static prove path with both --dynamic-validation and --live-prove disabled",
-        "Assert that no http-request or sandbox-exec activity is dispatched during the run",
-        "Assert the output matches the existing static golden baseline (or document any intentional diff inline)",
-        "Tests pass",
-        "Typecheck passes"
-      ],
-      "priority": 7,
       "passes": true,
       "notes": ""
     }
