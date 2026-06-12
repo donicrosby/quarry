@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import TracebackType
 from typing import Any, ClassVar, Self
 
@@ -48,16 +49,19 @@ class FakeQuarryClient:
         repo_url: str | None = None,
         dynamic_validation_enabled: bool = False,
         live_prove_enabled: bool = False,
+        auth_profiles_json: str | None = None,
     ) -> dict[str, str]:
         if self.connect_error_on == "start":
             raise httpx.ConnectError("server unavailable")
         self.started_scans.append((repo_path, target_url))
         type(self).last_vuln_classes = vuln_classes
         type(self).last_repo_url = repo_url
+        type(self).last_auth_profiles_json = auth_profiles_json
         return self.start_response
 
     last_vuln_classes: ClassVar[list[VulnerabilityClass] | None] = None
     last_repo_url: ClassVar[str | None] = None
+    last_auth_profiles_json: ClassVar[str | None] = None
 
     async def start_diff_scan(
         self,
@@ -102,6 +106,7 @@ def setup_fake_client(monkeypatch: Any) -> None:
     FakeQuarryClient.list_response = []
     FakeQuarryClient.cancel_response = {"scan_id": "scan-1", "status": "CANCELLING"}
     FakeQuarryClient.connect_error_on = None
+    FakeQuarryClient.last_auth_profiles_json = None
     monkeypatch.setenv("QUARRY_SERVER_URL", "http://quarry.test")
     monkeypatch.setattr(main, "QuarryClient", FakeQuarryClient)
     monkeypatch.setattr(main, "POLL_INTERVAL_SECONDS", 0.0, raising=False)
@@ -264,3 +269,70 @@ def test_scan_run_focus_bogus_exits_with_error(monkeypatch: Any) -> None:
     )
 
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# US-002: --auth-config CLI flag
+# ---------------------------------------------------------------------------
+
+_BEARER_TOML = (
+    "[[profiles]]\n"
+    'name = "user1"\n'
+    'kind = "bearer"\n'
+    "\n"
+    "[profiles.secret_ref]\n"
+    'env = "QUARRY_SECRET_TEST_TOKEN"\n'
+)
+
+
+def test_scan_run_auth_config_valid_toml_resolves_and_attaches(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """--auth-config with a valid TOML resolves auth and passes JSON to start_scan."""
+    setup_fake_client(monkeypatch)
+    monkeypatch.setenv("QUARRY_SECRET_TEST_TOKEN", "tok-abc")
+    auth_file = tmp_path / "auth-profiles.toml"
+    auth_file.write_text(_BEARER_TOML, encoding="utf-8")
+
+    result = runner.invoke(
+        main.app,
+        [
+            "scan",
+            "run",
+            "--repo",
+            "/tmp/example-repo",
+            "--target",
+            "http://localhost:8000",
+            "--auth-config",
+            str(auth_file),
+            "--async",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert FakeQuarryClient.last_auth_profiles_json is not None
+    assert "user1" in FakeQuarryClient.last_auth_profiles_json
+
+
+def test_scan_run_auth_config_missing_file_exits_nonzero(monkeypatch: Any) -> None:
+    """--auth-config with a non-existent path exits non-zero with a clear error."""
+    setup_fake_client(monkeypatch)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "scan",
+            "run",
+            "--repo",
+            "/tmp/example-repo",
+            "--auth-config",
+            "/nonexistent/path/auth-profiles.toml",
+            "--async",
+        ],
+    )
+
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    assert any(
+        kw in combined.lower() for kw in ("auth-config", "not found", "no such file", "error")
+    )

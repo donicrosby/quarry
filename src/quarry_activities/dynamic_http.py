@@ -22,11 +22,13 @@ import httpx
 from temporalio import activity
 
 from quarry.schemas import (
+    AuthProfileSet,
     HttpRequestSpec,
     HttpResponseCapture,
     RedactionStatus,
     TargetEndpoint,
 )
+from quarry_activities.credentials import CredentialCache, resolve_credentials
 from quarry_activities.inputs import HttpRequestActivityInput
 from quarry_artifacts.http_utils import capture_request_artifact, capture_response_artifact
 from quarry_artifacts.local import LocalArtifactStore
@@ -98,8 +100,24 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
     # secret value is registered here before the request is sent (ADR-018 §4.4).
     run_scrubber = Scrubber()
 
-    # Build request headers (no auth injection yet — handled in Phase 5)
+    # Resolve and inject credentials if an auth_profile is named on the spec.
     headers: dict[str, str] = dict(spec.headers)
+    cache: CredentialCache | None = None
+    if spec.auth_profile and inp.auth_profile_set_json:
+        auth_set = AuthProfileSet.model_validate_json(inp.auth_profile_set_json)
+        profile = auth_set.get(spec.auth_profile)
+        if profile is not None:
+            cache = CredentialCache(inp.scan_id)
+            cred = resolve_credentials(
+                profile,
+                cache,
+                run_scrubber,
+                allowed_hosts=inp.allowed_hosts,
+                target_host=endpoint.host,
+                target_port=endpoint.port,
+            )
+            if cred is not None:
+                headers[cred.header_name] = cred.header_value
 
     start_ms = int(time.monotonic() * 1000)
 
@@ -113,6 +131,10 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         response = client.send(request)
 
     elapsed_ms = int(time.monotonic() * 1000) - start_ms
+
+    # Evict the cached credential on 401 so the next request forces re-resolution.
+    if response.status_code == 401 and cache is not None and spec.auth_profile:
+        cache.invalidate(spec.auth_profile)
 
     # Capture request artifact (auth headers already redacted by http_utils)
     req_artifact = capture_request_artifact(store, request)

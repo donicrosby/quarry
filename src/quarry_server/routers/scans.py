@@ -100,6 +100,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             dynamic_validation_enabled=body.dynamic_validation_enabled,
             live_prove_enabled=body.live_prove_enabled,
             allowed_hosts=_allowed_hosts,
+            auth_profiles_json=body.auth_profiles_json,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

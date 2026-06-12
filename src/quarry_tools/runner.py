@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from quarry.schemas import ScopeExclusion
+from quarry.schemas import AuthProfileSet, ScopeExclusion
 from quarry_models.types import BudgetSpec
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
 from quarry_tools.spec import ToolRegistry
@@ -147,6 +147,7 @@ class ToolRunner:
         budget_spec: BudgetSpec,
         scope_exclusions: list[ScopeExclusion] | None = None,
         allowed_hosts: list[str] | tuple[str, ...] | None = None,
+        auth_profile_set: AuthProfileSet | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._role = role
@@ -156,6 +157,7 @@ class ToolRunner:
         self._allowed_hosts: tuple[str, ...] | None = (
             tuple(allowed_hosts) if allowed_hosts is not None else None
         )
+        self._auth_profile_set: AuthProfileSet | None = auth_profile_set
 
     def _check_scope_exclusion(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
         """Return a denial reason string if a scope exclusion blocks this request.
@@ -191,6 +193,26 @@ class ToolRunner:
         host = inputs.get("host")
         if host is not None and str(host) not in self._allowed_hosts:
             return f"host:{host}:not_in_allowed_hosts"
+
+        return None
+
+    def _check_auth_profile(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
+        """Return a denial reason if auth_profile in inputs is not in the resolved set.
+
+        Only applies when an AuthProfileSet is configured and the inputs carry an
+        auth_profile field.  A missing auth_profile field passes through unchanged.
+        Returns None when unconfigured, when auth_profile is absent, or when the
+        profile name is found in the set.
+        """
+        if self._auth_profile_set is None:
+            return None
+
+        auth_profile = inputs.get("auth_profile")
+        if auth_profile is None:
+            return None
+
+        if self._auth_profile_set.get(str(auth_profile)) is None:
+            return f"auth_profile:{auth_profile}:not_in_resolved_set"
 
         return None
 
@@ -247,6 +269,21 @@ class ToolRunner:
                 started_at=started,
                 completed_at=started,
                 denied_reason=allowed_hosts_denial,
+                status="refused",
+            )
+
+        # Auth-profile guard: reject fabricated profile names not in the resolved set
+        auth_profile_denial = self._check_auth_profile(tool_name, inputs)
+        if auth_profile_denial is not None:
+            return ToolCallRecord(
+                tool_name=tool_name,
+                inputs=inputs,
+                output="",
+                allowed=False,
+                invocation_id=invocation_id,
+                started_at=started,
+                completed_at=started,
+                denied_reason=auth_profile_denial,
                 status="refused",
             )
 

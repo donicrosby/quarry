@@ -24,6 +24,8 @@ class StartScanRequest(BaseModel):
     # target_url presence alone must NOT enable live validation.
     dynamic_validation_enabled: bool = False
     live_prove_enabled: bool = False
+    # AuthProfileSet serialized as JSON; None = unauthenticated.
+    auth_profiles_json: str | None = None
 
 
 class DiffScanRequest(BaseModel):

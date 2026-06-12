@@ -204,3 +204,174 @@ def test_scrub_and_wrap_strips_multiline_script_tags() -> None:
     assert "<script>" not in result
     assert "var x" not in result
     assert "<p>Safe</p>" in result
+
+
+# ---------------------------------------------------------------------------
+# US-004: Auth injection -- bearer credential injected into headers
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_response(text: str = "") -> MagicMock:
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.headers = {}
+    mock_response.text = text
+    mock_response.content = text.encode()
+    mock_response.url = "http://localhost:9000/path"
+    return mock_response
+
+
+def _setup_mock_httpx(mock_httpx: MagicMock, mock_response: MagicMock) -> MagicMock:
+    mock_client = MagicMock()
+    mock_httpx.Client.return_value.__enter__ = MagicMock(return_value=mock_client)
+    mock_httpx.Client.return_value.__exit__ = MagicMock(return_value=False)
+    mock_client.send.return_value = mock_response
+    mock_request = MagicMock(
+        method="GET",
+        url=MagicMock(host="localhost"),
+        headers=MagicMock(multi_items=lambda: []),  # type: ignore[misc]
+        content=b"",
+    )
+    mock_client.build_request.return_value = mock_request
+    mock_response.request = mock_request
+    return mock_client
+
+
+@pytest.mark.asyncio
+async def test_activity_injects_bearer_auth_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QUARRY_TEST_ADMIN_TOKEN", "test-bearer-token-xyz")
+
+    from quarry.schemas import AuthProfile, AuthProfileKind, AuthProfileSet, SecretRef
+
+    profile = AuthProfile(
+        name="admin",
+        kind=AuthProfileKind.BEARER,
+        secret_ref=SecretRef(env="QUARRY_TEST_ADMIN_TOKEN"),
+    )
+    auth_set = AuthProfileSet(profiles=[profile])
+    spec = HttpRequestSpec(method="GET", path="/users/1", auth_profile="admin")
+    endpoint = TargetEndpoint(host="localhost", port=9000)
+    test_inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=endpoint.model_dump_json(),
+        allowed_hosts=("localhost",),
+        artifact_store_path=str(tmp_path),
+        scan_id="scan-auth-test",
+        candidate_finding_id="finding-001",
+        auth_profile_set_json=auth_set.model_dump_json(),
+    )
+
+    mock_response = _make_mock_response("user data")
+    with patch("quarry_activities.dynamic_http.httpx") as mock_httpx:
+        mock_client = _setup_mock_httpx(mock_httpx, mock_response)
+        await http_request_activity(test_inp)
+
+    call_kwargs = mock_client.build_request.call_args.kwargs
+    assert call_kwargs["headers"].get("Authorization") == "Bearer test-bearer-token-xyz"
+
+
+@pytest.mark.asyncio
+async def test_activity_scrubber_redacts_injected_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QUARRY_TEST_SCRUB_TOKEN", "super-secret-token-abc123")
+
+    from quarry.schemas import AuthProfile, AuthProfileKind, AuthProfileSet, SecretRef
+
+    profile = AuthProfile(
+        name="admin",
+        kind=AuthProfileKind.BEARER,
+        secret_ref=SecretRef(env="QUARRY_TEST_SCRUB_TOKEN"),
+    )
+    auth_set = AuthProfileSet(profiles=[profile])
+    spec = HttpRequestSpec(method="GET", path="/me", auth_profile="admin")
+    endpoint = TargetEndpoint(host="localhost", port=9000)
+    test_inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=endpoint.model_dump_json(),
+        allowed_hosts=("localhost",),
+        artifact_store_path=str(tmp_path),
+        scan_id="scan-scrub-test",
+        candidate_finding_id="finding-002",
+        auth_profile_set_json=auth_set.model_dump_json(),
+    )
+
+    mock_response = _make_mock_response("token=super-secret-token-abc123 in response")
+    with patch("quarry_activities.dynamic_http.httpx") as mock_httpx:
+        _setup_mock_httpx(mock_httpx, mock_response)
+        capture = await http_request_activity(test_inp)
+
+    assert capture.scrubber_hits > 0
+    assert capture.redaction_status == RedactionStatus.REDACTED
+
+
+# ---------------------------------------------------------------------------
+# US-006: 401 evicts cached credential
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_activity_invalidates_cache_on_401(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 401 response must call CredentialCache.invalidate for the matching profile."""
+    monkeypatch.setenv("QUARRY_TEST_401_TOKEN", "test-token-for-401")
+
+    from quarry.schemas import AuthProfile, AuthProfileKind, AuthProfileSet, SecretRef
+
+    profile = AuthProfile(
+        name="user_a",
+        kind=AuthProfileKind.BEARER,
+        secret_ref=SecretRef(env="QUARRY_TEST_401_TOKEN"),
+    )
+    auth_set = AuthProfileSet(profiles=[profile])
+    spec = HttpRequestSpec(method="GET", path="/protected", auth_profile="user_a")
+    endpoint = TargetEndpoint(host="localhost", port=9000)
+    test_inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=endpoint.model_dump_json(),
+        allowed_hosts=("localhost",),
+        artifact_store_path=str(tmp_path),
+        scan_id="scan-401-test",
+        candidate_finding_id="finding-401",
+        auth_profile_set_json=auth_set.model_dump_json(),
+    )
+
+    mock_response = _make_mock_response("")
+    mock_response.status_code = 401
+
+    mock_cache = MagicMock()
+    mock_cred = MagicMock()
+    mock_cred.header_name = "Authorization"
+    mock_cred.header_value = "Bearer test-token-for-401"
+    mock_cache.get.return_value = None
+
+    with (
+        patch("quarry_activities.dynamic_http.httpx") as mock_httpx,
+        patch("quarry_activities.dynamic_http.CredentialCache", return_value=mock_cache),
+        patch("quarry_activities.dynamic_http.resolve_credentials", return_value=mock_cred),
+    ):
+        _setup_mock_httpx(mock_httpx, mock_response)
+        await http_request_activity(test_inp)
+
+    mock_cache.invalidate.assert_called_once_with("user_a")
+
+
+def test_credential_cache_miss_after_invalidate() -> None:
+    """After invalidation, cache.get() returns None for the evicted profile."""
+    from quarry_activities.credentials import CachedCredential, CredentialCache
+
+    cache = CredentialCache("scan-unit-test")
+    cred = CachedCredential(
+        profile_name="user_a",
+        header_name="Authorization",
+        header_value="Bearer tok",
+    )
+    cache.put(cred)
+    assert cache.get("user_a") is not None, "pre-condition: credential is cached"
+
+    cache.invalidate("user_a")
+
+    assert cache.get("user_a") is None, "post-condition: cache miss after invalidate"

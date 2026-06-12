@@ -3,6 +3,14 @@
 # Never store API keys or secrets in this file.
 
 # --------------------------------------------------------------------------
+# Authentication profiles (optional)
+# Copy examples/auth-profiles.toml.example to auth-profiles.toml, fill in
+# env-var names, and point auth_config_ref at the live file.
+# auth-profiles.toml is gitignored -- never commit secret env-var values.
+# --------------------------------------------------------------------------
+# auth_config_ref = "examples/auth-profiles.toml"
+
+# --------------------------------------------------------------------------
 # Vulnerability class focus (optional)
 # Omit or leave empty to scan all classes.
 # --------------------------------------------------------------------------

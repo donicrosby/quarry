@@ -76,18 +76,50 @@ def build_scrubber_with_creds(resolved_env: dict[str, str]) -> Scrubber:
 def _resolve_credentials(auth_profile_set_json: str | None) -> dict[str, str]:
     """Resolve named auth profiles to QUARRY_INJECTED_CRED_* env vars.
 
-    Returns a dict of env-var-name → secret-value.  This dict is passed to
+    Returns a dict of env-var-name -> raw-secret-value.  This dict is passed to
     the sandbox as resolved_env AND registered in the Scrubber BEFORE exec.
 
-    For the current scope (no auth_profile_set configured) this returns {}.
-    Full ADR-018 resolution is wired in Phase 7 panel wiring.
+    Env var names follow the convention QUARRY_INJECTED_CRED_<PROFILE_NAME_UPPER>
+    where hyphens and spaces in the profile name are replaced with underscores.
+
+    Raw secret values (not formatted header strings like "Bearer tok") are used
+    so build_scrubber_with_creds registers the minimal substring that the
+    scrubber must catch.
     """
     if not auth_profile_set_json:
         return {}
-    # Full credential resolution (AuthProfileSet → CredentialCache → resolved
-    # header values) is deferred to Phase 7.  For now, return empty so the
-    # activity is safe and the Scrubber registration path is exercised by tests.
-    return {}
+
+    import os as _os
+
+    from quarry.schemas import AuthProfileKind, AuthProfileSet
+    from quarry_activities.credentials import CredentialCache, resolve_credentials
+
+    auth_set = AuthProfileSet.model_validate_json(auth_profile_set_json)
+    cache = CredentialCache("sandbox-exec")
+    scrubber = Scrubber()
+    env: dict[str, str] = {}
+
+    for profile in auth_set.profiles:
+        cred = resolve_credentials(
+            profile,
+            cache,
+            scrubber,
+            allowed_hosts=(),
+            target_host="localhost",
+            target_port=80,
+        )
+        if cred is None:
+            continue
+        env_key = f"QUARRY_INJECTED_CRED_{profile.name.upper().replace('-', '_').replace(' ', '_')}"
+        if profile.kind != AuthProfileKind.LOGIN_FLOW and profile.secret_ref is not None:
+            # Raw secret so the scrubber catches bare leakage in stdout/stderr.
+            # resolve_credentials already validated the env var is present.
+            env[env_key] = _os.environ[profile.secret_ref.env]
+        else:
+            # LOGIN_FLOW has no simple secret_ref; use the resolved header_value.
+            env[env_key] = cred.header_value
+
+    return env
 
 
 def _build_sandbox_backend() -> SandboxBackend:
