@@ -644,3 +644,65 @@ def provenance_gc_check(
         return
     for scan in eligible:
         typer.echo(scan.id)
+
+
+@provenance_app.command("gc-run")
+def provenance_gc_run(
+    scans_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to a JSON file containing a list of Scan objects.",
+        ),
+    ],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Apply GC deletions (default is dry-run)."),
+    ] = False,
+    db: Annotated[
+        str | None,
+        typer.Option("--db", help="Path to quarry DB (used with --apply)."),
+    ] = None,
+) -> None:
+    """Sweep and optionally reclaim scans eligible for GC.
+
+    Without --apply: prints eligible scan IDs and exits 0 (dry-run).
+    With --apply: calls execute_gc and prints the IDs of reclaimed scans.
+    Scans with legal_hold=True are never printed or deleted.
+    """
+    import json
+
+    from quarry.schemas import Scan
+    from quarry_cli.retention import execute_gc, sweep_scans
+
+    if not scans_file.exists():
+        typer.echo(f"Error: file not found: {scans_file}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        raw = json.loads(scans_file.read_text())
+        scans = [Scan.model_validate(item) for item in raw]
+    except Exception as exc:
+        typer.echo(f"Error: could not parse scans file: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    eligible, _ = sweep_scans(scans)
+
+    if not apply:
+        if not eligible:
+            typer.echo("No scans eligible for GC.")
+            return
+        for scan in eligible:
+            typer.echo(scan.id)
+        return
+
+    from quarry.config import QuarrySettings
+    from quarry_persistence import QuarryRepository
+
+    db_path = db if db is not None else QuarrySettings().db_path
+    repo = QuarryRepository(db_path)
+    reclaimed = execute_gc(eligible, repo)
+    if not reclaimed:
+        typer.echo("No scans reclaimed.")
+        return
+    for scan_id in reclaimed:
+        typer.echo(scan_id)

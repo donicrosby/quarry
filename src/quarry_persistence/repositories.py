@@ -496,6 +496,25 @@ class QuarryRepository:
                 for record in records
             ]
 
+    def delete_scan(self, scan_id: str) -> None:
+        """Delete a scan and all its child records. No-op if scan_id does not exist."""
+        with session_scope(self.engine) as session:
+            for model in (
+                WorkflowEventRecord,
+                ArtifactRefRecord,
+                CandidateFindingRecord,
+                AttackSurfaceItemRecord,
+                ReportRecord,
+                FinalFindingRecord,
+                IntegrationRunRecord,
+                ScanManifestRecord,
+                ArchitectureDocRecord,
+                ToolInvocationRecord,
+                ModelInvocationRecord,
+            ):
+                session.query(model).filter_by(scan_id=scan_id).delete()
+            session.query(ScanRecord).filter(ScanRecord.id == scan_id).delete()
+
 
 def _get_scan_record(session: Session, scan_id: str) -> ScanRecord:
     record = session.get(ScanRecord, scan_id)
