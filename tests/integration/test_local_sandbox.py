@@ -139,7 +139,8 @@ class TestLocalSubprocessSandbox:
 
     def test_timeout_sets_timed_out_true(self, tmp_path: Path) -> None:
         """A command that exceeds timeout_seconds must return timed_out=True."""
-        spec = SandboxExecSpec(command="sh", args=["-c", "sleep 10"], timeout_seconds=1)
+        # Pure shell builtins — no PATH needed (sandbox strips PATH from env).
+        spec = SandboxExecSpec(command="sh", args=["-c", "while :; do :; done"], timeout_seconds=1)
         result = self.sandbox.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
         assert result.timed_out is True
 
