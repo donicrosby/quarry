@@ -14,6 +14,10 @@
     {
       "language": "toml",
       "path": "pyproject.toml"
+    },
+    {
+      "language": "toml",
+      "path": "target_url.toml"
     }
   ]
 }

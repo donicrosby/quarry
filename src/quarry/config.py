@@ -32,9 +32,6 @@ class QuarrySettings(BaseSettings):
     panel: str = ""
     focus_classes: str = ""  # comma-separated, env: QUARRY_FOCUS_CLASSES
 
-    # Task queues
-    dynamic_task_queue: str = "quarry-dynamic"  # live HTTP / dynamic validation
-
     # Artifact store backend (Phase 1c / ADR-022 §B).
     # "" or "file" => LocalArtifactStore (default, dev, backward-compatible).
     # "redis" => RedisArtifactStore (deferred; fast small scratch).

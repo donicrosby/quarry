@@ -1,6 +1,6 @@
-"""Credential resolution for the quarry-dynamic worker (ADR-018 §7).
+"""Credential resolution for the quarry-control worker (ADR-018 §7).
 
-Credential values are resolved ONLY inside the quarry-dynamic worker at
+Credential values are resolved ONLY inside the quarry-control worker at
 activity dispatch time.  The agent, workflow code, and ToolRunner see only
 the *profile name* string — never a concrete token, password, or cookie.
 

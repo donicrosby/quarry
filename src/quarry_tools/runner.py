@@ -146,12 +146,16 @@ class ToolRunner:
         registry: ToolRegistry,
         budget_spec: BudgetSpec,
         scope_exclusions: list[ScopeExclusion] | None = None,
+        allowed_hosts: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._role = role
         self._registry = registry
         self._budget_spec = budget_spec
         self._scope_exclusions: list[ScopeExclusion] = scope_exclusions or []
+        self._allowed_hosts: tuple[str, ...] | None = (
+            tuple(allowed_hosts) if allowed_hosts is not None else None
+        )
 
     def _check_scope_exclusion(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
         """Return a denial reason string if a scope exclusion blocks this request.
@@ -165,6 +169,28 @@ class ToolRunner:
         for exclusion in self._scope_exclusions:
             if _matches_scope_exclusion(exclusion, inputs):
                 return f"{exclusion.value}:{exclusion.kind}"
+
+        return None
+
+    def _check_allowed_hosts(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
+        """Return a denial reason if *host* in inputs is outside allowed_hosts.
+
+        Fail-closed: an empty allowed_hosts tuple blocks all http_request calls.
+        Returns None when unconfigured (allowed_hosts is None) or when the request
+        may proceed.  Only applies to http_request.
+        """
+        if tool_name != "http_request":
+            return None
+
+        if self._allowed_hosts is None:
+            return None  # Not configured; fall through to Layer 6.
+
+        if not self._allowed_hosts:  # Explicitly empty: fail-closed.
+            return "allowed_hosts:empty"
+
+        host = inputs.get("host")
+        if host is not None and str(host) not in self._allowed_hosts:
+            return f"host:{host}:not_in_allowed_hosts"
 
         return None
 
@@ -206,6 +232,21 @@ class ToolRunner:
                 started_at=started,
                 completed_at=started,
                 denied_reason=denial_reason,
+                status="refused",
+            )
+
+        # Allowed-hosts guard (Layer 5.5) â only for http_request; fail-closed
+        allowed_hosts_denial = self._check_allowed_hosts(tool_name, inputs)
+        if allowed_hosts_denial is not None:
+            return ToolCallRecord(
+                tool_name=tool_name,
+                inputs=inputs,
+                output="",
+                allowed=False,
+                invocation_id=invocation_id,
+                started_at=started,
+                completed_at=started,
+                denied_reason=allowed_hosts_denial,
                 status="refused",
             )
 

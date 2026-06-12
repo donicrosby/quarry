@@ -1,9 +1,9 @@
-"""http_request_activity — live HTTP corroboration on the quarry-dynamic queue.
+"""http_request_activity — live HTTP corroboration on the quarry-control queue.
 
 This activity is the sole point where an HTTP socket is opened by the agentic
 pipeline.  It enforces allowed_hosts independently (Layer 6 of ADR-017's six
-safety layers) and runs on the ``quarry-dynamic`` Temporal task queue, separate
-from ``quarry-control`` so workflow determinism is preserved (ADR-014).
+safety layers) and runs on the ``quarry-control`` Temporal task queue so workflow
+determinism is preserved (ADR-014).
 
 Non-idempotent HTTP methods (POST, PUT, DELETE, PATCH) must not be auto-retried
 by Temporal — the workflow dispatches these activities as non-retryable.
@@ -14,6 +14,7 @@ re-entering any prompt (ADR-017 "Untrusted-evidence handling").
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -63,8 +64,9 @@ def scrub_and_wrap_body(body: str, scrubber: Scrubber | None = None) -> str:
     scrubbed before re-entering any model prompt.  The ``<target_content>``
     boundary is mandatory — there is no fallback.
     """
+    stripped = re.sub(r"<script[^>]*>.*?</script>", "", body, flags=re.DOTALL)
     s = scrubber or Scrubber()
-    result = s.scrub(body)
+    result = s.scrub(stripped)
     return f"<target_content>{result.text}</target_content>"
 
 

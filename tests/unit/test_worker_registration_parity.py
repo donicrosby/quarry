@@ -4,7 +4,7 @@ Written RED first — fails until the dynamic_http activity exists and is
 registered in both quarry_worker.main and quarry_server.app.
 
 The two-place gotcha: every activity must be in BOTH:
-  - src/quarry_worker/main.py (quarry-control and quarry-dynamic workers)
+  - src/quarry_worker/main.py (quarry-control and quarry-control workers)
   - src/quarry_server/app.py lifespan (same workers when no_worker=False)
 
 An activity registered in only one place causes non-deterministic "activity not
@@ -82,7 +82,7 @@ class TestWorkerRegistrationParity:
         worker_activities = _extract_activity_list_from_file(WORKER_FILE)
         assert "http_request_activity" in worker_activities, (
             "http_request_activity must be registered in quarry_worker/main.py. "
-            "It runs on the quarry-dynamic task queue."
+            "It runs on the quarry-control task queue."
         )
 
     def test_dynamic_http_activity_registered_in_server(self) -> None:
@@ -90,5 +90,5 @@ class TestWorkerRegistrationParity:
         server_activities = _extract_activity_list_from_file(SERVER_FILE)
         assert "http_request_activity" in server_activities, (
             "http_request_activity must be registered in quarry_server/app.py. "
-            "It runs on the quarry-dynamic task queue."
+            "It runs on the quarry-control task queue."
         )

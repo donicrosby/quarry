@@ -36,7 +36,7 @@ def _sandbox_registry():
         def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
             import json
 
-            return json.dumps({"dispatch": "quarry-dynamic", "tool": "run_in_sandbox", **inputs})
+            return json.dumps({"dispatch": "quarry-control", "tool": "run_in_sandbox", **inputs})
 
     return {"run_in_sandbox": SandboxTool()}  # type: ignore[dict-item]
 

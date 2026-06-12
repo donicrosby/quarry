@@ -589,7 +589,7 @@ class RunScanWorkflow:
                         )
                         validation = _validation_result_from_activity(validation_payload)
                         if validation.is_valid:
-                            final = _final_from_candidate(candidate, scan.id, workflow.now())
+                            final = final_from_candidate(candidate, scan.id, workflow.now())
                             await _persist_scan_state(
                                 scan_input.db_path,
                                 "save_final_finding",
@@ -676,7 +676,7 @@ class RunScanWorkflow:
 
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
-                    final = _final_from_candidate(candidate, scan.id, workflow.now())
+                    final = final_from_candidate(candidate, scan.id, workflow.now())
                     # Live-prove path: supplement confirmed findings with HTTP evidence.
                     if (
                         scan_input.live_prove_enabled
@@ -1668,7 +1668,7 @@ def _model_json_dict(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
-def _final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -> FinalFinding:
+def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -> FinalFinding:
     """Build a FinalFinding from a validated CandidateFinding.
 
     ``now`` is passed in (workflow.now()) so this stays usable from workflow code

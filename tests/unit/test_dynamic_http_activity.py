@@ -1,4 +1,4 @@
-"""Tests for the http_request_activity on quarry-dynamic (ADR-017, Layer 6).
+"""Tests for the http_request_activity on quarry-control (ADR-017, Layer 6).
 
 Written RED first — these fail until dynamic_http.py exists.
 
@@ -178,3 +178,29 @@ def test_http_request_activity_has_temporal_name() -> None:
     defn = getattr(http_request_activity, "__temporal_activity_definition", None)
     assert defn is not None, "http_request_activity must be decorated with @activity.defn"
     assert defn.name == "http-request"
+
+
+def test_scrub_and_wrap_strips_script_tags() -> None:
+    body = "<p>Hello</p><script>alert(1)</script><p>World</p>"
+    result = scrub_and_wrap_body(body)
+    assert "<script>" not in result
+    assert "alert(1)" not in result
+    assert "<p>Hello</p>" in result
+    assert "<p>World</p>" in result
+
+
+def test_scrub_and_wrap_strips_script_tags_with_attributes() -> None:
+    body = '<p>Before</p><script type="text/javascript">evil()</script><p>After</p>'
+    result = scrub_and_wrap_body(body)
+    assert "<script" not in result
+    assert "evil()" not in result
+    assert "<p>Before</p>" in result
+    assert "<p>After</p>" in result
+
+
+def test_scrub_and_wrap_strips_multiline_script_tags() -> None:
+    body = "<html><body>\n<script>\nvar x = 1;\n</script>\n<p>Safe</p></body></html>"
+    result = scrub_and_wrap_body(body)
+    assert "<script>" not in result
+    assert "var x" not in result
+    assert "<p>Safe</p>" in result

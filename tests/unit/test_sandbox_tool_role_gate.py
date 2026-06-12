@@ -48,7 +48,7 @@ class TestRunInSandboxToolDispatch:
         )
         assert isinstance(result, str)
         payload = json.loads(result)
-        assert payload["dispatch"] == "quarry-dynamic"
+        assert payload["dispatch"] == "quarry-control"
         assert payload["tool"] == "run_in_sandbox"
 
     def test_run_no_subprocess_call(self, tmp_path: Path) -> None:

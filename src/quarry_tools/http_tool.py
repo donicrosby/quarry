@@ -3,10 +3,10 @@
 The tool is registered exclusively for the ``dynamic_validate`` and ``prove``
 roles.  It performs NO live I/O in agent context — it packages the validated
 ``HttpRequestSpec`` as a JSON dispatch payload so ``ToolRunner`` can route it to
-the ``quarry-dynamic`` Temporal activity.
+the ``quarry-control`` Temporal activity.
 
 Network containment (Layer 6) is enforced by the activity worker on the
-``quarry-dynamic`` queue, not here.  The tool's ``run()`` method never opens a
+``quarry-control`` queue, not here.  The tool's ``run()`` method never opens a
 socket.
 """
 
@@ -18,14 +18,14 @@ from typing import Any
 
 
 class _HttpRequestTool:
-    """Packages an HttpRequestSpec for dispatch to the quarry-dynamic activity."""
+    """Packages an HttpRequestSpec for dispatch to the quarry-control worker."""
 
     name = "http_request"
     description = (
         "Propose an HTTP request to the authorized target for live dynamic "
         "corroboration. Only available in the dynamic_validate and prove roles. "
         "Does not send the request directly — the request is dispatched to the "
-        "quarry-dynamic worker for scope-checked, network-contained execution."
+        "quarry-control worker for scope-checked, network-contained execution."
     )
     roles: list[str] = ["dynamic_validate", "prove"]
 
@@ -73,11 +73,11 @@ class _HttpRequestTool:
         """Package the spec as a JSON dispatch payload — no live I/O.
 
         The actual HTTP request is sent by the ``http_request_activity`` on the
-        ``quarry-dynamic`` Temporal task queue, after all six safety layers
+        ``quarry-control`` Temporal task queue, after all six safety layers
         (ADR-017) have been verified by the activity worker.
         """
         dispatch_payload: dict[str, Any] = {
-            "dispatch": "quarry-dynamic",
+            "dispatch": "quarry-control",
             "tool": self.name,
             "method": inputs.get("method"),
             "path": inputs.get("path"),
