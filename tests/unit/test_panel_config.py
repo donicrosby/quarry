@@ -11,6 +11,7 @@ import pytest
 
 from quarry.panel_config import (
     QuarryConfig,
+    RoleConfig,
     load_quarry_config,
     resolve_focus,
     resolve_panel,
@@ -215,3 +216,37 @@ def test_budget_config_cost_cap_parses_from_toml(tmp_path: Path) -> None:
     toml_path.write_text("[budget]\nmax_cost_per_scan_usd = 2.5\n", encoding="utf-8")
     cfg = load_quarry_config(path=toml_path)
     assert cfg.budget.max_cost_per_scan_usd == 2.5
+
+
+# ---------------------------------------------------------------------------
+# turn_timeout_seconds — per-role configurable model-call timeout
+# ---------------------------------------------------------------------------
+
+
+def test_role_config_turn_timeout_defaults_to_120() -> None:
+    cfg = RoleConfig()
+    assert cfg.turn_timeout_seconds == 120
+
+
+def test_role_config_turn_timeout_can_be_set() -> None:
+    cfg = RoleConfig(turn_timeout_seconds=300)
+    assert cfg.turn_timeout_seconds == 300
+
+
+def test_role_config_turn_timeout_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        '[panels.slow.roles.hunt]\nprovider = "litellm"\nmodel = "gpt-4o"\n'
+        "turn_timeout_seconds = 300\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    resolved = resolve_panel(cfg, "slow")
+    assert resolved["hunt"].turn_timeout_seconds == 300
+
+
+def test_role_config_turn_timeout_default_panel_is_120() -> None:
+    cfg = load_quarry_config()
+    resolved = resolve_panel(cfg, None)
+    for role_cfg in resolved.values():
+        assert role_cfg.turn_timeout_seconds == 120

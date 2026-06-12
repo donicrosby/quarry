@@ -164,6 +164,7 @@ def _recon_subsystem_impl(
         max_iterations=max_iterations,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, scan_id),
+        turn_timeout_seconds=recon_role.turn_timeout_seconds,
     )
 
     persist_model_invocations(db_path, scan_id, client)

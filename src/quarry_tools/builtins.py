@@ -153,6 +153,7 @@ class _SearchCode:
 
 
 from quarry_tools.http_tool import HTTP_REQUEST_TOOL  # noqa: E402
+from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL  # noqa: E402
 
 BUILTIN_REGISTRY: ToolRegistry = {
     "read_file": _ReadFile(),  # type: ignore[dict-item]
@@ -160,4 +161,5 @@ BUILTIN_REGISTRY: ToolRegistry = {
     "grep": _Grep(),  # type: ignore[dict-item]
     "search_code": _SearchCode(),  # type: ignore[dict-item]
     "http_request": HTTP_REQUEST_TOOL,  # type: ignore[dict-item]
+    "run_in_sandbox": RUN_IN_SANDBOX_TOOL,  # type: ignore[dict-item]
 }

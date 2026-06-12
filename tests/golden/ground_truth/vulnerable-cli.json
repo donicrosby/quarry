@@ -1,0 +1,28 @@
+[
+  {
+    "id": "gt-command-injection-run-cmd",
+    "vuln_class": "command_injection",
+    "file_path": "src/main.rs",
+    "route": null,
+    "severity": "critical",
+    "expected_fingerprint_hint": "command_injection:src/main.rs:run-cmd",
+    "cli_invocation": {
+      "command": "./target/release/vulnerable-cli",
+      "args": ["--run-cmd", "$(id)"],
+      "proof_signal": "uid="
+    }
+  },
+  {
+    "id": "gt-path-traversal-read-file",
+    "vuln_class": "path_traversal",
+    "file_path": "src/main.rs",
+    "route": null,
+    "severity": "high",
+    "expected_fingerprint_hint": "path_traversal:src/main.rs:read-file",
+    "cli_invocation": {
+      "command": "./target/release/vulnerable-cli",
+      "args": ["--read-file", "../../../etc/passwd"],
+      "proof_signal": "root:"
+    }
+  }
+]

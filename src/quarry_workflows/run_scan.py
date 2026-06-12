@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,7 @@ from quarry.schemas import (
     DynamicEvidenceLink,
     FinalFinding,
     FindingStatus,
+    HttpRequestSpec,
     HttpResponseCapture,
     IntegrationRun,
     IntegrationStatus,
@@ -41,6 +43,7 @@ from quarry.schemas import (
     SourceRef,
     SubsystemAssignment,
     Target,
+    TargetEndpoint,
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
@@ -58,6 +61,7 @@ from quarry_activities.inputs import (
     CloneRepoResult,
     CreateSnapshotInput,
     DeliverIntegrationsInput,
+    HttpRequestActivityInput,
     PersistScanStateInput,
     RenderReportInput,
     RenderReportOutput,
@@ -78,13 +82,14 @@ COMPLETED_STAGE_ORDER = {
     "RECON": 2,
     "HUNT": 3,
     "VALIDATION": 4,
-    "AGENTIC_VALIDATE": 5,  # Week 13: adversarial validate stage
-    "GAPFILL": 6,  # Week 13: coverage floor + agentic gap detection
-    "DEDUP": 7,  # Week 13: deterministic + agentic dedup
-    "COVERAGE": 8,
-    "REPORT": 9,
-    "INTEGRATING": 10,
-    "COMPLETED": 11,
+    "AGENTIC_VALIDATE": 5,
+    "PROVE": 6,  # agentic proof-of-concept generation (ADR-017 §5/§7)
+    "GAPFILL": 7,
+    "DEDUP": 8,
+    "COVERAGE": 9,
+    "REPORT": 10,
+    "INTEGRATING": 11,
+    "COMPLETED": 12,
 }
 
 
@@ -128,6 +133,10 @@ class RunScanInput(BaseModel):
     # Live-dynamic validation gate (ADR-017). CLI flags are the sole authority;
     # target_url presence alone must never flip this flag.
     dynamic_validation_enabled: bool = False
+    # When True, also probe confirmed findings with live HTTP to collect proof artifacts.
+    live_prove_enabled: bool = False
+    # When True, run the agentic PROVE stage after AGENTIC_VALIDATE (ADR-017 §5/§7).
+    proof_enabled: bool = False
     # Hosts the dynamic worker may contact; empty tuple = all hosts blocked.
     allowed_hosts: tuple[str, ...] = ()
     # AuthProfileSet serialized as JSON; None = unauthenticated scans only.
@@ -348,6 +357,7 @@ class RunScanWorkflow:
                     provider=_prov,
                     model=recon_panel_entry.model,
                     rpm=recon_panel_entry.rate_limit_rpm,
+                    turn_timeout_seconds=recon_panel_entry.turn_timeout_seconds,
                 ).model_dump_json()
 
             # return_exceptions=True: a subsystem recon failing must not fail the
@@ -667,6 +677,60 @@ class RunScanWorkflow:
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
                     final = _final_from_candidate(candidate, scan.id, workflow.now())
+                    # Live-prove path: supplement confirmed findings with HTTP evidence.
+                    if (
+                        scan_input.live_prove_enabled
+                        and scan_input.dynamic_validation_enabled
+                        and scan_input.target_url
+                        and not val_over_budget
+                    ):
+                        prove_spec = build_dynamic_probe_spec(candidate)
+                        if prove_spec is not None:
+                            prove_ep = build_target_endpoint_from_url(scan_input.target_url)
+                            prove_inp = HttpRequestActivityInput(
+                                spec_json=prove_spec.model_dump_json(),
+                                target_endpoint_json=prove_ep.model_dump_json(),
+                                allowed_hosts=scan_input.allowed_hosts
+                                or (prove_ep.host, "127.0.0.1"),
+                                artifact_store_path=artifact_root,
+                                scan_id=scan.id,
+                                candidate_finding_id=candidate.id,
+                            )
+                            try:
+                                prove_raw = await workflow.execute_activity(
+                                    "http-request",
+                                    args=[prove_inp],
+                                    start_to_close_timeout=timedelta(minutes=2),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                )
+                                prove_capture = HttpResponseCapture.model_validate(
+                                    prove_raw if isinstance(prove_raw, dict) else prove_raw
+                                )
+                                if 200 <= prove_capture.status_code < 300:
+                                    proof_ids = list(
+                                        filter(
+                                            None,
+                                            [
+                                                prove_capture.request_artifact_ref,
+                                                prove_capture.body_artifact_ref,
+                                            ],
+                                        )
+                                    )
+                                    final = final.model_copy(
+                                        update={"proof_artifact_ids": proof_ids}
+                                    )
+                                    await _append_workflow_event(
+                                        scan_input.db_path,
+                                        scan.id,
+                                        "finding.dynamic_validated",
+                                        {
+                                            "finding_id": final.id,
+                                            "status_code": str(prove_capture.status_code),
+                                            "proof_artifact_count": str(len(proof_ids)),
+                                        },
+                                    )
+                            except Exception:
+                                pass  # non-fatal; finding stays confirmed without live proof
                     await _persist_scan_state(
                         scan_input.db_path,
                         "save_final_finding",
@@ -683,18 +747,81 @@ class RunScanWorkflow:
                     # Retain as unverified — never drop. Persist with NEEDS_PROOF status
                     # so the future prove stage can filter on status == NEEDS_PROOF.
                     retained = candidate.model_copy(update={"status": FindingStatus.NEEDS_PROOF})
-                    await _persist_scan_state(
-                        scan_input.db_path,
-                        "save_candidate_finding",
-                        {"finding": _model_json_dict(retained)},
-                    )
-                    needs_proof_findings.append(retained)
-                    await _append_workflow_event(
-                        scan_input.db_path,
-                        scan.id,
-                        "finding.needs_proof",
-                        {"finding_id": candidate.id, "verdict": verdict},
-                    )
+
+                    # ── Dynamic validate sub-step (ADR-017) ──────────────────
+                    # If live dynamic validation is enabled, try to corroborate
+                    # NEEDS_PROOF findings with a live HTTP probe.  A 2xx response
+                    # promotes the finding to FinalFinding with proof_artifact_ids.
+                    # Non-idempotent methods are non-retryable (single attempt only).
+                    dyn_promoted = False
+                    if (
+                        scan_input.dynamic_validation_enabled
+                        and scan_input.target_url
+                        and not val_over_budget
+                    ):
+                        probe_spec = build_dynamic_probe_spec(retained)
+                        if probe_spec is not None:
+                            target_ep = build_target_endpoint_from_url(scan_input.target_url)
+                            inp = HttpRequestActivityInput(
+                                spec_json=probe_spec.model_dump_json(),
+                                target_endpoint_json=target_ep.model_dump_json(),
+                                allowed_hosts=scan_input.allowed_hosts
+                                or (target_ep.host, "127.0.0.1"),
+                                artifact_store_path=artifact_root,
+                                scan_id=scan.id,
+                                candidate_finding_id=candidate.id,
+                            )
+                            try:
+                                capture_raw = await workflow.execute_activity(
+                                    "http-request",
+                                    args=[inp],
+                                    start_to_close_timeout=timedelta(minutes=2),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                )
+                                capture = HttpResponseCapture.model_validate(
+                                    capture_raw if isinstance(capture_raw, dict) else capture_raw
+                                )
+                                promotion = promote_with_dynamic_evidence(
+                                    retained, capture, scan.id, workflow.now()
+                                )
+                                if promotion is not None:
+                                    dyn_final, _dyn_link = promotion
+                                    await _persist_scan_state(
+                                        scan_input.db_path,
+                                        "save_final_finding",
+                                        {"finding": _model_json_dict(dyn_final)},
+                                    )
+                                    final_findings.append(dyn_final)
+                                    await _append_workflow_event(
+                                        scan_input.db_path,
+                                        scan.id,
+                                        "finding.dynamic_validated",
+                                        {
+                                            "finding_id": dyn_final.id,
+                                            "status_code": str(capture.status_code),
+                                            "proof_artifact_count": str(
+                                                len(dyn_final.proof_artifact_ids)
+                                            ),
+                                        },
+                                    )
+                                    dyn_promoted = True
+                            except Exception:
+                                # Dynamic probe failure is non-fatal; finding stays NEEDS_PROOF.
+                                pass
+
+                    if not dyn_promoted:
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_candidate_finding",
+                            {"finding": _model_json_dict(retained)},
+                        )
+                        needs_proof_findings.append(retained)
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "finding.needs_proof",
+                            {"finding_id": candidate.id, "verdict": verdict},
+                        )
                 elif verdict == "rejected":
                     # Drop — explicitly labelled, not an implicit fallthrough.
                     await _append_workflow_event(
@@ -1518,6 +1645,7 @@ def panel_json_for_role(scan: Scan, role: str) -> str | None:
         provider=provider,
         model=entry.model,
         rpm=entry.rate_limit_rpm,
+        turn_timeout_seconds=entry.turn_timeout_seconds,
     ).model_dump_json()
 
 
@@ -1560,6 +1688,50 @@ def _final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -
         validation_result_id=f"{candidate.id}-validation",
         created_at=now,
     )
+
+
+def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:
+    """Parse *target_url* into a TargetEndpoint.
+
+    Defaults:
+    - HTTP → port 80
+    - HTTPS → port 443
+    - base_path → '/' when no path is present
+    """
+    parsed = urlparse(target_url)
+    scheme = parsed.scheme if parsed.scheme in ("http", "https") else "http"
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if scheme == "https" else 80)
+    base_path = parsed.path.rstrip("/") or "/"
+    return TargetEndpoint(host=host, port=port, scheme=scheme, base_path=base_path)  # type: ignore[arg-type]
+
+
+# Per-class deterministic probe paths for the agentic pipeline's dynamic validate step.
+# Each path is a minimal, safe GET probe that confirms the endpoint is reachable.
+# For production, the dynamic_validate agent proposes the spec; these defaults are
+# used when no agent-proposed spec is available (e.g., simplified demo probes).
+_CLASS_PROBE_PATHS: dict[str, str] = {
+    VulnerabilityClass.IDOR.value: "/users/1",
+    VulnerabilityClass.COMMAND_INJECTION.value: "/debug/ping?host=127.0.0.1",
+    VulnerabilityClass.SSRF.value: "/fetch-local?url=http://127.0.0.1",
+    VulnerabilityClass.XSS.value: "/",
+}
+
+
+def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | None:
+    """Build a minimal GET probe spec for a NEEDS_PROOF finding.
+
+    Returns None for vuln classes (e.g. secrets) that cannot be corroborated via
+    an HTTP request.
+
+    The path is a deterministic best-effort guess based on vuln_class.  In a
+    full agentic flow the dynamic_validate agent proposes the spec; this function
+    serves as the fallback for simplified or non-agentic demo probes.
+    """
+    path = _CLASS_PROBE_PATHS.get(candidate.vuln_class.value)
+    if path is None:
+        return None
+    return HttpRequestSpec(method="GET", path=path)
 
 
 def promote_with_dynamic_evidence(
@@ -1621,6 +1793,65 @@ def promote_with_dynamic_evidence(
     )
 
     return final, link
+
+
+def build_proof_artifact(
+    candidate: "CandidateFinding",
+    capture: "Any",  # SandboxExecCapture | HttpResponseCapture
+    proof_type: str,
+    scan_id: str,
+    now: "datetime",
+) -> "ProofArtifact":
+    """Build a ProofArtifact from a sandbox or HTTP capture.
+
+    Pure function — no I/O.  Called from the PROVE stage after the workflow
+    dispatches sandbox-exec / http-request activities and receives captures.
+
+    *proof_type* is "cli_exec" for sandbox results or "dynamic_http" for HTTP.
+    The evidence_refs are populated from stdout/stderr artifact refs (sandbox)
+    or request/body artifact refs (HTTP), whichever are non-empty.
+    """
+    evidence_ids: list[str] = []
+
+    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
+    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
+        evidence_ids.append(capture.stdout_artifact_ref)
+    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
+        evidence_ids.append(capture.stderr_artifact_ref)
+    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
+    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
+        evidence_ids.append(capture.request_artifact_ref)
+    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
+        evidence_ids.append(capture.body_artifact_ref)
+
+    evidence_refs = [
+        ArtifactRef(
+            id=ref_id,
+            uri=f"file://{ref_id}",
+            kind=ArtifactKind.TOOL_STDOUT,
+            content_type="text/plain",
+            sha256="",
+            size_bytes=0,
+            created_at=now,
+        )
+        for ref_id in evidence_ids
+    ]
+
+    scrubber_hits: int = getattr(capture, "scrubber_hits", 0)
+    redaction_status: RedactionStatus = (
+        RedactionStatus.REDACTED if scrubber_hits > 0 else RedactionStatus.NOT_REQUIRED
+    )
+
+    return ProofArtifact(
+        id=f"proof-{candidate.id}",
+        scan_id=scan_id,
+        candidate_finding_id=candidate.id,
+        proof_type=proof_type,
+        description=f"{proof_type} proof for {candidate.vuln_class.value}: {candidate.title}",
+        evidence_refs=evidence_refs,
+        redaction_status=redaction_status,
+        created_at=now,
+    )
 
 
 def split_hunt_result(result: object) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

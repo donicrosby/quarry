@@ -34,7 +34,13 @@ ROLE_ALLOWED_ACTION_KINDS: dict[str, frozenset[str]] = {
     "hunt": frozenset({"read", "cite", "hypothesize"}),
     "gapfill": frozenset({"read", "hypothesize"}),
     "validate": frozenset({"read", "request_check"}),
-    "prove": frozenset({"read", "safe_proof"}),
+    # prove: transport-agnostic proof collection (ADR-017 §5).
+    # run_in_sandbox — CLI/binary execution in an isolated sandbox.
+    # http_request — live HTTP proof against a target endpoint.
+    # read_file + grep — static analysis supporting proof reasoning.
+    "prove": frozenset(
+        {"read", "safe_proof", "run_in_sandbox", "http_request", "read_file", "grep"}
+    ),
     "trace": frozenset({"read"}),
     "report": frozenset({"summarize"}),
     "integration": frozenset({"deliver_finalized"}),

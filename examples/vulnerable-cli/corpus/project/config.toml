@@ -1,0 +1,11 @@
+# Sample project configuration for vulnerable-cli corpus.
+# The CLI reads this file when --config is specified.
+
+[project]
+name = "example-project"
+version = "1.0.0"
+run_hook = "echo project loaded"
+
+[paths]
+data_dir = "data"
+output_dir = "output"

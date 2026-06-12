@@ -34,3 +34,11 @@ class QuarrySettings(BaseSettings):
 
     # Task queues
     dynamic_task_queue: str = "quarry-dynamic"  # live HTTP / dynamic validation
+
+    # Artifact store backend (Phase 1c / ADR-022 §B).
+    # "" or "file" => LocalArtifactStore (default, dev, backward-compatible).
+    # "redis" => RedisArtifactStore (deferred; fast small scratch).
+    # "s3"    => S3ArtifactStore    (deferred; large blobs, e.g. compiled binaries).
+    artifact_backend: str = ""  # env: QUARRY_ARTIFACT_BACKEND
+    redis_url: str = ""  # env: QUARRY_REDIS_URL      (used when backend=redis)
+    s3_bucket: str = ""  # env: QUARRY_S3_BUCKET      (used when backend=s3)

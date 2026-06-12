@@ -486,3 +486,58 @@ def test_model_call_exception_retries_until_turns_run_out(tmp_path: Path) -> Non
     assert result.stop_reason == "max_iterations"
     assert result.final_answer is None
     assert client.calls == 5
+
+
+def test_turn_timeout_seconds_reaches_model_request(tmp_path: Path) -> None:
+    """turn_timeout_seconds passed to run_agent_loop must appear on ModelRequest.timeout_seconds."""
+    received_timeouts: list[int] = []
+
+    class _TimeoutSpyClient:
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            received_timeouts.append(request.timeout_seconds)
+            return type(
+                "Resp",
+                (),
+                {"parsed": response_model(result="done", tool_calls=[]), "estimated_cost": 0.0},
+            )()
+
+    run_agent_loop(
+        client=_TimeoutSpyClient(),  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=10.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+        turn_timeout_seconds=45,
+    )
+    assert received_timeouts == [45]
+
+
+def test_turn_timeout_seconds_default_is_120(tmp_path: Path) -> None:
+    """When turn_timeout_seconds is omitted the default of 120 s is used."""
+    received_timeouts: list[int] = []
+
+    class _TimeoutDefaultClient:
+        def complete_structured(self, request: Any, response_model: type[Any]) -> Any:
+            received_timeouts.append(request.timeout_seconds)
+            return type(
+                "Resp",
+                (),
+                {"parsed": response_model(result="done", tool_calls=[]), "estimated_cost": 0.0},
+            )()
+
+    run_agent_loop(
+        client=_TimeoutDefaultClient(),  # type: ignore[arg-type]
+        role="hunt",
+        agent_kind="hunt",
+        system_prompt="s",
+        initial_user_message="u",
+        runner=_make_runner(tmp_path),
+        budget_spec=BudgetSpec(max_cost_usd=10.0),
+        response_model=_DummyAnswer,
+        max_iterations=5,
+    )
+    assert received_timeouts == [120]

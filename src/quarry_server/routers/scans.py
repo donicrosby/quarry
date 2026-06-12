@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -58,6 +59,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             provider=cfg.provider.value,
             model=cfg.model,
             rate_limit_rpm=cfg.rpm,
+            turn_timeout_seconds=cfg.turn_timeout_seconds,
         )
         for role, cfg in resolved.items()
     ]
@@ -65,6 +67,16 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
     # Derive output_dir from the server-configured db_path so artifacts land
     # alongside the database (e.g. /data when db_path=/data/quarry.db).
     _server_data_dir = str(Path(settings.db_path).parent)
+    # Derive allowed_hosts from target_url when dynamic validation is enabled.
+    # The CLI flags are the sole authority (ADR-017 Layer 1); target_url presence
+    # alone must never enable live traffic.
+    _allowed_hosts: tuple[str, ...] = ()
+    if body.dynamic_validation_enabled and body.target_url:
+        _parsed = urlparse(body.target_url)
+        _host = _parsed.hostname or ""
+        if _host:
+            _allowed_hosts = (_host, "127.0.0.1") if _host != "127.0.0.1" else ("127.0.0.1",)
+
     await temporal_client.start_workflow(
         "RunScanWorkflow",
         RunScanInput(
@@ -85,6 +97,9 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             recon_max_iterations=quarry_config.scan_defaults.recon_max_iterations,
             dedup_max_iterations=quarry_config.scan_defaults.dedup_max_iterations,
             scan_seed=_resolve_scan_seed(pinned=quarry_config.scan_defaults.seed, scan_id=scan_id),
+            dynamic_validation_enabled=body.dynamic_validation_enabled,
+            live_prove_enabled=body.live_prove_enabled,
+            allowed_hosts=_allowed_hosts,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

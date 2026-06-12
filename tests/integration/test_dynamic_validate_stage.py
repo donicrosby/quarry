@@ -1,12 +1,12 @@
 """Integration test: dynamic_validate sub-step within AGENTIC_VALIDATE (ADR-017).
 
-Written RED first — these fail until the dynamic_validate sub-step is wired.
-
 Contracts tested:
 1. Backward-compat cut-line: dynamic_validation_enabled=False → pipeline identical to today.
 2. Flag on + needs_proof finding → dynamic sub-step attaches DynamicEvidenceLink.
 3. Promoted finding carries non-empty proof_artifact_ids.
 4. RunScanInput exposes dynamic_validation_enabled, allowed_hosts, auth_profiles_json.
+5. build_dynamic_probe_spec produces class-appropriate HttpRequestSpec.
+6. build_target_endpoint_from_url parses scheme/host/port correctly.
 """
 
 from __future__ import annotations
@@ -24,7 +24,12 @@ from quarry.schemas import (
     SourceRef,
     VulnerabilityClass,
 )
-from quarry_workflows.run_scan import RunScanInput, promote_with_dynamic_evidence
+from quarry_workflows.run_scan import (
+    RunScanInput,
+    build_dynamic_probe_spec,
+    build_target_endpoint_from_url,
+    promote_with_dynamic_evidence,
+)
 
 _NOW = datetime(2026, 6, 11, tzinfo=UTC)
 
@@ -108,6 +113,19 @@ class TestRunScanInputDynamicFields:
         assert inp.dynamic_validation_enabled is True
         assert "localhost" in inp.allowed_hosts
 
+    def test_live_prove_disabled_by_default(self) -> None:
+        inp = RunScanInput(repo_path="/tmp/repo")
+        assert inp.live_prove_enabled is False
+
+    def test_can_enable_live_prove(self) -> None:
+        inp = RunScanInput(
+            repo_path="/tmp/repo",
+            dynamic_validation_enabled=True,
+            live_prove_enabled=True,
+            allowed_hosts=("host.docker.internal",),
+        )
+        assert inp.live_prove_enabled is True
+
 
 # ---------------------------------------------------------------------------
 # promote_with_dynamic_evidence helper
@@ -190,3 +208,94 @@ class TestPromoteWithDynamicEvidence:
             now=_NOW,
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# build_dynamic_probe_spec (deterministic probe per vuln_class)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDynamicProbeSpec:
+    """build_dynamic_probe_spec maps vuln_class to an appropriate HttpRequestSpec."""
+
+    def test_idor_probe_uses_get(self) -> None:
+        candidate = _make_candidate(vuln_class=VulnerabilityClass.IDOR)
+        spec = build_dynamic_probe_spec(candidate)
+        assert spec is not None
+        assert spec.method == "GET"
+
+    def test_command_injection_probe_uses_get(self) -> None:
+        candidate = _make_candidate(vuln_class=VulnerabilityClass.COMMAND_INJECTION)
+        spec = build_dynamic_probe_spec(candidate)
+        assert spec is not None
+        assert spec.method == "GET"
+
+    def test_ssrf_probe_uses_get(self) -> None:
+        candidate = _make_candidate(vuln_class=VulnerabilityClass.SSRF)
+        spec = build_dynamic_probe_spec(candidate)
+        assert spec is not None
+        assert spec.method == "GET"
+
+    def test_secrets_probe_returns_none(self) -> None:
+        """Secrets findings cannot be proven via an HTTP request."""
+        candidate = _make_candidate(vuln_class=VulnerabilityClass.SECRETS)
+        spec = build_dynamic_probe_spec(candidate)
+        assert spec is None
+
+    def test_idor_path_targets_resource_endpoint(self) -> None:
+        candidate = _make_candidate(vuln_class=VulnerabilityClass.IDOR)
+        spec = build_dynamic_probe_spec(candidate)
+        assert spec is not None
+        # Path should be a non-empty string that references a resource
+        assert spec.path.startswith("/")
+        assert len(spec.path) > 1
+
+    def test_probe_has_no_inline_auth(self) -> None:
+        """auth_profile must be None or a profile name — never an inline token."""
+        for vuln_class in (
+            VulnerabilityClass.IDOR,
+            VulnerabilityClass.COMMAND_INJECTION,
+            VulnerabilityClass.SSRF,
+        ):
+            candidate = _make_candidate(vuln_class=vuln_class)
+            spec = build_dynamic_probe_spec(candidate)
+            if spec is not None:
+                # auth_profile must be None (no auth for basic probes) or a profile name
+                # (never an inline token — validated by HttpRequestSpec itself)
+                assert spec.auth_profile is None or not spec.auth_profile.startswith("Bearer ")
+
+
+# ---------------------------------------------------------------------------
+# build_target_endpoint_from_url
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTargetEndpointFromUrl:
+    def test_parses_http_host_port(self) -> None:
+        endpoint = build_target_endpoint_from_url("http://localhost:9000")
+        assert endpoint.scheme == "http"
+        assert endpoint.host == "localhost"
+        assert endpoint.port == 9000
+
+    def test_parses_https_default_port(self) -> None:
+        endpoint = build_target_endpoint_from_url("https://example.com")
+        assert endpoint.scheme == "https"
+        assert endpoint.host == "example.com"
+        assert endpoint.port == 443
+
+    def test_parses_http_default_port(self) -> None:
+        endpoint = build_target_endpoint_from_url("http://example.com")
+        assert endpoint.port == 80
+
+    def test_base_path_preserved(self) -> None:
+        endpoint = build_target_endpoint_from_url("http://localhost:9000/api/v1")
+        assert endpoint.base_path == "/api/v1"
+
+    def test_base_path_defaults_to_slash(self) -> None:
+        endpoint = build_target_endpoint_from_url("http://localhost:9000")
+        assert endpoint.base_path == "/"
+
+    def test_127_0_0_1_parsed_correctly(self) -> None:
+        endpoint = build_target_endpoint_from_url("http://127.0.0.1:8080")
+        assert endpoint.host == "127.0.0.1"
+        assert endpoint.port == 8080

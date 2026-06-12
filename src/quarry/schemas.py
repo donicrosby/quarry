@@ -279,6 +279,7 @@ class ModelPanelEntry(BaseModel):
     provider: str
     model: str
     rate_limit_rpm: int = 30
+    turn_timeout_seconds: int = 120
 
 
 class ScopeExclusion(BaseModel):
@@ -1145,6 +1146,95 @@ class DynamicEvidenceLink(BaseModel):
     request_artifact_id: str
     response_artifact_id: str
     candidate_finding_id: str
+
+
+# ---------------------------------------------------------------------------
+# Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
+# ---------------------------------------------------------------------------
+
+
+class EnvProfile(StrEnum):
+    """Named, vetted environment profiles for sandbox execution.
+
+    The prove agent picks a NAME, never raw env-var values.  Credential injection
+    (QUARRY_INJECTED_CRED_*) is the sole exception and is resolved worker-side (ADR-018).
+    """
+
+    NONE = "none"  # empty env — default; tightest containment
+    REPO_READONLY = "repo_readonly"  # minimal PATH + repo root only, no credentials
+
+
+class SandboxExecSpec(BaseModel):
+    """A CLI/binary invocation the prove agent proposes.  No live I/O in agent context.
+
+    Parallels HttpRequestSpec: carries no inline secrets; auth_profile and env_profile
+    are NAMES resolved worker-side at dispatch (ADR-018).  input_files are crafted
+    attacker-controlled files staged into the sandbox working dir before execution.
+    """
+
+    command: str
+    args: list[str] = Field(default_factory=list)
+    stdin: str | None = None
+    env_profile: EnvProfile = EnvProfile.NONE
+    cwd: str = "."  # relative to sandbox working dir; restricted worker-side
+    input_files: dict[str, str] = Field(default_factory=dict)
+    timeout_seconds: int = 30  # hard-capped worker-side (max 60 s)
+    auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("auth_profile")
+    @classmethod
+    def _reject_inline_credential(cls, v: str | None) -> str | None:
+        if v is not None and _CREDENTIAL_RE.match(v):
+            msg = (
+                f"auth_profile looks like an inline credential: '{v[:12]}…'. "
+                "Use a named credential reference, never an inline token."
+            )
+            raise ValueError(msg)
+        return v
+
+
+class SandboxExecCapture(BaseModel):
+    """Captured result of a sandbox execution.  Parallels HttpResponseCapture.
+
+    stdout/stderr stored as artifacts (TOOL_STDOUT/TOOL_STDERR), never inline.
+    Both streams pass through Scrubber.scrub() + <target_content> wrap before
+    any prompt re-entry (same policy as HTTP response bodies).
+    """
+
+    exit_code: int
+    stdout_artifact_ref: str  # ArtifactRef id — scrubbed, size-capped TOOL_STDOUT
+    stderr_artifact_ref: str  # ArtifactRef id — scrubbed, size-capped TOOL_STDERR
+    elapsed_ms: int
+    scrubber_hits: int = 0
+    redaction_status: RedactionStatus
+    timed_out: bool = False
+
+
+class ProveCorpus(BaseModel):
+    """A dataset the prove sandbox materializes as the CLI's working input.
+
+    The CLI target cannot be proven in isolation — it needs a corpus to operate on
+    (e.g. a dbt project for dbt Core, a sample repo for a linter).  This is staged
+    into the sandbox working dir alongside any crafted input_files.
+    """
+
+    source: str  # local path or git URL
+    materialize_as: str = "project"  # subdir created inside the sandbox working dir
+    setup_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
+
+    @field_validator("materialize_as")
+    @classmethod
+    def _reject_non_relative(cls, v: str) -> str:
+        from pathlib import PurePosixPath
+
+        p = PurePosixPath(v)
+        if p.is_absolute() or ".." in p.parts:
+            msg = (
+                f"materialize_as must be a simple relative path, got '{v}'. "
+                "Absolute paths and path traversal (..) are rejected."
+            )
+            raise ValueError(msg)
+        return v
 
 
 # ---------------------------------------------------------------------------

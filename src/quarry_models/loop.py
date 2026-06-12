@@ -224,6 +224,9 @@ def run_agent_loop(
     # get the old placeholder-string behaviour (backward compatible).
     artifact_store_path: str | None = None,
     scan_id: str | None = None,
+    # Per-turn model-call wall-clock timeout.  Set to 120 s so Chutes queue
+    # delays surface as a retriable activity failure rather than a hung scan.
+    turn_timeout_seconds: int = 120,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -316,6 +319,7 @@ def run_agent_loop(
             }
             if provider_policy is not None:
                 req_kwargs["provider_policy"] = provider_policy
+            req_kwargs["timeout_seconds"] = turn_timeout_seconds
             request = ModelRequest(**req_kwargs)  # type: ignore[arg-type]
             _log.info("[%s turn=%d] → model", agent_kind, iteration)
             # Open models intermittently emit unparseable/non-conforming JSON.

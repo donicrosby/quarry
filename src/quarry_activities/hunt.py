@@ -135,6 +135,7 @@ def hunt_impl(
     cost_per_iteration: float = 0.0,
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
+    turn_timeout_seconds: int = 120,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
@@ -197,6 +198,7 @@ def hunt_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        turn_timeout_seconds=turn_timeout_seconds,
     )
 
     findings: list[CandidateFinding] = []
@@ -302,6 +304,7 @@ def _hunt_activity_impl(
         client=client,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, task.scan_id),
+        turn_timeout_seconds=role_cfg.turn_timeout_seconds,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

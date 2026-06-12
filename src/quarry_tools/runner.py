@@ -14,8 +14,8 @@ from quarry_models.types import BudgetSpec
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
 from quarry_tools.spec import ToolRegistry
 
-# Tools that may issue live HTTP requests; the scope-exclusion guard applies to them.
-_DYNAMIC_TOOLS = frozenset({"http_request"})
+# Tools that dispatch live I/O; the scope-exclusion guard (Layer 4) applies to them.
+_DYNAMIC_TOOLS = frozenset({"http_request", "run_in_sandbox"})
 
 
 @dataclass
@@ -109,10 +109,20 @@ def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) 
         url_prefix = _path_glob_to_url_prefix(value)
         if path.startswith(url_prefix) or fnmatch.fnmatch(path, value):
             return True
+        # Also check the sandbox cwd field (run_in_sandbox)
+        cwd = str(inputs.get("cwd", ""))
+        if cwd and (cwd.startswith(url_prefix) or fnmatch.fnmatch(cwd, value)):
+            return True
 
     elif kind == "vuln_class":
         vc = str(inputs.get("vuln_class", "")).lower()
         if vc and fnmatch.fnmatch(vc, value.lower()):
+            return True
+
+    elif kind == "command":
+        # Sandbox-specific: block by command name or glob (run_in_sandbox)
+        cmd = str(inputs.get("command", ""))
+        if cmd and fnmatch.fnmatch(cmd, value):
             return True
 
     return False

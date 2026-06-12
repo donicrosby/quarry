@@ -33,6 +33,10 @@ class RoleConfig(BaseModel):
     provider: Provider = Provider.MOCK
     model: str = ""
     rpm: int = 30
+    # Per-turn model-call timeout. Chutes open-weight models can queue for
+    # minutes; 120 s is a fail-fast default that surfaces hangs quickly so the
+    # activity retries rather than blocking the entire scan.
+    turn_timeout_seconds: int = 120
 
 
 # The default built-in panel.  All roles fall back here if not overridden.

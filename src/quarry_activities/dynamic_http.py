@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 
 import httpx
-from pydantic import BaseModel, ConfigDict
 from temporalio import activity
 
 from quarry.schemas import (
@@ -27,30 +26,13 @@ from quarry.schemas import (
     RedactionStatus,
     TargetEndpoint,
 )
+from quarry_activities.inputs import HttpRequestActivityInput
 from quarry_artifacts.http_utils import capture_request_artifact, capture_response_artifact
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.redaction import Scrubber
 
 # Body cap — applied before scrubbing so prompts never receive huge payloads.
 MAX_BODY_BYTES = 10 * 1024  # 10KB
-
-
-class HttpRequestActivityInput(BaseModel):
-    """Input payload for http_request_activity.
-
-    All values are JSON-serializable primitives at the Temporal boundary.
-    Richer domain objects are reconstructed inside the activity.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    spec_json: str  # HttpRequestSpec serialized
-    target_endpoint_json: str  # TargetEndpoint serialized
-    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
-    artifact_store_path: str  # path for LocalArtifactStore
-    scan_id: str
-    candidate_finding_id: str
-    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
 
 
 def enforce_allowed_hosts(host: str, allowed_hosts: tuple[str, ...]) -> None:

@@ -416,11 +416,28 @@ def benchmark_local(
         str, typer.Option("--ground-truth", help="Path to ground truth JSON")
     ] = "tests/golden/ground_truth/vulnerable-fastapi.json",
     target: Annotated[str | None, typer.Option("--target", help="Target URL")] = None,
+    dynamic_validation: Annotated[
+        bool,
+        typer.Option(
+            "--dynamic-validation/--no-dynamic-validation", help="Enable live dynamic validation"
+        ),
+    ] = False,
+    live_prove: Annotated[
+        bool,
+        typer.Option(
+            "--live-prove/--no-live-prove",
+            help="Probe confirmed findings to collect proof artifacts",
+        ),
+    ] = False,
 ) -> None:
     """Scan the demo app via the server and compare findings to ground truth."""
     settings = QuarrySettings()
     try:
-        lines = asyncio.run(_benchmark_local_command(settings, repo, ground_truth, target))
+        lines = asyncio.run(
+            _benchmark_local_command(
+                settings, repo, ground_truth, target, dynamic_validation, live_prove
+            )
+        )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
     except FileNotFoundError:
@@ -450,6 +467,8 @@ async def _benchmark_local_command(
     repo: str,
     ground_truth: str,
     target: str | None,
+    dynamic_validation: bool = False,
+    live_prove: bool = False,
 ) -> list[str]:
     if ground_truth_is_inside_repo(repo, ground_truth):
         raise ValueError(
@@ -464,7 +483,11 @@ async def _benchmark_local_command(
     async with QuarryClient(base_url=settings.server_url) as client:
         started = time.monotonic()
         result = await client.start_scan(
-            repo_path=repo, target_url=target, vuln_classes=truth_classes
+            repo_path=repo,
+            target_url=target,
+            vuln_classes=truth_classes,
+            dynamic_validation_enabled=dynamic_validation,
+            live_prove_enabled=live_prove,
         )
         scan_id = result["scan_id"]
         while True:

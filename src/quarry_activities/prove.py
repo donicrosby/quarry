@@ -1,19 +1,19 @@
-"""Validate activity — adversarial review of each CandidateFinding.
+"""Prove activity — agentic proof-of-concept generation for CandidateFinding.
 
-The validator receives only a ValidatorClaim (file, lines, vuln_class, description).
-It must never receive the hunter reasoning, tool trace, provider, or model name.
-See ADR-021 for the independence boundary specification.
+The prove agent proposes sandbox exec specs and/or HTTP probe specs based on
+static analysis of the finding.  It NEVER performs live I/O inside the loop —
+all proposed specs are returned to the workflow for dispatching via
+sandbox-exec / http-request activities (Phase 6).
 
-All model calls happen inside this Temporal activity, never in workflow code.
+Agent proposes → workflow dispatches → proof artifact produced.
+This preserves loop-in-activity determinism and the Temporal execution model.
 """
 
 from __future__ import annotations
 
 import contextvars
 import threading
-import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,6 @@ from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
     CandidateFinding,
     Provider,
-    ValidationResult,
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
@@ -32,22 +31,28 @@ from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec, ProviderPolicy
-from quarry_models.validation import validate_claim_from_finding
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
 
 
-class ValidateResponse(BaseModel):
-    """Model output schema for the validate agent loop."""
+class ProveResponse(BaseModel):
+    """Model output schema for the prove agent loop.
 
-    verdict: str = "validated"
+    The agent populates proposed_exec_specs and proposed_http_specs in its
+    final response (empty tool_calls).  The workflow then dispatches those
+    specs via sandbox-exec / http-request activities with maximum_attempts=1.
+    """
+
+    verdict: str = "inconclusive"  # "proved" | "not_proved" | "inconclusive"
+    proposed_exec_specs: list[dict[str, Any]] = []
+    proposed_http_specs: list[dict[str, Any]] = []
     reasons: list[str] = []
     tool_calls: list[ToolCallRequest] = []
 
 
-def validate_impl(
+def prove_impl(
     *,
     finding: CandidateFinding,
     repo_path: str,
@@ -59,23 +64,18 @@ def validate_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
-) -> ValidationResult:
-    """Core validate implementation — callable from the activity and from tests.
+) -> ProveResponse:
+    """Core prove implementation — callable from the activity and from tests.
 
-    Enforces the ADR-021 independence boundary: only ValidatorClaim fields
-    reach the prompt; the full CandidateFinding is never serialised into any
-    model message.
+    The agent reads source code and proposes sandbox exec specs or HTTP probe
+    specs.  It never executes them; the workflow dispatches them (Phase 6).
     """
     if budget_spec is None:
         budget_spec = BudgetSpec()
 
-    # Build the claim — the ONLY permitted source of finding data for the prompt.
-    # This enforces the independence boundary: no hunter reasoning/provider/trace.
-    claim = validate_claim_from_finding(finding)
-
     runner = ToolRunner(
         repo_root=Path(repo_path),
-        role="validate",
+        role="prove",
         registry=load_registry(),
         budget_spec=budget_spec,
     )
@@ -83,32 +83,31 @@ def validate_impl(
     registry = get_registry()
     prompt = build_prompt(
         registry=registry,
-        role="validate",
-        name="validate",
+        role="prove",
+        name="prove",
         version="1.0.0",
         variables={
-            "vuln_class": claim.vuln_class.value,
-            "file": claim.file or "",
-            "line_start": claim.line_start,
-            "line_end": claim.line_end,
-            "description": claim.description,
-            "affected_code_snippet": claim.affected_code_snippet,
+            "vuln_class": finding.vuln_class.value,
+            "file": finding.affected_component or "",
+            "line_start": None,
+            "line_end": None,
+            "description": finding.hypothesis,
+            "affected_code_snippet": None,
         },
     )
 
-    # Strip provenance header before passing to run_agent_loop
     _, system_prompt = strip_provenance_header(prompt.messages[0].content)
     initial_message = prompt.messages[1].content
 
     result = run_agent_loop(
         client=client,
-        role="validate",
-        agent_kind="validate",
+        role="prove",
+        agent_kind="prove",
         system_prompt=system_prompt,
         initial_user_message=initial_message,
         runner=runner,
         budget_spec=budget_spec,
-        response_model=ValidateResponse,
+        response_model=ProveResponse,
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
@@ -116,51 +115,14 @@ def validate_impl(
         turn_timeout_seconds=turn_timeout_seconds,
     )
 
-    # Parse the ternary verdict from the loop result
-    verdict: str = "needs_proof"
-    reasons: list[str] = []
-    if result.final_answer and isinstance(result.final_answer, ValidateResponse):
-        raw_verdict = result.final_answer.verdict.lower().strip()
-        if raw_verdict in {"validated", "rejected", "needs_proof"}:
-            verdict = raw_verdict
-        reasons = list(result.final_answer.reasons)
+    if result.final_answer and isinstance(result.final_answer, ProveResponse):
+        return result.final_answer
 
-    # Compute cross_vendor_disagreement by comparing provider names (not model names).
-    # Provider comparison is string equality; two different models from the same
-    # provider do not constitute a disagreement.
-    hunter_provider: str = finding.hunter_provider or ""
-    validate_role_config = panel.get("validate")
-    if validate_role_config is not None:
-        validate_provider_val = validate_role_config.provider
-        # RoleConfig.provider may be a Provider enum or a plain string
-        validate_provider: str = (
-            validate_provider_val.value
-            if hasattr(validate_provider_val, "value")
-            else str(validate_provider_val)
-        )
-    else:
-        validate_provider = ""
-
-    cross_vendor = bool(
-        hunter_provider
-        and validate_provider
-        and hunter_provider.lower() != validate_provider.lower()
-    )
-
-    return ValidationResult(
-        id=str(uuid.uuid4()),
-        candidate_finding_id=finding.id,
-        scan_id=finding.scan_id,
-        verdict=verdict,  # type: ignore[arg-type]
-        reasons=reasons,
-        cross_vendor=cross_vendor,
-        cross_vendor_disagreement=cross_vendor,
-        created_at=datetime.now(UTC),
-    )
+    return ProveResponse(verdict="inconclusive", reasons=["loop ended without final answer"])
 
 
-@activity.defn(name="validate-candidate-finding")
-def validate_activity(
+@activity.defn(name="prove-finding")
+def prove_activity(
     finding: CandidateFinding | dict[str, Any],
     repo_path: str,
     panel: dict[str, Any] | None = None,
@@ -170,14 +132,11 @@ def validate_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
 ) -> dict[str, Any]:
-    """Temporal activity: adversarial review of a single CandidateFinding.
+    """Temporal activity: agentic proof-of-concept generation for a single finding.
 
-    Returns a ValidationResult dict (JSON-serialisable at the Temporal boundary).
-
-    *panel_json*, if provided, is a serialised ``RoleConfig`` for the validate role
-    and takes priority over *panel*.  When provider is MOCK the existing mock client
-    is used unchanged; when provider is LITELLM a real ``LiteLLMModelClient`` is built
-    and the ``provider_policy`` is threaded through the agent loop.
+    Returns a ProveResponse dict (JSON-serialisable at the Temporal boundary).
+    The response includes proposed_exec_specs and proposed_http_specs for the
+    workflow to dispatch via sandbox-exec / http-request activities.
     """
     stop_heartbeat = threading.Event()
     _ctx = contextvars.copy_context()
@@ -191,7 +150,7 @@ def validate_activity(
     heartbeat_thread.start()
 
     try:
-        return _validate_activity_impl(
+        return _prove_activity_impl(
             finding,
             repo_path,
             panel,
@@ -206,7 +165,7 @@ def validate_activity(
         heartbeat_thread.join(timeout=5)
 
 
-def _validate_activity_impl(
+def _prove_activity_impl(
     finding: CandidateFinding | dict[str, Any],
     repo_path: str,
     panel: dict[str, Any] | None,
@@ -225,16 +184,16 @@ def _validate_activity_impl(
     if panel_json is not None:
         role_cfg = RoleConfig.model_validate_json(panel_json)
     else:
-        role_cfg = DEFAULT_PANEL["validate"]
+        role_cfg = DEFAULT_PANEL.get("prove", DEFAULT_PANEL["validate"])
 
     if role_cfg.provider == Provider.MOCK:
-        client: Any = MockModelClient(default=ValidateResponse())
+        client: Any = MockModelClient(default=ProveResponse())
         policy: ProviderPolicy | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
 
-    result = validate_impl(
+    result = prove_impl(
         finding=finding,
         repo_path=repo_path,
         panel=active_panel,
