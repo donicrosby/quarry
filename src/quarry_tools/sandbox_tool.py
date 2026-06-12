@@ -3,10 +3,10 @@
 The tool is registered exclusively for the ``prove`` role.  It performs NO
 live I/O in agent context — it packages the validated ``SandboxExecSpec`` as
 a JSON dispatch payload so ``ToolRunner`` can route it to the
-``quarry-dynamic`` Temporal activity.
+``quarry-control`` Temporal activity.
 
 Network and resource containment (Layer 6) is enforced by the activity worker
-on the ``quarry-dynamic`` queue, not here.  The tool's ``run()`` method never
+on the ``quarry-control`` queue, not here.  The tool's ``run()`` method never
 opens a socket or spawns a process.
 """
 
@@ -18,14 +18,14 @@ from typing import Any
 
 
 class _RunInSandboxTool:
-    """Packages a SandboxExecSpec for dispatch to the quarry-dynamic activity."""
+    """Packages a SandboxExecSpec for dispatch to the quarry-control worker."""
 
     name = "run_in_sandbox"
     description = (
         "Propose a sandboxed CLI/binary invocation for live dynamic proof. "
         "Only available in the prove role. "
         "Does not execute directly — the command is dispatched to the "
-        "quarry-dynamic worker for scope-checked, resource-contained execution."
+        "quarry-control worker for scope-checked, resource-contained execution."
     )
     roles: list[str] = ["prove"]
 
@@ -78,11 +78,11 @@ class _RunInSandboxTool:
         """Package the spec as a JSON dispatch payload — no live I/O.
 
         The actual execution is performed by ``sandbox_exec_activity`` on the
-        ``quarry-dynamic`` Temporal task queue, after all six safety layers
+        ``quarry-control`` Temporal task queue, after all six safety layers
         (ADR-017) have been verified by the activity worker.
         """
         dispatch_payload: dict[str, Any] = {
-            "dispatch": "quarry-dynamic",
+            "dispatch": "quarry-control",
             "tool": self.name,
             "command": inputs.get("command"),
             "args": inputs.get("args", []),
