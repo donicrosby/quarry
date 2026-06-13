@@ -81,8 +81,8 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert len(worker.workflows) == 4
             assert RunDiffScanWorkflow in worker.workflows
             assert (
-                len(worker.activities) == 26
-            )  # +4 for http_request, sandbox_exec, prove, tracer (ADR-017)
+                len(worker.activities) == 27
+            )  # +4 for http_request, sandbox_exec, prove, tracer (ADR-017); +1 build_call_graph
             assert git_diff_commits in worker.activities
             assert map_impacted_regions in worker.activities
             assert emit_agent_tasks in worker.activities
