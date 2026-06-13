@@ -44,3 +44,13 @@ rpm      = 20
 provider = "litellm"
 model    = "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
 rpm      = 20
+
+[panels.chutes.roles.prove]
+provider = "litellm"
+model    = "chutes/moonshotai/Kimi-K2.6-TEE"
+rpm      = 20
+
+[panels.chutes.roles.trace]
+provider = "litellm"
+model    = "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
+rpm      = 20

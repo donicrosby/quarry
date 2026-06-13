@@ -14,6 +14,7 @@ registered" failures on whichever worker picks up the task.
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 
@@ -91,4 +92,47 @@ class TestWorkerRegistrationParity:
         assert "http_request_activity" in server_activities, (
             "http_request_activity must be registered in quarry_server/app.py. "
             "It runs on the quarry-control task queue."
+        )
+
+    def test_all_registered_activities_have_defn_decorator(self) -> None:
+        """Every function in the worker's activities=[] list must have @activity.defn.
+
+        This catches the class of bug where a function is registered but the
+        decorator is missing, causing the worker to crash at startup with
+        'Activity X missing attributes, was it decorated with @activity.defn?'
+        """
+        # Collect (module_path, function_name) from import statements in the worker file
+        source = WORKER_FILE.read_text()
+        tree = ast.parse(source)
+
+        # Build a map: function_name -> module (from `from X import Y` statements)
+        import_map: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    name = alias.asname if alias.asname else alias.name
+                    import_map[name] = node.module
+
+        registered = _extract_activity_list_from_file(WORKER_FILE)
+
+        missing_decorator: list[str] = []
+        for fn_name in sorted(registered):
+            module_name = import_map.get(fn_name)
+            if module_name is None:
+                continue  # locally defined or aliased — skip
+            try:
+                mod = importlib.import_module(module_name)
+                fn = getattr(mod, fn_name, None)
+                if fn is None:
+                    continue
+                # @activity.defn stamps __temporal_activity_definition onto the fn
+                if not hasattr(fn, "__temporal_activity_definition"):
+                    missing_decorator.append(f"{fn_name} (from {module_name})")
+            except Exception:
+                pass  # import errors are a separate concern
+
+        assert not missing_decorator, (
+            "The following activities are registered in the worker but lack "
+            "@activity.defn — the worker will crash at startup:\n"
+            + "\n".join(f"  - {n}" for n in missing_decorator)
         )

@@ -20,6 +20,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from temporalio import activity
+
 from quarry.schemas import (
     ArtifactKind,
     RedactionStatus,
@@ -172,13 +174,9 @@ def _run_sandbox(
 # ---------------------------------------------------------------------------
 
 
+@activity.defn(name="sandbox-exec")
 def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
-    """Execute a sandboxed command and return a scrubbed SandboxExecCapture.
-
-    Registered as @activity.defn(name="sandbox-exec") in quarry_worker/main.py
-    and quarry_server/app.py (Phase 7).  The decorator is applied at registration
-    time so this function remains testable without a Temporal runtime.
-    """
+    """Execute a sandboxed command and return a scrubbed SandboxExecCapture."""
     spec = SandboxExecSpec.model_validate_json(inp.spec_json)
 
     # Resolve credentials worker-side; register values in Scrubber BEFORE exec.
