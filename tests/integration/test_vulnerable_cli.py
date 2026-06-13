@@ -28,8 +28,8 @@ BINARY_PATH = FIXTURE_ROOT / "target" / "release" / "vulnerable-cli"
 CORPUS_DIR = FIXTURE_ROOT / "corpus"
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("cargo") is None,
-    reason="Rust toolchain (cargo) not found — skipping CLI fixture tests",
+    shutil.which("cargo") is None or shutil.which("sh") is None,
+    reason="Rust toolchain (cargo) or sh not found — skipping CLI fixture tests",
 )
 
 
