@@ -14,6 +14,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from quarry.config import QuarrySettings
+from quarry_activities.call_graph import build_call_graph_activity
 from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 sandbox_exec_activity,
                 prove_activity,
                 tracer_activity,
+                build_call_graph_activity,
             ],
             activity_executor=activity_executor,
             graceful_shutdown_timeout=timedelta(seconds=30),

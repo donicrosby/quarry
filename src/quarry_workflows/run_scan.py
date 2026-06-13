@@ -76,8 +76,6 @@ from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
-from quarry_tools.call_graph_python import build_python_call_graph
-from quarry_tools.call_graph_scip import build_scip_call_graph, is_scip_available
 from quarry_workflows.prove_stage import filter_needs_proof
 from quarry_workflows.tracer_stage import apply_trace_severity_reranking
 
@@ -1187,9 +1185,12 @@ class RunScanWorkflow:
             self._current_stage = "TRACER"
             if candidate_findings:
                 _target_lang = str(scan.metadata.get("target_language") or "python")
-                call_graph: CallGraph = _build_call_graph_for_language(
-                    scan.id, repo_path, _target_lang
+                call_graph_raw = await workflow.execute_activity(
+                    "build-call-graph",
+                    args=[scan.id, repo_path, _target_lang],
+                    start_to_close_timeout=timedelta(minutes=10),
                 )
+                call_graph: CallGraph = CallGraph.model_validate(call_graph_raw)
                 tracer_panel_json = panel_json_for_role(scan, "trace")
                 for finding in candidate_findings:
                     try:
@@ -1495,32 +1496,6 @@ class RunScanWorkflow:
                 cancellation_type=workflow.ActivityCancellationType.ABANDON,
             )
         )
-
-
-def _build_call_graph_for_language(
-    scan_id: str,
-    repo_path: str | Path,
-    language: str,
-) -> CallGraph:
-    """Select and invoke the right call-graph backend for *language*.
-
-    Routing rules:
-    - "python" -> build_python_call_graph (AST-grep, index_kind="ast_grep")
-    - any other language where is_scip_available() is True -> build_scip_call_graph
-    - any other language where is_scip_available() is False -> empty CallGraph with
-      a logged warning; no exception raised (scip backend's graceful fallback)
-    """
-    lang = language.lower()
-    if lang == "python":
-        return build_python_call_graph(scan_id=scan_id, repo_path=repo_path)
-    if is_scip_available(lang):
-        return build_scip_call_graph(scan_id=scan_id, repo_path=Path(repo_path), language=lang)
-    _LOG.warning(
-        "SCIP indexer not available for language %r; using empty CallGraph for scan %s",
-        lang,
-        scan_id,
-    )
-    return CallGraph(scan_id=scan_id, index_kind="scip")
 
 
 def _describe_failure(exc: BaseException) -> str:

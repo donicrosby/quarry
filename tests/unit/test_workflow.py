@@ -92,58 +92,58 @@ class TestTracerLanguageDispatch:
         from unittest.mock import patch
 
         from quarry.schemas import CallGraph
-        from quarry_workflows.run_scan import (
-            _build_call_graph_for_language,  # type: ignore[attr-defined]
-        )
+        from quarry_activities.call_graph import build_call_graph_activity
 
         fake_cg = CallGraph(scan_id="s1", index_kind="scip")
         with (
-            patch("quarry_workflows.run_scan.is_scip_available", return_value=True) as mock_avail,
             patch(
-                "quarry_workflows.run_scan.build_scip_call_graph", return_value=fake_cg
+                "quarry_activities.call_graph.is_scip_available", return_value=True
+            ) as mock_avail,
+            patch(
+                "quarry_activities.call_graph.build_scip_call_graph", return_value=fake_cg
             ) as mock_scip,
-            patch("quarry_workflows.run_scan.build_python_call_graph") as mock_py,
+            patch("quarry_activities.call_graph.build_python_call_graph") as mock_py,
         ):
-            result = _build_call_graph_for_language("s1", str(tmp_path), "go")
+            result = CallGraph.model_validate(build_call_graph_activity("s1", str(tmp_path), "go"))
         mock_avail.assert_called_once_with("go")
         mock_scip.assert_called_once()
         mock_py.assert_not_called()
-        assert result is fake_cg
+        assert result.scan_id == "s1"
+        assert result.index_kind == "scip"
 
     def test_python_language_routes_to_python_backend(self, tmp_path: str) -> None:
         from unittest.mock import patch
 
         from quarry.schemas import CallGraph
-        from quarry_workflows.run_scan import (
-            _build_call_graph_for_language,  # type: ignore[attr-defined]
-        )
+        from quarry_activities.call_graph import build_call_graph_activity
 
         fake_cg = CallGraph(scan_id="s1", index_kind="ast_grep")
         with (
             patch(
-                "quarry_workflows.run_scan.build_python_call_graph", return_value=fake_cg
+                "quarry_activities.call_graph.build_python_call_graph", return_value=fake_cg
             ) as mock_py,
-            patch("quarry_workflows.run_scan.is_scip_available") as mock_avail,
+            patch("quarry_activities.call_graph.is_scip_available") as mock_avail,
         ):
-            result = _build_call_graph_for_language("s1", str(tmp_path), "python")
+            result = CallGraph.model_validate(
+                build_call_graph_activity("s1", str(tmp_path), "python")
+            )
         mock_py.assert_called_once()
         mock_avail.assert_not_called()
-        assert result is fake_cg
+        assert result.scan_id == "s1"
+        assert result.index_kind == "ast_grep"
 
     def test_unavailable_scip_returns_empty_call_graph(self, tmp_path: str) -> None:
         from unittest.mock import patch
 
         from quarry.schemas import CallGraph
-        from quarry_workflows.run_scan import (
-            _build_call_graph_for_language,  # type: ignore[attr-defined]
-        )
+        from quarry_activities.call_graph import build_call_graph_activity
 
         with (
-            patch("quarry_workflows.run_scan.is_scip_available", return_value=False),
-            patch("quarry_workflows.run_scan.build_scip_call_graph") as mock_scip,
-            patch("quarry_workflows.run_scan.build_python_call_graph") as mock_py,
+            patch("quarry_activities.call_graph.is_scip_available", return_value=False),
+            patch("quarry_activities.call_graph.build_scip_call_graph") as mock_scip,
+            patch("quarry_activities.call_graph.build_python_call_graph") as mock_py,
         ):
-            result = _build_call_graph_for_language("s1", str(tmp_path), "go")
+            result = CallGraph.model_validate(build_call_graph_activity("s1", str(tmp_path), "go"))
         mock_scip.assert_not_called()
         mock_py.assert_not_called()
         assert isinstance(result, CallGraph)
