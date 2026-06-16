@@ -12,6 +12,7 @@ This preserves loop-in-activity determinism and the Temporal execution model.
 from __future__ import annotations
 
 import contextvars
+import json
 import threading
 from contextlib import suppress
 from pathlib import Path
@@ -45,7 +46,10 @@ class ProveResponse(BaseModel):
     specs via sandbox-exec / http-request activities with maximum_attempts=1.
     """
 
-    verdict: str = "inconclusive"  # "proved" | "not_proved" | "inconclusive"
+    verdict: str = "inconclusive"
+    # "proved" | "not_proved" | "inconclusive" | "needs_manual_review"
+    # Python enforces needs_manual_review via prove_outcome_from_captures;
+    # the model never emits it directly.
     proposed_exec_specs: list[dict[str, Any]] = []
     proposed_http_specs: list[dict[str, Any]] = []
     reasons: list[str] = []
@@ -64,11 +68,18 @@ def prove_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    prior_attempts: list[dict[str, Any]] | None = None,
 ) -> ProveResponse:
     """Core prove implementation — callable from the activity and from tests.
 
     The agent reads source code and proposes sandbox exec specs or HTTP probe
     specs.  It never executes them; the workflow dispatches them (Phase 6).
+
+    Args:
+        prior_attempts: Optional list of prior attempt records built by
+            build_prior_attempt_record().  When provided, a deterministic
+            feedback line is appended to the initial user message so the
+            agent can refine its approach.  Default None (first attempt).
     """
     if budget_spec is None:
         budget_spec = BudgetSpec()
@@ -93,6 +104,9 @@ def prove_impl(
             "line_end": None,
             "description": finding.hypothesis,
             "affected_code_snippet": None,
+            "prior_attempts_json": (
+                json.dumps(prior_attempts, separators=(",", ":")) if prior_attempts else None
+            ),
         },
     )
 
@@ -131,12 +145,18 @@ def prove_activity(
     db_path: str | None = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    prior_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: agentic proof-of-concept generation for a single finding.
 
     Returns a ProveResponse dict (JSON-serialisable at the Temporal boundary).
     The response includes proposed_exec_specs and proposed_http_specs for the
     workflow to dispatch via sandbox-exec / http-request activities.
+
+    Args:
+        prior_attempts: Optional list of prior attempt records (from
+            build_prior_attempt_record) carrying verdict+reasons from earlier
+            attempts.  Passed through to prove_impl so the agent can adapt.
     """
     stop_heartbeat = threading.Event()
     _ctx = contextvars.copy_context()
@@ -159,6 +179,7 @@ def prove_activity(
             db_path,
             max_iterations,
             scan_seed,
+            prior_attempts,
         )
     finally:
         stop_heartbeat.set()
@@ -174,6 +195,7 @@ def _prove_activity_impl(
     db_path: str | None = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    prior_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -203,6 +225,7 @@ def _prove_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        prior_attempts=prior_attempts,
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

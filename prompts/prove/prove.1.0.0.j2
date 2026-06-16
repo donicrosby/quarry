@@ -47,7 +47,12 @@ Reported code snippet:
 {{ affected_code_snippet }}
 </target_content>
 {% endif %}
-
+{% if prior_attempts_json %}
+Previous attempts for this finding (for context — adjust your approach):
+<prior_attempts>
+{{ prior_attempts_json }}
+</prior_attempts>
+{% endif %}
 Read the relevant source code, then propose targeted probes. Keep proposed specs
 minimal and include only what is necessary to trigger the vulnerability.
 

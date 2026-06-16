@@ -72,6 +72,13 @@ def _make_sandbox_capture(
 # ---------------------------------------------------------------------------
 
 
+class TestProveConstants:
+    def test_prove_max_attempts_is_three(self) -> None:
+        from quarry_workflows.run_scan import PROVE_MAX_ATTEMPTS
+
+        assert PROVE_MAX_ATTEMPTS == 3
+
+
 class TestProveStageOrder:
     def test_prove_in_completed_stage_order(self) -> None:
         from quarry_workflows.run_scan import COMPLETED_STAGE_ORDER
