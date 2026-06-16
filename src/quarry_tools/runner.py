@@ -74,6 +74,37 @@ def _path_glob_to_url_prefix(glob_value: str) -> str:
     return "/"
 
 
+def check_exclusion(
+    request_target: str,
+    vuln_class: str | None,
+    exclusion_set: list[ScopeExclusion],
+) -> ScopeExclusion | None:
+    """Return the first ScopeExclusion that blocks *request_target*, or None.
+
+    This is the frozen public contract from the week-14 plan so call sites added
+    in future versions (live-dynamic guards, check_exclusion in scope-audit paths)
+    can import this helper without touching guard internals.
+
+    Only exclusions with block_dynamic=True are considered (consistent with
+    the Layer 4 scope-exclusion guard in ToolRunner.run()).
+
+    Args:
+        request_target: The URL path or target identifier being checked.
+        vuln_class: The vulnerability class of the current operation, or None.
+        exclusion_set: The list of ScopeExclusion objects to evaluate.
+
+    Returns:
+        The first matching ScopeExclusion, or None if nothing matches.
+    """
+    inputs: dict[str, Any] = {"path": request_target}
+    if vuln_class is not None:
+        inputs["vuln_class"] = vuln_class
+    for exclusion in exclusion_set:
+        if _matches_scope_exclusion(exclusion, inputs):
+            return exclusion
+    return None
+
+
 def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) -> bool:
     """Return True if *inputs* triggers the given scope exclusion."""
     if not exclusion.block_dynamic:

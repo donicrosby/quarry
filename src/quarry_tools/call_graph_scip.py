@@ -23,15 +23,19 @@ Any other language raises :class:`ValueError`.
 
 SCIP index parsing
 ------------------
-The raw ``.scip`` index is a protobuf binary.  Full graph extraction requires
-the ``scip`` CLI (``scip print --json``) or the ``scip-python`` protobuf
-bindings.  Both are optional.  When neither is available the backend returns
-a graph with ``entry_points`` derived from the indexed document symbols but
-with empty ``edges`` — still useful for tracer context.
+The raw ``.scip`` index is parsed in-process by :func:`parse_scip_index`
+using the generated ``scip_pb2`` protobuf bindings (``Index`` / ``Document``
+imported at the bottom of this module).  No external ``scip`` CLI is required.
+Entry points are extracted from document symbols; call edges are derived from
+occurrence relationships within each document.
 
-This module does **not** implement full SCIP protobuf parsing yet.  The
-graceful fallback path is the primary behaviour for CI; the parsing path is
-a TODO once the toolchain stabilises.
+Graceful fallback
+-----------------
+When the SCIP indexer binary is absent, times out, exits with a non-zero
+code, or the index cannot be decoded, an **empty** :class:`CallGraph` is
+returned (no exception propagated).  The tracer will simply receive an empty
+graph and reason from file context alone, keeping CI green in environments
+without a SCIP toolchain installed.
 """
 
 from __future__ import annotations

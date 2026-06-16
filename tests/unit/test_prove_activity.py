@@ -196,3 +196,23 @@ class TestProveActivity:
                 max_iterations=2,
             )
             mock_build.assert_not_called()
+
+    def test_prove_activity_accepts_prior_attempts(self, tmp_path: Path) -> None:
+        """prior_attempts threads through without crashing; MOCK path still does no live I/O."""
+        from quarry.panel_config import RoleConfig
+        from quarry_activities.prove import prove_activity
+
+        finding = _make_finding()
+        mock_panel_json = RoleConfig(provider=Provider.MOCK, model="mock").model_dump_json()
+        prior = [{"attempt": 0, "verdict": "not_proved", "reasons": ["exit code 1"]}]
+
+        result = prove_activity(
+            finding=finding.model_dump(mode="json"),
+            repo_path=str(tmp_path),
+            panel_json=mock_panel_json,
+            max_iterations=2,
+            prior_attempts=prior,
+        )
+
+        assert isinstance(result, dict)
+        assert "verdict" in result
