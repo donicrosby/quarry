@@ -34,6 +34,7 @@ from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.integrations import deliver_integrations_activity
+from quarry_activities.lifecycle_hooks import dispatch_lifecycle_hooks_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
@@ -112,6 +113,7 @@ async def temporal_worker(
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
             deliver_integrations_activity,
+            dispatch_lifecycle_hooks_activity,
             build_scan_manifest_activity,
             render_markdown_report_activity,
             recon_orchestrator_activity,

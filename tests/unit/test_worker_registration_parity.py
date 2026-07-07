@@ -94,6 +94,22 @@ class TestWorkerRegistrationParity:
             "It runs on the quarry-control task queue."
         )
 
+    def test_dispatch_lifecycle_hooks_activity_registered_in_worker(self) -> None:
+        """dispatch_lifecycle_hooks_activity must appear in the worker's activity list."""
+        worker_activities = _extract_activity_list_from_file(WORKER_FILE)
+        assert "dispatch_lifecycle_hooks_activity" in worker_activities, (
+            "dispatch_lifecycle_hooks_activity must be registered in quarry_worker/main.py. "
+            "It runs on the quarry-control task queue."
+        )
+
+    def test_dispatch_lifecycle_hooks_activity_registered_in_server(self) -> None:
+        """dispatch_lifecycle_hooks_activity must appear in the server's activity list."""
+        server_activities = _extract_activity_list_from_file(SERVER_FILE)
+        assert "dispatch_lifecycle_hooks_activity" in server_activities, (
+            "dispatch_lifecycle_hooks_activity must be registered in quarry_server/app.py. "
+            "It runs on the quarry-control task queue."
+        )
+
     def test_all_registered_activities_have_defn_decorator(self) -> None:
         """Every function in the worker's activities=[] list must have @activity.defn.
 

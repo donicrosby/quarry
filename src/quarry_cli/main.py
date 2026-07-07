@@ -534,6 +534,7 @@ async def _benchmark_local_command(
             vuln_classes=truth_classes,
             dynamic_validation_enabled=dynamic_validation,
             live_prove_enabled=live_prove,
+            benchmark=True,
         )
         scan_id = result["scan_id"]
         while True:

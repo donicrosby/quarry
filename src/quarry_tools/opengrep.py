@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from quarry_plugins.base import PluginType
 from quarry_tools.errors import ToolUnavailableError
 
 _TIMEOUT_SECONDS = 30
@@ -52,6 +53,8 @@ def _run_opengrep(
 
 class _OpenGrepTool:
     name = "opengrep"
+    version = "1.0.0"
+    plugin_type = PluginType.TOOL
     description = (
         "Run an opengrep rule against the repository to find pattern matches. "
         "Supply a semgrep-compatible YAML rule inline; output is a list of matches "

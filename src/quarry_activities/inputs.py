@@ -5,7 +5,9 @@ Temporal boundary. Activities convert strings back to richer domain objects or
 ``Path`` instances internally.
 """
 
-from pydantic import BaseModel, ConfigDict
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from quarry.schemas import AttackSurfaceItem, ChangedFile
 
@@ -162,6 +164,25 @@ class DeliverIntegrationsInput(BaseModel):
     workspace_id: str = "local"
     dry_run: bool = True
     existing_keys: tuple[str, ...] = ()
+
+
+class DispatchLifecycleHooksInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    event_type: str
+    scan_id: str
+    artifact_root: str
+    workspace_id: str = "local"
+    # A FinalFinding, serialized as JSON; None for finding-less events.
+    finding_json: str | None = None
+    # Severity value string (e.g. "critical"); None for finding-less events.
+    severity: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    dry_run: bool = True
+    existing_keys: tuple[str, ...] = ()
+    # list[IntegrationConfig], serialized as JSON — resolved from
+    # Scan.profile.integration_configs by the caller.
+    integration_configs_json: str = "[]"
 
 
 class BuildScanManifestInput(BaseModel):

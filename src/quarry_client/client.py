@@ -56,6 +56,7 @@ class QuarryClient:
         dynamic_validation_enabled: bool = False,
         live_prove_enabled: bool = False,
         auth_profiles_json: str | None = None,
+        benchmark: bool = False,
     ) -> dict[str, str]:
         response = await self._client.post(
             "/scans",
@@ -67,6 +68,7 @@ class QuarryClient:
                 "dynamic_validation_enabled": dynamic_validation_enabled,
                 "live_prove_enabled": live_prove_enabled,
                 "auth_profiles_json": auth_profiles_json,
+                "benchmark": benchmark,
             },
         )
         response.raise_for_status()

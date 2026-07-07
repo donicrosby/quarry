@@ -26,6 +26,9 @@ class StartScanRequest(BaseModel):
     live_prove_enabled: bool = False
     # AuthProfileSet serialized as JSON; None = unauthenticated.
     auth_profiles_json: str | None = None
+    # True for benchmark scoring runs: forces integrations off (no lifecycle
+    # hook or sink fires), regardless of quarry.toml [integrations.*].
+    benchmark: bool = False
 
 
 class DiffScanRequest(BaseModel):

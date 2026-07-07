@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from quarry_plugins.base import PluginType
 from quarry_tools.errors import ToolUnavailableError
 
 _TIMEOUT_SECONDS = 15
@@ -96,6 +97,8 @@ def _query_file(
 
 class _TreeSitterTool:
     name = "treesitter_query"
+    version = "1.0.0"
+    plugin_type = PluginType.TOOL
     description = (
         "Run a tree-sitter S-expression query over source files of a given language "
         "within the repository scope. Returns matched nodes with file path, line range, "
