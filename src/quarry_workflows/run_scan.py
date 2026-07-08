@@ -127,6 +127,10 @@ def _empty_run_integration_configs() -> list[IntegrationConfig]:
     return []
 
 
+def _empty_run_plugins_active() -> list[str]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -180,6 +184,10 @@ class RunScanInput(BaseModel):
     # quarry.toml [integrations.*] — scoring accuracy must never trigger an
     # external side effect. Enforced in code, not by convention.
     benchmark: bool = False
+    # Names of context-injector plugins active for this scan, resolved from
+    # quarry.toml [scan_defaults].plugins_active at the API layer. Empty by
+    # default — context injectors are disabled unless explicitly named.
+    plugins_active: list[str] = Field(default_factory=_empty_run_plugins_active)
 
 
 class RunScanResult(BaseModel):
@@ -283,6 +291,9 @@ class RunScanWorkflow:
                     vuln_classes=scan_input.vuln_classes or None,
                     integration_configs=scan_input.integration_configs,
                     integrations_enabled=not scan_input.benchmark,
+                    plugins_active=effective_plugins_active(
+                        scan_input.plugins_active, benchmark=scan_input.benchmark
+                    ),
                 ),
                 status=ScanStatus.CREATED,
                 created_at=created_at,
@@ -476,6 +487,7 @@ class RunScanWorkflow:
                     scan.id,
                     arch_doc.model_dump_json(),
                     [vc.value for vc in scan.profile.vuln_classes],
+                    scan.profile.plugins_active,
                 ],
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=self._retry_policy,
@@ -1716,6 +1728,9 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
             target_url=scan_input.target_url,
             integration_configs=scan_input.integration_configs,
             integrations_enabled=not scan_input.benchmark,
+            plugins_active=effective_plugins_active(
+                scan_input.plugins_active, benchmark=scan_input.benchmark
+            ),
         ),
         status=ScanStatus.CREATED,
         created_at=created_at,
@@ -2033,6 +2048,18 @@ def should_dispatch_lifecycle_hooks(profile: ScanProfile) -> bool:
     if not profile.integrations_enabled:
         return False
     return any(cfg.enabled for cfg in profile.integration_configs)
+
+
+def effective_plugins_active(plugins_active: list[str], *, benchmark: bool) -> list[str]:
+    """Force no active context-injector plugins for benchmark scoring runs.
+
+    Benchmark accuracy must never be influenced by an external side effect or
+    injected context, regardless of what quarry.toml configures — enforced in
+    code at both scan-construction sites, not by convention.
+    """
+    if benchmark:
+        return []
+    return plugins_active
 
 
 def _model_json_dict(model: BaseModel) -> dict[str, Any]:

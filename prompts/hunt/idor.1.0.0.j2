@@ -70,6 +70,10 @@ Known entry points in this scope (start your enumeration here, then find more):
 Recon's notes for this scope (candidate object-access points/sources to verify
 and extend — NOT exhaustive; begin from any access points listed here):
 {{ recon_notes | default("(none)") }}
+{% if domain_context | default("") %}
+
+{{ domain_context }}
+{% endif %}
 
 {{ task_prompt }}
 

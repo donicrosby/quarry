@@ -103,6 +103,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             auth_profiles_json=body.auth_profiles_json,
             integration_configs=resolve_integration_configs(quarry_config),
             benchmark=body.benchmark,
+            plugins_active=quarry_config.scan_defaults.plugins_active,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

@@ -93,6 +93,10 @@ class ScanDefaultsConfig(BaseModel):
     # Optional fixed seed. When None, each scan derives a deterministic seed
     # from its scan_id UUID so runs are reproducible without pinning a global value.
     seed: int | None = None
+    # Names of context-injector (and future non-tool/sink/hook) plugins active
+    # for scans using this profile. Empty by default — plugins are disabled
+    # unless explicitly named here, per the disabled-by-default invariant.
+    plugins_active: list[str] = Field(default_factory=list)
 
 
 class RetryConfig(BaseModel):

@@ -14,7 +14,14 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from quarry.schemas import FinalFinding, IntegrationRun, SecretRef, Severity
+from quarry.schemas import (
+    AgentTask,
+    FinalFinding,
+    IntegrationRun,
+    SecretRef,
+    Severity,
+    VulnerabilityClass,
+)
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_integrations.base import FindingSink
 from quarry_tools.spec import ToolSpec
@@ -91,3 +98,21 @@ class LifecycleHookPlugin(Plugin, Protocol):
     events: frozenset[str]
 
     def handle(self, event: LifecycleEvent, ctx: HookContext) -> IntegrationRun | None: ...
+
+
+@runtime_checkable
+class ContextInjectorPlugin(Plugin, Protocol):
+    """A plugin that injects domain-specific guidance into a hunt prompt.
+
+    Distinct from LifecycleHookPlugin: injection happens at prompt-construction
+    time (before any model call), not in reaction to a scan event. A plugin
+    MUST return None when repo_type/attack_class don't match what it targets
+    (the portability invariant) — never real domain content in an OSS stub.
+    """
+
+    attack_classes: frozenset[VulnerabilityClass]
+    priority: int
+
+    def inject_context(
+        self, attack_class: VulnerabilityClass, task: AgentTask, repo_type: str
+    ) -> str | None: ...

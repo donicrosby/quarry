@@ -157,6 +157,7 @@ def hunt_impl(
         "scope": task.scope,
         "entry_points": task.entry_points,
         "recon_notes": task.recon_notes,
+        "domain_context": task.domain_context,
         "focus_classes": [],
         "scope_exclusions": [],
         "task_prompt": task.task_prompt,
