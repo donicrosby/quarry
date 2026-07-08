@@ -67,6 +67,10 @@ Known entry points in this scope (start your source enumeration here, then look 
 Recon's notes for this scope (candidate sinks/sources to verify and extend — NOT
 exhaustive; begin from any sinks listed here):
 {{ recon_notes | default("(none)") }}
+{% if domain_context | default("") %}
+
+{{ domain_context }}
+{% endif %}
 
 {{ task_prompt }}
 

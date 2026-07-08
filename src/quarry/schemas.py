@@ -465,6 +465,14 @@ class AgentTask(BaseModel):
     # Recon's free-text notes for this scope (per-class sink/source buckets),
     # carried so the hunter can seed backward-taint from recon's leads.
     recon_notes: str = ""
+    # Assembled context-injector output for this task (assemble_domain_context),
+    # computed once in emit_agent_tasks and carried here so hunt_impl can
+    # render it without redoing plugin discovery/assembly per hunt call.
+    domain_context: str = ""
+    # Names of the context-injector plugins that contributed to domain_context
+    # (provenance — empty when no plugin matched, even if plugins_active was
+    # non-empty).
+    domain_context_sources: list[str] = Field(default_factory=_empty_strings)
     source: Literal["recon", "gapfill", "feedback"] = "recon"
     gapfill_pass: int = 0
     input_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
@@ -1430,6 +1438,7 @@ def local_scan_profile(
     dynamic_validation_enabled: bool = False,
     integration_configs: list[IntegrationConfig] | None = None,
     integrations_enabled: bool = True,
+    plugins_active: list[str] | None = None,
 ) -> ScanProfile:
     """Build a local fast-scan profile.
 
@@ -1446,6 +1455,9 @@ def local_scan_profile(
     dry_run_integrations); the caller passes False to force no integration
     delivery of any kind — e.g. benchmark runs, where scoring accuracy must
     never trigger an external side effect.
+
+    plugins_active defaults to [] (context-injector plugins disabled unless
+    explicitly named — see panel_config.ScanDefaultsConfig.plugins_active).
     """
     return ScanProfile(
         id="local-fast",
@@ -1459,4 +1471,5 @@ def local_scan_profile(
         dynamic_validation_enabled=dynamic_validation_enabled,
         integrations_enabled=integrations_enabled,
         integration_configs=integration_configs or [],
+        plugins_active=plugins_active or [],
     )

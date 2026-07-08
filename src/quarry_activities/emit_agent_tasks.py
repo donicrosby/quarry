@@ -10,11 +10,14 @@ from __future__ import annotations
 import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from temporalio import activity
 
 from quarry.schemas import AgentTask, ArchitectureDoc, VulnerabilityClass
+from quarry_plugins.base import ContextInjectorPlugin, PluginType
+from quarry_plugins.budget import assemble_domain_context
+from quarry_plugins.registry import load_plugins, plugins_of_type
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 from quarry_prompts.registry import TemplateNotFoundError
@@ -52,11 +55,16 @@ def emit_agent_tasks(
     scan_id: str | dict[str, Any],
     arch_doc_json: str | None = None,
     vuln_classes: list[str] | None = None,
+    plugins_active: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Produce one AgentTask per (vuln_class, scope) from the ArchitectureDoc.
 
     Temporal passes args as a dict when called with keyword args from the
     workflow; this activity handles both forms.
+
+    plugins_active names the context-injector plugins active for this scan
+    (see ScanProfile.plugins_active). Plugin loading is I/O (entry-points
+    lookup), so it happens here, in the activity — never in workflow code.
     """
     with suppress(RuntimeError):
         activity.heartbeat()
@@ -67,12 +75,23 @@ def emit_agent_tasks(
         scan_id = str(d.get("scan_id", ""))
         arch_doc_json = str(d.get("arch_doc_json", ""))
         vuln_classes = list(d.get("vuln_classes", []))
+        plugins_active = list(d.get("plugins_active", []))
 
     if not arch_doc_json:
         return []
 
     arch_doc = ArchitectureDoc.model_validate_json(arch_doc_json)
     requested_classes = [VulnerabilityClass(vc) for vc in (vuln_classes or [])]
+
+    active_names = set(plugins_active or [])
+    context_injectors: list[ContextInjectorPlugin] = []
+    if active_names:
+        all_plugins = load_plugins()
+        context_injectors = [
+            cast(ContextInjectorPlugin, p)
+            for p in plugins_of_type(all_plugins, PluginType.CONTEXT_INJECTOR)
+            if p.name in active_names
+        ]
 
     now = datetime.now(UTC)
     tasks: list[AgentTask] = []
@@ -106,6 +125,17 @@ def emit_agent_tasks(
                 status="pending",
                 created_at=now,
             )
+            if context_injectors:
+                domain_context, sources = assemble_domain_context(
+                    context_injectors, vc, task, arch_doc.repo_type
+                )
+                if domain_context:
+                    task = task.model_copy(
+                        update={
+                            "domain_context": domain_context,
+                            "domain_context_sources": sources,
+                        }
+                    )
             tasks.append(task)
 
     return [t.model_dump(mode="json") for t in tasks]
