@@ -297,6 +297,10 @@ def _empty_scope_exclusions() -> list[ScopeExclusion]:
     return []
 
 
+def _empty_integration_configs() -> list[IntegrationConfig]:
+    return []
+
+
 class ScanProfile(BaseModel):
     id: str
     name: str
@@ -310,6 +314,11 @@ class ScanProfile(BaseModel):
     max_runtime_seconds: int = 1800
     plugins_active: list[str] = Field(default_factory=_empty_strings)
     scope_exclusions: list[ScopeExclusion] = Field(default_factory=_empty_scope_exclusions)
+    # Per-integration settings (enable/dry-run/severity/secret), sourced from
+    # quarry.toml [integrations.<name>] by default. Forward-ref to
+    # IntegrationConfig (defined later in this module); resolved via
+    # model_rebuild() right after IntegrationConfig is defined.
+    integration_configs: list[IntegrationConfig] = Field(default_factory=_empty_integration_configs)
 
 
 class Scan(BaseModel):
@@ -602,18 +611,6 @@ class BudgetPolicy(BaseModel):
     max_model_calls_per_stage: int | None = None
     max_concurrent_scans: int = 1
     max_runtime_seconds: int = 1800
-
-
-class IntegrationConfig(BaseModel):
-    id: str
-    workspace_id: str
-    name: str
-    integration_type: str
-    enabled: bool = False
-    dry_run: bool = True
-    config: dict[str, Any] = Field(default_factory=dict)
-    secret_ref: str | None = None
-    created_at: datetime
 
 
 class IntegrationEvent(BaseModel):
@@ -1279,6 +1276,32 @@ class SecretRef(BaseModel):
         return v
 
 
+# Full-string ``${secret:ENV_VAR_NAME}`` template syntax for referencing an
+# environment variable in TOML-sourced string config (e.g. quarry.toml
+# [integrations.<name>] tables). Distinct from credentials.py's embedded
+# find-all usage of the same syntax inside field_template strings — this one
+# requires the *entire* value to be the template, since it parses into a
+# SecretRef pointer rather than substituting a value into a larger string.
+SECRET_TEMPLATE_RE = re.compile(r"^\$\{secret:([A-Z0-9_]+)\}$")
+
+
+def parse_secret_ref_template(value: str) -> SecretRef:
+    """Parse a ``${secret:ENV_VAR_NAME}`` string into a SecretRef.
+
+    Raises ValueError if *value* is not exactly in that form — secret-shaped
+    config fields must reference an environment variable, never carry a
+    literal value inline.
+    """
+    match = SECRET_TEMPLATE_RE.match(value)
+    if not match:
+        msg = (
+            "Expected a secret reference in the form '${secret:ENV_VAR_NAME}', "
+            f"got: {value!r}. Never place a literal secret value in config."
+        )
+        raise ValueError(msg)
+    return SecretRef(env=match.group(1))
+
+
 class TotpConfig(BaseModel):
     """TOTP configuration for OTP-gated login flows (RFC 6238)."""
 
@@ -1368,10 +1391,45 @@ class AuthProfileSet(BaseModel):
         return None
 
 
+class IntegrationConfig(BaseModel):
+    """Per-integration settings: enable/dry-run/severity gate/secret.
+
+    Sourced from quarry.toml [integrations.<name>] tables by default (see
+    panel_config.resolve_integration_configs) and carried on ScanProfile.
+    """
+
+    integration_type: str
+    enabled: bool = False
+    dry_run: bool = True
+    config: dict[str, Any] = Field(default_factory=dict)
+    secret_ref: SecretRef | None = None
+    severity_threshold: Severity = Severity.CRITICAL
+
+    @field_validator("secret_ref")
+    @classmethod
+    def _reject_inline_secret_env(cls, v: SecretRef | None) -> SecretRef | None:
+        if v is not None and _SECRET_REF_ENV_CREDENTIAL_RE.match(v.env):
+            msg = (
+                f"SecretRef.env looks like an inline credential: '{v.env[:12]}…'. "
+                "Use an environment variable name (e.g. QUARRY_SECRET_TOKEN), "
+                "never an inline token value."
+            )
+            raise ValueError(msg)
+        return v
+
+
+# ScanProfile references IntegrationConfig in a forward annotation but is
+# defined above it; rebuild now that IntegrationConfig exists so the field
+# type resolves (mirrors AgentTask/EntryPoint below).
+ScanProfile.model_rebuild()
+
+
 def local_scan_profile(
     target_url: str | None = None,
     vuln_classes: list[VulnerabilityClass] | None = None,
     dynamic_validation_enabled: bool = False,
+    integration_configs: list[IntegrationConfig] | None = None,
+    integrations_enabled: bool = True,
 ) -> ScanProfile:
     """Build a local fast-scan profile.
 
@@ -1379,6 +1437,15 @@ def local_scan_profile(
     (e.g. the CLI's --dynamic-validation flag).  A bare target_url does NOT
     flip the live-HTTP gate — that was an explicitly-rejected alternative in
     ADR-017, section "Alternatives considered".
+
+    integration_configs defaults to quarry.toml's resolved [integrations.*]
+    tables (see panel_config.resolve_integration_configs); pass an explicit
+    list (e.g. []) to override.
+
+    integrations_enabled defaults to True (dry-run by default via
+    dry_run_integrations); the caller passes False to force no integration
+    delivery of any kind — e.g. benchmark runs, where scoring accuracy must
+    never trigger an external side effect.
     """
     return ScanProfile(
         id="local-fast",
@@ -1390,5 +1457,6 @@ def local_scan_profile(
             VulnerabilityClass.COMMAND_INJECTION,
         ],
         dynamic_validation_enabled=dynamic_validation_enabled,
-        integrations_enabled=True,  # dry-run by default (dry_run_integrations=True)
+        integrations_enabled=integrations_enabled,
+        integration_configs=integration_configs or [],
     )

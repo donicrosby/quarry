@@ -39,13 +39,7 @@ def test_integration_run_round_trips() -> None:
 
 
 def test_integration_config_and_event_defaults() -> None:
-    cfg = IntegrationConfig(
-        id="cfg-1",
-        workspace_id="local",
-        name="jira",
-        integration_type="ticketing",
-        created_at=utc_now(),
-    )
+    cfg = IntegrationConfig(integration_type="ticketing")
     event = IntegrationEvent(
         id="evt-1",
         scan_id="scan-1",

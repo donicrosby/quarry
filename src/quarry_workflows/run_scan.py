@@ -32,6 +32,7 @@ from quarry.schemas import (
     FindingStatus,
     HttpRequestSpec,
     HttpResponseCapture,
+    IntegrationConfig,
     IntegrationRun,
     IntegrationStatus,
     ModelPanelEntry,
@@ -42,7 +43,9 @@ from quarry.schemas import (
     SandboxExecCapture,
     Scan,
     ScanManifest,
+    ScanProfile,
     ScanStatus,
+    Severity,
     SourceRef,
     SubsystemAssignment,
     Target,
@@ -65,6 +68,7 @@ from quarry_activities.inputs import (
     CloneRepoResult,
     CreateSnapshotInput,
     DeliverIntegrationsInput,
+    DispatchLifecycleHooksInput,
     HttpRequestActivityInput,
     PersistScanStateInput,
     RenderReportInput,
@@ -119,6 +123,10 @@ def _empty_panel_entries() -> list[ModelPanelEntry]:
     return []
 
 
+def _empty_run_integration_configs() -> list[IntegrationConfig]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -162,6 +170,16 @@ class RunScanInput(BaseModel):
     # Primary language drives TRACER backend selection: "python" uses AST-grep;
     # any other value routes to the SCIP backend when the indexer is on PATH.
     target_language: str = "python"
+    # Resolved from quarry.toml [integrations.*] at the API layer (I/O happens
+    # before the workflow starts; sandboxed workflow code cannot read files).
+    integration_configs: list[IntegrationConfig] = Field(
+        default_factory=_empty_run_integration_configs
+    )
+    # True for benchmark scoring runs: forces ScanProfile.integrations_enabled
+    # to False so no lifecycle hook or sink ever fires, regardless of
+    # quarry.toml [integrations.*] — scoring accuracy must never trigger an
+    # external side effect. Enforced in code, not by convention.
+    benchmark: bool = False
 
 
 class RunScanResult(BaseModel):
@@ -263,6 +281,8 @@ class RunScanWorkflow:
                 profile=local_scan_profile(
                     target_url=scan_input.target_url,
                     vuln_classes=scan_input.vuln_classes or None,
+                    integration_configs=scan_input.integration_configs,
+                    integrations_enabled=not scan_input.benchmark,
                 ),
                 status=ScanStatus.CREATED,
                 created_at=created_at,
@@ -618,11 +638,14 @@ class RunScanWorkflow:
                                 {"finding": _model_json_dict(final)},
                             )
                             final_findings.append(final)
-                            await _append_workflow_event(
-                                scan_input.db_path,
-                                scan.id,
+                            await self._emit_and_dispatch(
+                                scan_input,
+                                scan,
+                                artifact_root,
                                 "finding.validated",
                                 {"finding_id": final.id},
+                                finding=final,
+                                severity=final.severity,
                             )
                         else:
                             await _append_workflow_event(
@@ -759,11 +782,14 @@ class RunScanWorkflow:
                         {"finding": _model_json_dict(final)},
                     )
                     final_findings.append(final)
-                    await _append_workflow_event(
-                        scan_input.db_path,
-                        scan.id,
+                    await self._emit_and_dispatch(
+                        scan_input,
+                        scan,
+                        artifact_root,
                         "finding.validated",
                         {"finding_id": final.id},
+                        finding=final,
+                        severity=final.severity,
                     )
                 elif verdict in ("needs_proof", "inconclusive"):
                     # Retain as unverified — never drop. Persist with NEEDS_PROOF status
@@ -1537,6 +1563,71 @@ class RunScanWorkflow:
                 {"sink": run.sink, "finding_id": run.integration_event_id},
             )
 
+    async def _emit_and_dispatch(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        event_type: str,
+        payload: dict[str, str],
+        *,
+        finding: FinalFinding | None = None,
+        severity: Severity | None = None,
+    ) -> None:
+        """Record a lifecycle event and, when a hook subscribes, dispatch it.
+
+        Always appends the plain WorkflowEvent (observability). Additionally
+        schedules the dispatch-lifecycle-hooks activity when
+        `should_dispatch_lifecycle_hooks` passes — cheap checks against data
+        already in `scan.profile` (no I/O), so a scan with no configured
+        hooks pays no extra activity call. The activity itself does the
+        actual event-type/severity-threshold filtering per hook (that
+        requires loading plugins, which is I/O and cannot happen here).
+        """
+        await _append_workflow_event(scan_input.db_path, scan.id, event_type, payload)
+
+        if not should_dispatch_lifecycle_hooks(scan.profile):
+            return
+
+        existing = await _load_integration_runs(scan_input.db_path, scan.id)
+        existing_keys = tuple(run.idempotency_key for run in existing)
+        dispatch_payload = await workflow.execute_activity(
+            "dispatch-lifecycle-hooks",
+            DispatchLifecycleHooksInput(
+                event_type=event_type,
+                scan_id=scan.id,
+                workspace_id="local",
+                finding_json=finding.model_dump_json() if finding is not None else None,
+                severity=severity.value if severity is not None else None,
+                payload=payload,
+                dry_run=scan.profile.dry_run_integrations,
+                existing_keys=existing_keys,
+                artifact_root=artifact_root,
+                integration_configs_json=_model_list_json(scan.profile.integration_configs),
+            ),
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=self._retry_policy,
+        )
+        for run in _integration_runs_from_activity(dispatch_payload):
+            if run.status is IntegrationStatus.SKIPPED:
+                continue
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_integration_run",
+                {"run": _model_json_dict(run)},
+            )
+            result_event_type = (
+                "integration.failed"
+                if run.status is IntegrationStatus.FAILED
+                else "integration.delivered"
+            )
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                result_event_type,
+                {"sink": run.sink, "finding_id": run.integration_event_id},
+            )
+
     async def _persist_cancelled_scan(self, db_path: str, scan_id: str) -> None:
         self._current_stage = "CANCELLED"
         await asyncio.shield(
@@ -1621,7 +1712,11 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         workspace_id="local",
         target_id=target.id,
         requested_by="local-user",
-        profile=local_scan_profile(target_url=scan_input.target_url),
+        profile=local_scan_profile(
+            target_url=scan_input.target_url,
+            integration_configs=scan_input.integration_configs,
+            integrations_enabled=not scan_input.benchmark,
+        ),
         status=ScanStatus.CREATED,
         created_at=created_at,
         metadata={"repo_path": str(repo_path)},
@@ -1926,6 +2021,20 @@ def _stage_completed(current_stage: str | None, stage: str) -> bool:
     return current_order >= stage_order
 
 
+def should_dispatch_lifecycle_hooks(profile: ScanProfile) -> bool:
+    """Cheap, I/O-free gate: is it worth scheduling dispatch-lifecycle-hooks?
+
+    True only when integrations are enabled AND at least one IntegrationConfig
+    is enabled — both are data already on the profile, so this check costs no
+    activity call. It does NOT know which hooks are registered or what events
+    they subscribe to (that requires loading plugins, which is I/O and must
+    happen inside the activity, never in workflow code).
+    """
+    if not profile.integrations_enabled:
+        return False
+    return any(cfg.enabled for cfg in profile.integration_configs)
+
+
 def _model_json_dict(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
@@ -2191,7 +2300,11 @@ def _join_path(root: str, *parts: str) -> str:
 
 
 def _model_list_json(
-    items: list[CandidateFinding] | list[FinalFinding] | list[ProofArtifact] | list[AgentTask],
+    items: list[CandidateFinding]
+    | list[FinalFinding]
+    | list[ProofArtifact]
+    | list[AgentTask]
+    | list[IntegrationConfig],
 ) -> str:
     return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 

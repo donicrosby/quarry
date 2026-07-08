@@ -21,10 +21,13 @@ from quarry.schemas import (
     AuthProfile,
     AuthProfileKind,
     AuthProfileSet,
+    IntegrationConfig,
     Provider,
+    Severity,
     Target,
     TargetAuthorization,
     VulnerabilityClass,
+    parse_secret_ref_template,
 )
 
 
@@ -130,6 +133,19 @@ class ScanConfig(BaseModel):
     reasoning_lexicon: ReasoningLexiconConfig | None = None
 
 
+class IntegrationTomlEntry(BaseModel):
+    """One ``[integrations.<name>]`` table in quarry.toml.
+
+    ``secret``, if set, MUST be a ``${secret:ENV_VAR_NAME}`` template string —
+    never a literal value (see ``resolve_integration_configs``).
+    """
+
+    enabled: bool = False
+    dry_run: bool = True
+    severity_threshold: Severity = Severity.CRITICAL
+    secret: str | None = None
+
+
 class QuarryConfig(BaseModel):
     """Top-level parsed quarry.toml configuration."""
 
@@ -137,6 +153,7 @@ class QuarryConfig(BaseModel):
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     scan_defaults: ScanDefaultsConfig = Field(default_factory=ScanDefaultsConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    integrations: dict[str, IntegrationTomlEntry] = Field(default_factory=dict)
     scan: ScanConfig = Field(default_factory=ScanConfig)
 
 
@@ -195,6 +212,28 @@ def resolve_panel(config: QuarryConfig, panel_name: str | None = None) -> dict[s
             result[role] = role_cfg
 
     return result
+
+
+def resolve_integration_configs(config: QuarryConfig) -> list[IntegrationConfig]:
+    """Build IntegrationConfig entries from quarry.toml [integrations.<name>] tables.
+
+    Raises ValueError if any entry's ``secret`` field is not a
+    ``${secret:ENV_VAR_NAME}`` template — literal secret values are never
+    accepted, in config files (see ADR on the unified plugin subsystem).
+    """
+    resolved: list[IntegrationConfig] = []
+    for name, entry in config.integrations.items():
+        secret_ref = parse_secret_ref_template(entry.secret) if entry.secret is not None else None
+        resolved.append(
+            IntegrationConfig(
+                integration_type=name,
+                enabled=entry.enabled,
+                dry_run=entry.dry_run,
+                severity_threshold=entry.severity_threshold,
+                secret_ref=secret_ref,
+            )
+        )
+    return resolved
 
 
 def resolve_focus(

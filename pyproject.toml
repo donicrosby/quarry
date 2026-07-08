@@ -43,9 +43,13 @@ dependencies = [
 [project.scripts]
 quarry = "quarry_cli.main:app"
 
-[project.entry-points."quarry.tools"]
+[project.entry-points."quarry.plugins"]
 opengrep = "quarry_tools.opengrep:OPENGREP_TOOL"
 treesitter_query = "quarry_tools.treesitter:TREESITTER_TOOL"
+file = "quarry_integrations.sinks.file_sink:FILE_SINK"
+jira_dry_run = "quarry_integrations.sinks.jira_dry_run:JIRA_DRY_RUN_SINK"
+slack_dry_run = "quarry_integrations.sinks.slack_dry_run:SLACK_DRY_RUN_SINK"
+slack_notify = "quarry_plugins.hooks.slack_notify:SLACK_NOTIFY_HOOK"
 
 [tool.uv.build-backend]
 module-name = [

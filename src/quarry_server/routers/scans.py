@@ -14,7 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
 from quarry.config import QuarrySettings
-from quarry.panel_config import load_quarry_config, resolve_panel
+from quarry.panel_config import load_quarry_config, resolve_integration_configs, resolve_panel
 from quarry.schemas import (
     AttackSurfaceItem,
     CandidateFinding,
@@ -101,6 +101,8 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             live_prove_enabled=body.live_prove_enabled,
             allowed_hosts=_allowed_hosts,
             auth_profiles_json=body.auth_profiles_json,
+            integration_configs=resolve_integration_configs(quarry_config),
+            benchmark=body.benchmark,
         ),
         id=scan_id,
         task_queue=settings.task_queue,

@@ -39,3 +39,17 @@ def test_treesitter_registered_for_hunt_role() -> None:
 
     registry = load_registry()
     assert "hunt" in registry["treesitter_query"].roles
+
+
+def test_extension_tools_are_registered_as_plugin_type_tool() -> None:
+    """Extension tools are now discovered via the unified quarry.plugins group."""
+    from quarry_plugins.base import Plugin, PluginType
+    from quarry_tools.registry import load_registry
+
+    registry = load_registry()
+    opengrep = registry["opengrep"]
+    treesitter = registry["treesitter_query"]
+    assert isinstance(opengrep, Plugin)
+    assert isinstance(treesitter, Plugin)
+    assert opengrep.plugin_type == PluginType.TOOL
+    assert treesitter.plugin_type == PluginType.TOOL

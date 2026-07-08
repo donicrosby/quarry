@@ -16,10 +16,13 @@ from quarry_integrations.base import (
     build_idempotency_key,
     make_run,
 )
+from quarry_plugins.base import PluginType
 
 
 class SlackDryRunSink:
     name = "slack_dry_run"
+    version = "1.0.0"
+    plugin_type = PluginType.FINDING_SINK
 
     def deliver(self, finding: FinalFinding, ctx: DeliveryContext) -> IntegrationRun:
         key = build_idempotency_key(ctx.scan_id, self.name, finding.fingerprint)
@@ -49,3 +52,6 @@ class SlackDryRunSink:
             dry_run=True,
             output_ref=output_ref,
         )
+
+
+SLACK_DRY_RUN_SINK = SlackDryRunSink()
