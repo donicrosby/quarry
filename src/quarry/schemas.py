@@ -475,6 +475,10 @@ class AgentTask(BaseModel):
     domain_context_sources: list[str] = Field(default_factory=_empty_strings)
     source: Literal["recon", "gapfill", "feedback"] = "recon"
     gapfill_pass: int = 0
+    # The iterative-coverage-loop round (0-based) in which this task is hunted
+    # (ADR-022). round_index=0 for recon-derived tasks; gapfill/feedback tasks
+    # emitted at the end of round N are stamped round_index=N+1.
+    round_index: int = 0
     input_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     output_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     status: str

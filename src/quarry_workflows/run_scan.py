@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -37,6 +37,7 @@ from quarry.schemas import (
     IntegrationStatus,
     ModelPanelEntry,
     ProofArtifact,
+    ReachabilityVerdict,
     RedactionStatus,
     Report,
     RepositorySnapshot,
@@ -80,12 +81,21 @@ from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
+from quarry_workflows.coverage_loop import (
+    build_feedback_tasks,
+    cell_key,
+    dedup_new_tasks,
+    should_continue,
+)
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
     filter_needs_proof,
     prove_outcome_from_captures,
 )
-from quarry_workflows.tracer_stage import apply_trace_severity_reranking
+from quarry_workflows.tracer_stage import (
+    apply_trace_severity_reranking,
+    sync_final_finding_trace,
+)
 
 # Default orchestration retry policy (overridden per-run from RunScanInput at the
 # start of the workflow). State-persistence writes keep their own fixed policy.
@@ -113,6 +123,18 @@ COMPLETED_STAGE_ORDER = {
     "INTEGRATING": 12,
     "COMPLETED": 13,
 }
+
+
+class _RoundOutcome(NamedTuple):
+    """Result of one ADR-022 iterative-coverage-loop round.
+
+    ``reachable_traces`` and ``call_graph`` are only populated when the round
+    actually ran the TRACER stage against at least one pending finding; they
+    feed the caller's reachability-feedback edge (build_feedback_tasks).
+    """
+
+    reachable_traces: list[Trace]
+    call_graph: CallGraph | None
 
 
 def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
@@ -150,6 +172,10 @@ class RunScanInput(BaseModel):
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40
     dedup_max_iterations: int = 8
+    # Cap on iterative-coverage-loop rounds (ADR-022). Default 3; the loop
+    # halts sooner on convergence (no new gapfill/feedback tasks) or budget
+    # exhaustion. See coverage_loop.should_continue.
+    max_coverage_rounds: int = 3
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -307,6 +333,10 @@ class RunScanWorkflow:
                     "origin_commit_sha": origin_commit_sha or "",
                     "current_stage": "CREATED",
                     "target_language": scan_input.target_language,
+                    # ADR-022: the TUI round counter reads these two keys via
+                    # GET /scans/{id}; coverage_round_index is updated every
+                    # round (see the loop in _run()).
+                    "max_coverage_rounds": scan_input.max_coverage_rounds,
                 },
             )
             await _persist_scan_state(
@@ -507,22 +537,334 @@ class RunScanWorkflow:
                 {"task_count": str(len(agent_tasks))},
             )
 
-        # ── HUNT stage ───────────────────────────────────────────────────────
-        # Focus + exclusion drops happen here in workflow code (deterministic).
+        # ── Iterative coverage loop (ADR-022) ───────────────────────────────
+        # Each round runs HUNT -> AGENTIC_VALIDATE -> DEDUP -> (PROVE) -> TRACER
+        # against that round's tasks (see self._run_round); two feedback edges —
+        # coverage-driven gapfill (emission only) and trace-driven reachability
+        # feedback — decide the next round's tasks. The loop halts on
+        # convergence (no new tasks), the configured max_coverage_rounds cap,
+        # or budget exhaustion. round_index==0 hunts the recon-derived tasks;
+        # completed_stage-based resume only applies to round 0 — resuming a
+        # partially-run loop (round_index > 0) is not supported (see
+        # openspec/changes/iterative-coverage-loop/design.md Non-Goals).
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
-        # Retained pending proof — verdict was needs_proof or inconclusive.
-        # This is the carry-forward set for the future prove stage:
-        #   prove_stage(findings) should filter to status == NEEDS_PROOF.
         needs_proof_findings: list[CandidateFinding] = []
         proof_artifacts: list[ProofArtifact] = []
-        # Coverage gaps the hunters self-reported (areas they didn't fully cover);
-        # gapfill turns these into a targeted re-hunt round.
         hunter_gaps: list[dict[str, Any]] = []
-        # Hoist panel JSON before the HUNT conditional so that the gapfill
-        # re-hunt closure (which runs outside the HUNT else-branch) always has a
-        # valid binding regardless of whether HUNT was a fresh run or a resume.
+        traced_finding_ids: set[str] = set()
+        all_agent_tasks: list[AgentTask] = list(agent_tasks)
+        hunted_cells: set[tuple[str | None, str | None, str]] = set()
+        # Hoist panel JSON so every round's hunt fan-out (recon-derived tasks
+        # in round 0, gapfill/feedback tasks thereafter) shares one binding.
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
+
+        round_tasks: list[AgentTask] = agent_tasks
+        for round_index in range(scan_input.max_coverage_rounds):
+            round_completed_stage = completed_stage if round_index == 0 else None
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "round.started",
+                {"round_index": str(round_index), "task_count": str(len(round_tasks))},
+            )
+            await _persist_scan_state(
+                scan_input.db_path,
+                "update_scan_metadata",
+                {"scan_id": scan.id, "metadata": {"coverage_round_index": round_index}},
+            )
+
+            round_outcome = await self._run_round(
+                scan_input,
+                scan,
+                repo_path,
+                artifact_root,
+                hunt_panel_json,
+                round_index,
+                round_tasks,
+                round_completed_stage,
+                candidate_findings,
+                final_findings,
+                needs_proof_findings,
+                proof_artifacts,
+                hunter_gaps,
+                traced_finding_ids,
+            )
+
+            hunted_cells.update(cell_key(t) for t in round_tasks)
+
+            # ── Gapfill edge (coverage-driven, emission only) ───────────────
+            # The re-hunt happens next round via the bounded loop below, so
+            # gapfill-discovered findings pass through AGENTIC_VALIDATE like
+            # any other round's candidates (ADR-022).
+            gf_spent = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
+            )
+            gf_over_budget, gf_budget_remaining = budget_decision(scan.budget_cap_usd, gf_spent)
+            gapfill_tasks: list[AgentTask] = []
+            if gf_over_budget:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "stage.budget_exceeded",
+                    {"stage": "GAPFILL", "cap": str(scan.budget_cap_usd)},
+                )
+            else:
+                self._current_stage = "GAPFILL"
+                focused_classes = [vc.value for vc in scan.profile.vuln_classes]
+
+                # Build a minimal coverage ledger for the gapfill stage.
+                # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
+                ledger = build_coverage_ledger(
+                    scan_id=scan.id,
+                    workspace_id="local",
+                    requested_vuln_classes=scan.profile.vuln_classes,
+                    completed_vuln_classes=[],
+                    attack_surface_items_total=len(all_agent_tasks),
+                    attack_surface_items_scanned=len(all_agent_tasks),
+                    skipped_items=[],
+                    id=str(workflow.uuid4()),
+                    created_at=workflow.now(),
+                )
+
+                gapfill_panel_json = panel_json_for_role(scan, "gapfill")
+                # Compact summary of findings discovered so far, so gapfill avoids
+                # re-hunting (and re-reporting) vectors that are already covered.
+                existing_findings_summary = [
+                    {
+                        "vuln_class": f.vuln_class.value,
+                        "title": f.title,
+                        "affected_component": f.affected_component or "",
+                        "root_cause_key": f.root_cause_key or "",
+                    }
+                    for f in candidate_findings
+                ]
+                # Gapfill is optional: if it fails, the scan keeps its findings
+                # so far rather than dying.
+                gapfill_result: list[Any] = []
+                try:
+                    gapfill_result = cast(
+                        list[Any],
+                        await workflow.execute_activity(
+                            "gapfill-coverage",
+                            args=[
+                                ledger.model_dump(mode="json"),
+                                [t.model_dump(mode="json") for t in all_agent_tasks],
+                                focused_classes,
+                                repo_path,
+                                gf_budget_remaining,
+                                gapfill_panel_json,
+                                hunter_gaps,
+                                scan_input.db_path,
+                                existing_findings_summary,
+                                scan_input.gapfill_max_iterations,
+                                scan_input.scan_seed,
+                            ],
+                            start_to_close_timeout=timedelta(hours=4),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=self._retry_policy,
+                        ),
+                    )
+                except Exception as exc:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "gapfill.failed",
+                        {"error": _describe_failure(exc)},
+                    )
+                    gapfill_result = []
+
+                for task_dict in cast(list[dict[str, Any]], gapfill_result):
+                    gapfill_tasks.append(AgentTask.model_validate(task_dict))
+
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "gapfill.completed",
+                {"gapfill_task_count": str(len(gapfill_tasks))},
+            )
+
+            # ── Reachability-feedback edge (trace-driven) ────────────────────
+            feedback_tasks: list[AgentTask] = []
+            if round_outcome.reachable_traces and round_outcome.call_graph is not None:
+                feedback_tasks = build_feedback_tasks(
+                    scan_id=scan.id,
+                    traces=round_outcome.reachable_traces,
+                    call_graph=round_outcome.call_graph,
+                    findings=candidate_findings,
+                    now=workflow.now(),
+                )
+
+            next_tasks_raw = [
+                t.model_copy(update={"round_index": round_index + 1})
+                for t in (*gapfill_tasks, *feedback_tasks)
+            ]
+            next_tasks = dedup_new_tasks(next_tasks_raw, hunted_cells)
+            all_agent_tasks.extend(next_tasks)
+
+            spent_after_round = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
+            )
+            over_budget_after_round, _ = budget_decision(scan.budget_cap_usd, spent_after_round)
+
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "round.completed",
+                {"round_index": str(round_index), "new_task_count": str(len(next_tasks))},
+            )
+
+            if not should_continue(
+                round_index,
+                scan_input.max_coverage_rounds,
+                len(next_tasks),
+                over_budget_after_round,
+            ):
+                break
+            round_tasks = next_tasks
+
+        # COVERAGE/REPORT report over every task hunted across all rounds.
+        agent_tasks = all_agent_tasks
+
+        self._current_stage = "COVERAGE"
+        coverage_ledger_json = await self._record_coverage(
+            scan_input,
+            scan,
+            agent_tasks,
+            final_findings,
+            artifact_root,
+        )
+
+        self._current_stage = "REPORT"
+        reporting_scan = scan.model_copy(
+            update={"status": ScanStatus.COMPLETED, "started_at": started_at}
+        )
+        model_invocations_json = await _load_model_invocations_json(scan_input.db_path, scan.id)
+        rendered_report_payload = await workflow.execute_activity(
+            "render-markdown-report",
+            RenderReportInput(
+                scan_json=reporting_scan.model_dump_json(),
+                findings_json=_model_list_json(candidate_findings),
+                snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
+                attack_surface_json=None,
+                final_findings_json=_model_list_json(final_findings),
+                report_path=report_path,
+                coverage_json=coverage_ledger_json,
+                proof_artifacts_json=(
+                    _model_list_json(proof_artifacts) if proof_artifacts else None
+                ),
+                manifest_json=scan_manifest.model_dump_json(),
+                model_invocations_json=model_invocations_json,
+                needs_proof_findings_json=(
+                    _model_list_json(needs_proof_findings) if needs_proof_findings else None
+                ),
+            ),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=self._retry_policy,
+        )
+        rendered_report = _render_report_output_from_activity(rendered_report_payload)
+
+        report_ref = ArtifactRef.model_validate_json(rendered_report.report_ref_json)
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_artifact_ref",
+            {"scan_id": scan.id, "artifact_ref": _model_json_dict(report_ref)},
+        )
+        report = Report(
+            id=str(workflow.uuid4()),
+            scan_id=scan.id,
+            workspace_id="local",
+            title="Quarry Scan Report",
+            summary=f"Scan found {len(final_findings)} validated finding(s) "
+            f"and {len(candidate_findings)} candidate finding(s).",
+            finding_ids=[f.id for f in final_findings],
+            formats=["markdown"],
+            artifact_refs=[report_ref],
+            generated_at=workflow.now(),
+        )
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_report",
+            {"report": _model_json_dict(report), "report_path": rendered_report.report_path},
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "report.generated",
+            {"report_path": rendered_report.report_path},
+        )
+        await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
+
+        if scan.profile.integrations_enabled and not _stage_completed(
+            completed_stage, "INTEGRATING"
+        ):
+            self._current_stage = "INTEGRATING"
+            await self._deliver_integrations(scan_input, scan, final_findings, artifact_root)
+            await _persist_scan_stage(scan_input.db_path, scan.id, "INTEGRATING")
+
+        self._current_stage = "COMPLETED"
+        await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
+        completed_at = workflow.now()
+        await _persist_scan_state(
+            scan_input.db_path,
+            "update_scan_status",
+            {
+                "scan_id": scan.id,
+                "status": ScanStatus.COMPLETED.value,
+                "started_at": None,
+                "completed_at": completed_at.isoformat(),
+                "report_path": rendered_report.report_path,
+            },
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "scan.completed",
+            {"report_path": rendered_report.report_path},
+        )
+        return RunScanResult(
+            scan_id=scan.id,
+            report_path=rendered_report.report_path,
+            candidate_finding_count=len(candidate_findings),
+            final_finding_count=len(final_findings),
+        )
+
+    async def _run_round(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        hunt_panel_json: str | None,
+        round_index: int,
+        round_tasks: list[AgentTask],
+        completed_stage: str | None,
+        candidate_findings: list[CandidateFinding],
+        final_findings: list[FinalFinding],
+        needs_proof_findings: list[CandidateFinding],
+        proof_artifacts: list[ProofArtifact],
+        hunter_gaps: list[dict[str, Any]],
+        traced_finding_ids: set[str],
+    ) -> _RoundOutcome:
+        """Run one ADR-022 round: hunt -> validate -> dedup -> (prove) -> trace.
+
+        Mutates candidate_findings / final_findings / needs_proof_findings /
+        proof_artifacts / hunter_gaps / traced_finding_ids in place, matching
+        the accumulator convention used throughout ``_run``. *completed_stage*
+        is the resume marker for round 0 only — callers pass None for every
+        later round, so every stage below always runs on round_index > 0.
+        Returns this round's newly reachable Traces and the CallGraph used to
+        find them, so the caller can build the reachability-feedback edge.
+        """
+        hunt_new_start = len(candidate_findings)
+        needs_proof_new_start = len(needs_proof_findings)
+
+        # ── HUNT stage ───────────────────────────────────────────────────────
+        # Focus + exclusion drops happen here in workflow code (deterministic).
         hunt_spent = (
             await _scan_cost_so_far(scan_input.db_path, scan.id)
             if scan.budget_cap_usd is not None
@@ -530,8 +872,12 @@ class RunScanWorkflow:
         )
         hunt_over_budget, hunt_budget_remaining = budget_decision(scan.budget_cap_usd, hunt_spent)
         if _stage_completed(completed_stage, "HUNT"):
-            candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
-            final_findings = await _load_final_findings(scan_input.db_path, scan.id)
+            loaded_candidates = await _load_candidate_findings(scan_input.db_path, scan.id)
+            loaded_finals = await _load_final_findings(scan_input.db_path, scan.id)
+            candidate_findings.clear()
+            candidate_findings.extend(loaded_candidates)
+            final_findings.clear()
+            final_findings.extend(loaded_finals)
         elif hunt_over_budget:
             # Budget already exhausted before this stage: skip hunting, mark the
             # stage budget-overrun, and let the scan continue to the next stage.
@@ -548,7 +894,7 @@ class RunScanWorkflow:
             # Drop 1: focus guard (structural enforcement of --focus)
             focused_tasks = [
                 t
-                for t in agent_tasks
+                for t in round_tasks
                 if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
             ]
             # Drop 2: exclusion guard (always wins over focus)
@@ -670,7 +1016,7 @@ class RunScanWorkflow:
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
 
         # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
-        # Adversarial review of each CandidateFinding (ADR-021).
+        # Adversarial review of each CandidateFinding new this round (ADR-021).
         # Each finding is reviewed independently with the 'validate' role.
         # The validator receives only ValidatorClaim fields — no hunter provenance.
         if not _stage_completed(completed_stage, "AGENTIC_VALIDATE"):
@@ -691,7 +1037,7 @@ class RunScanWorkflow:
             validate_panel_json = panel_json_for_role(scan, "validate")
             # Candidates already promoted by the deterministic secret gate above.
             already_final = {f.id for f in final_findings}
-            for candidate in list(candidate_findings):
+            for candidate in list(candidate_findings[hunt_new_start:]):
                 if val_over_budget:
                     break  # budget exhausted: stop validating, continue the scan
                 if candidate.triage_label == "oos":
@@ -906,152 +1252,10 @@ class RunScanWorkflow:
                 {"candidate_count": str(len(candidate_findings))},
             )
 
-        # ── GAPFILL stage ────────────────────────────────────────────────────
-        # Coverage floor enforcement + agentic gap detection (ADR-021).
-        # Gapfill tasks re-enter the hunt stage as a second pass.
-        gapfill_tasks: list[AgentTask] = []
-        gf_spent = (
-            await _scan_cost_so_far(scan_input.db_path, scan.id)
-            if scan.budget_cap_usd is not None
-            else 0.0
-        )
-        gf_over_budget, gf_budget_remaining = budget_decision(scan.budget_cap_usd, gf_spent)
-        if not _stage_completed(completed_stage, "GAPFILL"):
-            self._current_stage = "GAPFILL"
-            if gf_over_budget:
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "stage.budget_exceeded",
-                    {"stage": "GAPFILL", "cap": str(scan.budget_cap_usd)},
-                )
-            focused_classes = [vc.value for vc in scan.profile.vuln_classes]
-
-            # Build a minimal coverage ledger for the gapfill stage.
-            # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
-            ledger = build_coverage_ledger(
-                scan_id=scan.id,
-                workspace_id="local",
-                requested_vuln_classes=scan.profile.vuln_classes,
-                completed_vuln_classes=[],
-                attack_surface_items_total=len(agent_tasks),
-                attack_surface_items_scanned=len(agent_tasks),
-                skipped_items=[],
-                id=str(workflow.uuid4()),
-                created_at=workflow.now(),
-            )
-
-            gapfill_panel_json = panel_json_for_role(scan, "gapfill")
-            # Compact summary of findings discovered so far, so gapfill avoids
-            # re-hunting (and re-reporting) vectors that are already covered.
-            existing_findings_summary = [
-                {
-                    "vuln_class": f.vuln_class.value,
-                    "title": f.title,
-                    "affected_component": f.affected_component or "",
-                    "root_cause_key": f.root_cause_key or "",
-                }
-                for f in candidate_findings
-            ]
-            # Gapfill is optional: if it fails, the scan keeps its first-pass
-            # findings rather than dying.
-            gapfill_result: list[Any] = []
-            try:
-                gapfill_result = cast(
-                    list[Any],
-                    await workflow.execute_activity(
-                        "gapfill-coverage",
-                        args=[
-                            ledger.model_dump(mode="json"),
-                            [t.model_dump(mode="json") for t in agent_tasks],
-                            focused_classes,
-                            repo_path,
-                            gf_budget_remaining,
-                            gapfill_panel_json,
-                            hunter_gaps,
-                            scan_input.db_path,
-                            existing_findings_summary,
-                            scan_input.gapfill_max_iterations,
-                            scan_input.scan_seed,
-                        ],
-                        start_to_close_timeout=timedelta(hours=4),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
-                    ),
-                )
-            except Exception as exc:
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "gapfill.failed",
-                    {"error": _describe_failure(exc)},
-                )
-                gapfill_result = []
-
-            for task_dict in cast(list[dict[str, Any]], gapfill_result):
-                task = AgentTask.model_validate(task_dict)
-                gapfill_tasks.append(task)
-
-            # Gapfill tasks re-enter the hunt stage (second pass)
-            if gapfill_tasks:
-                runnable_gapfill = [
-                    t
-                    for t in gapfill_tasks
-                    if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
-                ]
-                max_concurrent = scan_input.hunt_max_concurrent
-                semaphore_gf = asyncio.Semaphore(max_concurrent)
-
-                async def _run_one_gapfill_hunt(task: AgentTask) -> list[dict[str, Any]]:
-                    async with semaphore_gf:
-                        return cast(
-                            list[dict[str, Any]],
-                            await workflow.execute_activity(
-                                "hunt-vuln-class",
-                                args=[
-                                    task,
-                                    repo_path,
-                                    scan_input.hunt_max_iterations,
-                                    gf_budget_remaining,
-                                    hunt_panel_json,
-                                    scan_input.db_path,
-                                    scan_input.scan_seed,
-                                ],
-                                start_to_close_timeout=timedelta(hours=4),
-                                heartbeat_timeout=timedelta(minutes=3),
-                                retry_policy=self._retry_policy,
-                            ),
-                        )
-
-                gapfill_hunt_results = await asyncio.gather(
-                    *[_run_one_gapfill_hunt(t) for t in runnable_gapfill],
-                    return_exceptions=True,
-                )
-                for task_result in gapfill_hunt_results:
-                    if isinstance(task_result, BaseException):
-                        await _append_workflow_event(
-                            scan_input.db_path,
-                            scan.id,
-                            "gapfill.rehunt_failed",
-                            {"error": _describe_failure(task_result)},
-                        )
-                        continue
-                    task_findings, _ = split_hunt_result(task_result)
-                    for finding_dict in task_findings:
-                        candidate = CandidateFinding.model_validate(finding_dict)
-                        candidate_findings.append(candidate)
-
-            await _persist_scan_stage(scan_input.db_path, scan.id, "GAPFILL")
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "gapfill.completed",
-                {"gapfill_task_count": str(len(gapfill_tasks))},
-            )
-
         # ── DEDUP stage ──────────────────────────────────────────────────────
         # Deterministic clustering by root_cause_key + agentic merge for
-        # ambiguous clusters (ADR-020 algorithm).
+        # ambiguous clusters (ADR-020 algorithm). Runs over the full
+        # accumulated candidate set each round to keep it clean (ADR-022).
         if not _stage_completed(completed_stage, "DEDUP"):
             self._current_stage = "DEDUP"
             dd_spent = (
@@ -1092,7 +1296,7 @@ class RunScanWorkflow:
                     ),
                 )
                 deduped_dicts = cast(list[dict[str, Any]], dedup_result)
-                candidate_findings = [CandidateFinding.model_validate(d) for d in deduped_dicts]
+                candidate_findings[:] = [CandidateFinding.model_validate(d) for d in deduped_dicts]
             except Exception as exc:
                 # Keep candidate_findings as-is (un-deduped), but record the failure.
                 await _append_workflow_event(
@@ -1113,8 +1317,8 @@ class RunScanWorkflow:
             )
 
         # ── PROVE stage ──────────────────────────────────────────────────────
-        # Agentic proof-of-concept generation for NEEDS_PROOF findings.
-        # The prove agent proposes exec/HTTP specs; this block dispatches them.
+        # Agentic proof-of-concept generation for findings newly promoted to
+        # NEEDS_PROOF this round.
         # Gated by scan_input.proof_enabled — skipped (but persisted) if False.
         #
         # Attempt loop (PROVE_MAX_ATTEMPTS per finding):
@@ -1124,6 +1328,7 @@ class RunScanWorkflow:
         #   - Timeout beats success; exhausted-attempts → needs_manual_review.
         if not _stage_completed(completed_stage, "PROVE"):
             self._current_stage = "PROVE"
+            round_needs_proof = needs_proof_findings[needs_proof_new_start:]
             if scan_input.proof_enabled:
                 prove_panel_json = panel_json_for_role(scan, "prove")
                 pv_spent = (
@@ -1137,7 +1342,7 @@ class RunScanWorkflow:
                     if scan_input.target_url
                     else None
                 )
-                for finding in filter_needs_proof(needs_proof_findings):
+                for finding in filter_needs_proof(round_needs_proof):
                     final_verdict = "not_proved"
                     prior_attempts: list[dict[str, Any]] = []
                     for attempt in range(PROVE_MAX_ATTEMPTS):
@@ -1221,11 +1426,11 @@ class RunScanWorkflow:
                                     )
                                 except Exception:
                                     pass
-                            outcome = prove_outcome_from_captures(exec_caps, http_caps)
-                            if outcome == "proved":
+                            outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
+                            if outcome_verdict == "proved":
                                 final_verdict = "proved"
                                 break
-                            if outcome == "needs_manual_review":
+                            if outcome_verdict == "needs_manual_review":
                                 final_verdict = "needs_manual_review"
                                 await _append_workflow_event(
                                     scan_input.db_path,
@@ -1282,7 +1487,7 @@ class RunScanWorkflow:
                 scan.id,
                 "prove.completed",
                 {
-                    "findings_attempted": str(len(filter_needs_proof(needs_proof_findings)))
+                    "findings_attempted": str(len(filter_needs_proof(round_needs_proof)))
                     if scan_input.proof_enabled
                     else "0",
                     "proof_artifact_count": str(len(proof_artifacts)),
@@ -1290,22 +1495,27 @@ class RunScanWorkflow:
             )
 
         # ── TRACER stage ─────────────────────────────────────────────────────
-        # Reachability verdict per finding — one tracer-finding activity per
-        # CandidateFinding.  Single-repo trace: builds Python call graph from
-        # the primary repo, fans out to one tracer instance per finding.
-        # Cross-repo fan-out (quarry.toml consumer_repos) is a follow-on.
+        # Reachability verdict for findings not yet traced in an earlier round —
+        # one tracer-finding activity per pending CandidateFinding. Each Trace
+        # is persisted and, when the finding was already promoted, synced onto
+        # its FinalFinding (ADR-022 §Trace persistence). reachable_traces feeds
+        # the reachability-feedback edge.
+        reachable_traces: list[Trace] = []
+        call_graph: CallGraph | None = None
         if not _stage_completed(completed_stage, "TRACER"):
             self._current_stage = "TRACER"
-            if candidate_findings:
+            pending_trace = [f for f in candidate_findings if f.id not in traced_finding_ids]
+            if pending_trace:
                 _target_lang = str(scan.metadata.get("target_language") or "python")
                 call_graph_raw = await workflow.execute_activity(
                     "build-call-graph",
                     args=[scan.id, repo_path, _target_lang],
                     start_to_close_timeout=timedelta(minutes=10),
                 )
-                call_graph: CallGraph = CallGraph.model_validate(call_graph_raw)
+                call_graph = CallGraph.model_validate(call_graph_raw)
                 tracer_panel_json = panel_json_for_role(scan, "trace")
-                for finding in candidate_findings:
+                final_findings_by_id = {f.id: f for f in final_findings}
+                for finding in pending_trace:
                     try:
                         trace_raw = await workflow.execute_activity(
                             "tracer-finding",
@@ -1328,6 +1538,28 @@ class RunScanWorkflow:
                             trace_raw if isinstance(trace_raw, dict) else trace_raw
                         )
                         apply_trace_severity_reranking(finding, trace)
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_trace",
+                            {"trace": _model_json_dict(trace)},
+                        )
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_candidate_finding",
+                            {"finding": _model_json_dict(finding)},
+                        )
+                        updated_final = sync_final_finding_trace(
+                            finding, trace, final_findings_by_id
+                        )
+                        if updated_final is not None:
+                            await _persist_scan_state(
+                                scan_input.db_path,
+                                "save_final_finding",
+                                {"finding": _model_json_dict(updated_final)},
+                            )
+                        traced_finding_ids.add(finding.id)
+                        if trace.reachable == ReachabilityVerdict.REACHABLE:
+                            reachable_traces.append(trace)
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
@@ -1349,111 +1581,10 @@ class RunScanWorkflow:
                 scan_input.db_path,
                 scan.id,
                 "tracer.completed",
-                {"finding_count": str(len(candidate_findings))},
+                {"finding_count": str(len(pending_trace))},
             )
 
-        self._current_stage = "COVERAGE"
-        coverage_ledger_json = await self._record_coverage(
-            scan_input,
-            scan,
-            agent_tasks,
-            final_findings,
-            artifact_root,
-        )
-
-        self._current_stage = "REPORT"
-        reporting_scan = scan.model_copy(
-            update={"status": ScanStatus.COMPLETED, "started_at": started_at}
-        )
-        model_invocations_json = await _load_model_invocations_json(scan_input.db_path, scan.id)
-        rendered_report_payload = await workflow.execute_activity(
-            "render-markdown-report",
-            RenderReportInput(
-                scan_json=reporting_scan.model_dump_json(),
-                findings_json=_model_list_json(candidate_findings),
-                snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
-                attack_surface_json=None,
-                final_findings_json=_model_list_json(final_findings),
-                report_path=report_path,
-                coverage_json=coverage_ledger_json,
-                proof_artifacts_json=(
-                    _model_list_json(proof_artifacts) if proof_artifacts else None
-                ),
-                manifest_json=scan_manifest.model_dump_json(),
-                model_invocations_json=model_invocations_json,
-                needs_proof_findings_json=(
-                    _model_list_json(needs_proof_findings) if needs_proof_findings else None
-                ),
-            ),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=self._retry_policy,
-        )
-        rendered_report = _render_report_output_from_activity(rendered_report_payload)
-
-        report_ref = ArtifactRef.model_validate_json(rendered_report.report_ref_json)
-        await _persist_scan_state(
-            scan_input.db_path,
-            "save_artifact_ref",
-            {"scan_id": scan.id, "artifact_ref": _model_json_dict(report_ref)},
-        )
-        report = Report(
-            id=str(workflow.uuid4()),
-            scan_id=scan.id,
-            workspace_id="local",
-            title="Quarry Scan Report",
-            summary=f"Scan found {len(final_findings)} validated finding(s) "
-            f"and {len(candidate_findings)} candidate finding(s).",
-            finding_ids=[f.id for f in final_findings],
-            formats=["markdown"],
-            artifact_refs=[report_ref],
-            generated_at=workflow.now(),
-        )
-        await _persist_scan_state(
-            scan_input.db_path,
-            "save_report",
-            {"report": _model_json_dict(report), "report_path": rendered_report.report_path},
-        )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "report.generated",
-            {"report_path": rendered_report.report_path},
-        )
-        await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
-
-        if scan.profile.integrations_enabled and not _stage_completed(
-            completed_stage, "INTEGRATING"
-        ):
-            self._current_stage = "INTEGRATING"
-            await self._deliver_integrations(scan_input, scan, final_findings, artifact_root)
-            await _persist_scan_stage(scan_input.db_path, scan.id, "INTEGRATING")
-
-        self._current_stage = "COMPLETED"
-        await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
-        completed_at = workflow.now()
-        await _persist_scan_state(
-            scan_input.db_path,
-            "update_scan_status",
-            {
-                "scan_id": scan.id,
-                "status": ScanStatus.COMPLETED.value,
-                "started_at": None,
-                "completed_at": completed_at.isoformat(),
-                "report_path": rendered_report.report_path,
-            },
-        )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "scan.completed",
-            {"report_path": rendered_report.report_path},
-        )
-        return RunScanResult(
-            scan_id=scan.id,
-            report_path=rendered_report.report_path,
-            candidate_finding_count=len(candidate_findings),
-            final_finding_count=len(final_findings),
-        )
+        return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(

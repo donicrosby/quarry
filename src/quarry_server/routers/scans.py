@@ -96,6 +96,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             gapfill_max_iterations=quarry_config.scan_defaults.gapfill_max_iterations,
             recon_max_iterations=quarry_config.scan_defaults.recon_max_iterations,
             dedup_max_iterations=quarry_config.scan_defaults.dedup_max_iterations,
+            max_coverage_rounds=quarry_config.scan_defaults.max_coverage_rounds,
             scan_seed=_resolve_scan_seed(pinned=quarry_config.scan_defaults.seed, scan_id=scan_id),
             dynamic_validation_enabled=body.dynamic_validation_enabled,
             live_prove_enabled=body.live_prove_enabled,

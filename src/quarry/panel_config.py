@@ -90,6 +90,10 @@ class ScanDefaultsConfig(BaseModel):
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40
     dedup_max_iterations: int = 8
+    # Cap on iterative-coverage-loop rounds (ADR-022). Each round re-runs
+    # hunt -> validate -> (prove) -> trace; the loop halts sooner on
+    # convergence (no new tasks) or budget exhaustion. Default 3 per ADR-022.
+    max_coverage_rounds: int = 3
     # Optional fixed seed. When None, each scan derives a deterministic seed
     # from its scan_id UUID so runs are reproducible without pinning a global value.
     seed: int | None = None

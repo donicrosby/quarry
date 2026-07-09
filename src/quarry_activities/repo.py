@@ -29,6 +29,7 @@ from quarry.schemas import (
     ScanStatus,
     Target,
     ToolInvocation,
+    Trace,
     WorkflowEvent,
     utc_now,
 )
@@ -252,6 +253,11 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
             repository.save_candidate_finding(CandidateFinding.model_validate(payload["finding"]))
         case "save_final_finding":
             repository.save_final_finding(FinalFinding.model_validate(payload["finding"]))
+        case "save_trace":
+            repository.save_trace(Trace.model_validate(payload["trace"]))
+        case "load_traces":
+            traces = repository.load_traces(payload["scan_id"])
+            return [trace.model_dump(mode="json") for trace in traces]
         case "save_report":
             repository.save_report(
                 Report.model_validate(payload["report"]),
