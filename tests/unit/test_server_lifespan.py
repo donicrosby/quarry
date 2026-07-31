@@ -13,7 +13,6 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from quarry.config import QuarrySettings
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.diff import git_diff_commits
-from quarry_activities.dynamic_validation import validate_idor_candidate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.mapper import map_impacted_regions
@@ -81,14 +80,13 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert len(worker.workflows) == 4
             assert RunDiffScanWorkflow in worker.workflows
             assert (
-                len(worker.activities) == 28
+                len(worker.activities) == 26
             )  # +4 for http_request, sandbox_exec, prove, tracer (ADR-017); +1 build_call_graph;
-            # +1 dispatch_lifecycle_hooks_activity
+            # +1 dispatch_lifecycle_hooks_activity; -2 orphaned per-class validators removed
             assert git_diff_commits in worker.activities
             assert map_impacted_regions in worker.activities
             assert emit_agent_tasks in worker.activities
             assert hunt_activity in worker.activities
-            assert validate_idor_candidate_activity in worker.activities
             assert build_coverage_ledger_activity in worker.activities
 
         assert worker.cancelled is True

@@ -7,7 +7,6 @@ from typing import Any, Self, cast
 import httpx
 
 from quarry.schemas import (
-    AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
@@ -156,11 +155,6 @@ class QuarryClient:
             ],
             "final_findings": [FinalFinding.model_validate(item) for item in final_findings],
         }
-
-    async def get_attack_surface(self, scan_id: str) -> list[AttackSurfaceItem]:
-        response = await self._client.get(f"/scans/{scan_id}/attack-surface")
-        response.raise_for_status()
-        return [AttackSurfaceItem.model_validate(item) for item in _json_list(response)]
 
     async def get_integrations(self, scan_id: str) -> list[IntegrationRun]:
         response = await self._client.get(f"/scans/{scan_id}/integrations")

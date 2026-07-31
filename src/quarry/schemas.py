@@ -97,7 +97,6 @@ class TriageLabel(StrEnum):
 class ArtifactKind(StrEnum):
     REPO_MANIFEST = "repo_manifest"
     CODE_SNIPPET = "code_snippet"
-    ATTACK_SURFACE = "attack_surface"
     TOOL_STDOUT = "tool_stdout"
     TOOL_STDERR = "tool_stderr"
     HTTP_REQUEST = "http_request"
@@ -215,20 +214,6 @@ class CodeIndex(BaseModel):
     imports_ref: ArtifactRef | None = None
     dependencies_ref: ArtifactRef | None = None
     created_at: datetime
-
-
-class AttackSurfaceItem(BaseModel):
-    id: str
-    scan_id: str
-    route: str
-    method: str
-    handler_file: str
-    handler_symbol: str | None = None
-    params: list[str] = Field(default_factory=_empty_strings)
-    auth_required: bool | None = None
-    auth_hint: str | None = None
-    source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Workspace(BaseModel):
@@ -532,7 +517,7 @@ class GapfillTask(BaseModel):
 class CoverageGap(BaseModel):
     id: str
     scan_id: str
-    attack_surface_item_id: str | None = None
+    scope_unit_id: str | None = None
     vuln_class: VulnerabilityClass | None = None
     reason: str
     recommended_next_task: str | None = None
@@ -559,8 +544,8 @@ class CoverageLedger(BaseModel):
     id: str
     scan_id: str
     workspace_id: str
-    attack_surface_items_total: int
-    attack_surface_items_scanned: int
+    agent_tasks_total: int
+    agent_tasks_scanned: int
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)

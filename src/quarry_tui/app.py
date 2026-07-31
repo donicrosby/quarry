@@ -5,7 +5,6 @@ from textual.binding import Binding
 from textual.widgets import Footer
 
 from quarry_client.client import QuarryClient
-from quarry_tui.screens.attack_surface import AttackSurfaceScreen
 from quarry_tui.screens.dashboard import Dashboard
 from quarry_tui.screens.findings import FindingsScreen
 from quarry_tui.screens.integrations import IntegrationsScreen
@@ -28,9 +27,6 @@ class QuarryTuiApp(App[None]):
         yield Footer()
 
     def on_dashboard_scan_selected(self, event: Dashboard.ScanSelected) -> None:
-        self.push_screen(AttackSurfaceScreen(self.client, event.scan_id))
-
-    def on_attack_surface_show_findings(self, event: AttackSurfaceScreen.ShowFindings) -> None:
         self.push_screen(FindingsScreen(self.client, event.scan_id))
 
     def on_findings_screen_show_integrations(self, event: FindingsScreen.ShowIntegrations) -> None:
@@ -51,17 +47,13 @@ class QuarryTuiApp(App[None]):
                     "\n"
                     "  Dashboard\n"
                     "    ↑ / ↓          move between scans\n"
-                    "    Enter          open attack surface for selected scan\n"
+                    "    Enter          open findings for selected scan\n"
                     "    q              quit\n"
                     "    ?              show this help\n"
                     "\n"
-                    "  Attack surface screen\n"
-                    "    f              view findings\n"
-                    "    Esc / q        back to dashboard\n"
-                    "\n"
                     "  Findings screen\n"
                     "    i              view integrations\n"
-                    "    Esc / q        back to attack surface\n"
+                    "    Esc / q        back to dashboard\n"
                     "\n"
                     "  Any screen\n"
                     "    Esc / q        go back one level\n"

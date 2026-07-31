@@ -229,7 +229,6 @@ class RunDiffScanWorkflow:
                 scan_json=reporting_scan.model_dump_json(),
                 findings_json=_model_list_json(candidate_findings),
                 snapshot_json=None,
-                attack_surface_json=_model_list_json([]),
                 final_findings_json=_model_list_json(final_findings),
                 report_path=report_path,
             ),

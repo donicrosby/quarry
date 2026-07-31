@@ -1,7 +1,7 @@
 """Coverage ledger activity.
 
 Records what a scan actually covered: which vulnerability classes were requested
-and completed, how many attack-surface items were scanned versus mapped, and an
+and completed, how many agentic tasks were scanned versus emitted, and an
 honest list of what was skipped and why. The ledger is stored as an artifact and
 surfaced in the report so coverage gaps are never hidden.
 """
@@ -33,8 +33,8 @@ def build_coverage_ledger(
     workspace_id: str,
     requested_vuln_classes: list[VulnerabilityClass],
     completed_vuln_classes: list[VulnerabilityClass],
-    attack_surface_items_total: int,
-    attack_surface_items_scanned: int,
+    agent_tasks_total: int,
+    agent_tasks_scanned: int,
     skipped_items: list[CoverageGap],
     id: str | None = None,
     created_at: Any = None,
@@ -50,8 +50,8 @@ def build_coverage_ledger(
         id=id if id is not None else str(uuid4()),
         scan_id=scan_id,
         workspace_id=workspace_id,
-        attack_surface_items_total=attack_surface_items_total,
-        attack_surface_items_scanned=attack_surface_items_scanned,
+        agent_tasks_total=agent_tasks_total,
+        agent_tasks_scanned=agent_tasks_scanned,
         vuln_classes_requested=requested_vuln_classes,
         vuln_classes_completed=completed_vuln_classes,
         skipped_items=skipped_items,
@@ -90,8 +90,8 @@ def build_coverage_ledger_activity(
         workspace_id=input.workspace_id,
         requested_vuln_classes=[VulnerabilityClass(v) for v in input.requested_vuln_classes],
         completed_vuln_classes=[VulnerabilityClass(v) for v in input.completed_vuln_classes],
-        attack_surface_items_total=input.attack_surface_items_total,
-        attack_surface_items_scanned=input.attack_surface_items_scanned,
+        agent_tasks_total=input.agent_tasks_total,
+        agent_tasks_scanned=input.agent_tasks_scanned,
         skipped_items=_coverage_gaps_from_json(input.scan_id, input.skipped_json),
     )
     artifact_ref = write_coverage_artifact(ledger, input.artifact_root)
@@ -117,7 +117,7 @@ def _coverage_gaps_from_json(scan_id: str, payload: str) -> list[CoverageGap]:
             CoverageGap(
                 id=str(uuid4()),
                 scan_id=scan_id,
-                attack_surface_item_id=_optional_str(values.get("attack_surface_item_id")),
+                scope_unit_id=_optional_str(values.get("scope_unit_id")),
                 vuln_class=(
                     VulnerabilityClass(vuln_class_value)
                     if isinstance(vuln_class_value, str)

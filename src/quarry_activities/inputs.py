@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import AttackSurfaceItem, ChangedFile
+from quarry.schemas import ChangedFile
 
 
 class CreateSnapshotInput(BaseModel):
@@ -38,19 +38,6 @@ class CloneRepoResult(BaseModel):
     commit_sha: str
 
 
-class ExtractRoutesInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    file_path: str
-
-
-class ExtractRoutesForRepoInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    repo_path: str
-    scan_id: str
-
-
 class GitDiffInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -72,24 +59,6 @@ class ScanSecretsInput(BaseModel):
 
     repo_root: str
     file_paths: tuple[str, ...] | None = None
-
-
-class IdorScanInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    repo_root: str
-    scan_id: str
-    attack_surface_items: tuple[AttackSurfaceItem, ...]
-    workspace_id: str = "local"
-
-
-class CommandInjectionScanInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    repo_root: str
-    scan_id: str
-    attack_surface_items: tuple[AttackSurfaceItem, ...]
-    workspace_id: str = "local"
 
 
 class RunDiffScanInput(BaseModel):
@@ -125,8 +94,8 @@ class BuildCoverageLedgerInput(BaseModel):
     artifact_root: str
     requested_vuln_classes: tuple[str, ...]
     completed_vuln_classes: tuple[str, ...]
-    attack_surface_items_total: int
-    attack_surface_items_scanned: int
+    agent_tasks_total: int
+    agent_tasks_scanned: int
     skipped_json: str
     workspace_id: str = "local"
 
@@ -144,7 +113,6 @@ class RenderReportInput(BaseModel):
     scan_json: str
     findings_json: str
     snapshot_json: str | None
-    attack_surface_json: str | None
     final_findings_json: str | None
     report_path: str | None = None
     coverage_json: str | None = None
@@ -213,38 +181,6 @@ class PersistScanStateInput(BaseModel):
     db_path: str
     operation: str
     payload_json: str
-
-
-class ValidateIDORInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    finding_json: str
-    target_url: str | None = None
-    user_a_username: str | None = None
-    user_a_password: str | None = None
-    user_b_username: str | None = None
-    user_b_password: str | None = None
-    artifact_store_path: str | None = None
-
-
-class IdorValidationInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    candidate_finding_id: str
-    scan_id: str
-    target_url: str | None = None
-    allowed_hosts: tuple[str, ...] = ()
-    auth_credentials: dict[str, str] | None = None
-    artifact_store_path: str | None = None
-
-
-class ValidateCommandInjectionInput(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    finding_json: str
-    target_url: str | None = None
-    allowed_hosts: tuple[str, ...] = ()
-    artifact_store_path: str | None = None
 
 
 class HttpRequestActivityInput(BaseModel):

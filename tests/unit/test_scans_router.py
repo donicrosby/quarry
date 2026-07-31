@@ -13,7 +13,6 @@ from httpx import ASGITransport, AsyncClient
 
 from quarry.config import QuarrySettings
 from quarry.schemas import (
-    AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
     Scan,
@@ -235,44 +234,11 @@ async def test_get_findings_returns_404_for_unknown_scan(scan_api: ScanApiTestCo
     assert response.status_code == 404
 
 
-async def test_get_attack_surface_returns_items(scan_api: ScanApiTestContext) -> None:
-    seed_scan_database(scan_api.db_path, include_attack_surface=True)
-
-    response = await scan_api.client.get("/scans/scan-1/attack-surface")
-    body = response.json()
-
-    assert response.status_code == 200
-    assert body == [
-        {
-            "id": "attack-surface-1",
-            "scan_id": "scan-1",
-            "route": "/healthz",
-            "method": "GET",
-            "handler_file": "src/app.py",
-            "handler_symbol": "health_check",
-            "params": [],
-            "auth_required": None,
-            "auth_hint": None,
-            "source_refs": [],
-            "metadata": {},
-        }
-    ]
-
-
-async def test_get_attack_surface_returns_404_for_unknown_scan(
-    scan_api: ScanApiTestContext,
-) -> None:
-    response = await scan_api.client.get("/scans/missing/attack-surface")
-
-    assert response.status_code == 404
-
-
 def seed_scan_database(
     db_path: Path,
     *,
     status: ScanStatus = ScanStatus.COMPLETED,
     include_findings: bool = False,
-    include_attack_surface: bool = False,
 ) -> None:
     repository = QuarryRepository(db_path)
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -320,18 +286,4 @@ def seed_scan_database(
                 validation_result_id="validation-1",
                 created_at=now,
             )
-        )
-
-    if include_attack_surface:
-        repository.save_attack_surface_items(
-            [
-                AttackSurfaceItem(
-                    id="attack-surface-1",
-                    scan_id=scan.id,
-                    route="/healthz",
-                    method="GET",
-                    handler_file="src/app.py",
-                    handler_symbol="health_check",
-                )
-            ]
         )

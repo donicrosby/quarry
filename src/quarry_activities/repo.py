@@ -15,7 +15,6 @@ from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
-    AttackSurfaceItem,
     CandidateFinding,
     FileManifest,
     FileManifestEntry,
@@ -185,11 +184,6 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 return repository.load_scan(payload["scan_id"]).model_dump(mode="json")
             except ValueError:
                 return None
-        case "load_attack_surface_items":
-            return [
-                item.model_dump(mode="json")
-                for item in repository.load_attack_surface_items(payload["scan_id"])
-            ]
         case "load_candidate_findings":
             return [
                 finding.model_dump(mode="json")
@@ -244,10 +238,6 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
             repository.save_artifact_ref(
                 payload["scan_id"],
                 ArtifactRef.model_validate(payload["artifact_ref"]),
-            )
-        case "save_attack_surface_items":
-            repository.save_attack_surface_items(
-                [AttackSurfaceItem.model_validate(item) for item in payload["items"]]
             )
         case "save_candidate_finding":
             repository.save_candidate_finding(CandidateFinding.model_validate(payload["finding"]))

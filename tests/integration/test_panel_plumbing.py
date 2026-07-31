@@ -157,8 +157,8 @@ def test_gapfill_activity_accepts_none_panel_json() -> None:
         id="l-1",
         scan_id="s-1",
         workspace_id="ws",
-        attack_surface_items_total=0,
-        attack_surface_items_scanned=0,
+        agent_tasks_total=0,
+        agent_tasks_scanned=0,
         vuln_classes_requested=[VulnerabilityClass.SECRETS],
         created_at=_NOW,
     )

@@ -19,7 +19,6 @@ def test_render_markdown_report_has_activity_decorator() -> None:
     assert "scan" in params
     assert "findings" in params
     assert "snapshot" in params
-    assert "attack_surface" in params
     assert "final_findings" in params
 
 
@@ -69,8 +68,7 @@ def test_render_markdown_report_with_minimal_fixture() -> None:
     assert "## Summary" in report
     assert "Quarry produced 0 validated finding(s)" in report
     assert "0 candidate finding(s)" in report
-    assert "## Attack surface" in report
-    assert "No routes mapped" in report
+    assert "## Attack surface" not in report
     assert "## Candidate findings" in report
     assert "No candidate findings recorded" in report
 

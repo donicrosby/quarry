@@ -209,8 +209,8 @@ def gapfill_impl(
         variables={
             "vuln_classes": [vc.value for vc in vuln_classes],
             "completed_classes": completed,
-            "items_total": ledger.attack_surface_items_total,
-            "items_scanned": ledger.attack_surface_items_scanned,
+            "items_total": ledger.agent_tasks_total,
+            "items_scanned": ledger.agent_tasks_scanned,
             "existing_findings": [
                 {
                     "vuln_class": str(f.get("vuln_class", "")),

@@ -55,7 +55,7 @@ def _finding() -> FinalFinding:
 
 
 def test_report_renders_provenance_section() -> None:
-    report = render_markdown_report(_scan(), [], None, [], [_finding()], None, None, _manifest())
+    report = render_markdown_report(_scan(), [], None, [_finding()], None, None, _manifest())
 
     assert "## Provenance" in report
     assert "Quarry version: `0.1.0`" in report
@@ -65,5 +65,5 @@ def test_report_renders_provenance_section() -> None:
 
 
 def test_report_omits_provenance_when_no_manifest() -> None:
-    report = render_markdown_report(_scan(), [], None, [], [_finding()], None, None, None)
+    report = render_markdown_report(_scan(), [], None, [_finding()], None, None, None)
     assert "## Provenance" not in report

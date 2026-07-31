@@ -10,7 +10,6 @@ from httpx import ASGITransport
 
 from quarry.config import QuarrySettings
 from quarry.schemas import (
-    AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
@@ -53,7 +52,6 @@ def seed_scan_database(
     *,
     status: ScanStatus = ScanStatus.COMPLETED,
     include_findings: bool = False,
-    include_attack_surface: bool = False,
     include_integrations: bool = False,
 ) -> None:
     repository = QuarryRepository(db_path)
@@ -102,20 +100,6 @@ def seed_scan_database(
                 validation_result_id="validation-1",
                 created_at=now,
             )
-        )
-
-    if include_attack_surface:
-        repository.save_attack_surface_items(
-            [
-                AttackSurfaceItem(
-                    id="attack-surface-1",
-                    scan_id=scan.id,
-                    route="/healthz",
-                    method="GET",
-                    handler_file="src/app.py",
-                    handler_symbol="health_check",
-                )
-            ]
         )
 
     if include_integrations:

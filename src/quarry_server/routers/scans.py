@@ -16,7 +16,6 @@ from temporalio.client import Client
 from quarry.config import QuarrySettings
 from quarry.panel_config import load_quarry_config, resolve_integration_configs, resolve_panel
 from quarry.schemas import (
-    AttackSurfaceItem,
     CandidateFinding,
     FinalFinding,
     IntegrationRun,
@@ -230,16 +229,15 @@ async def cancel_scan(scan_id: str, request: Request) -> dict[str, str]:
 async def replay_scan(scan_id: str, request: Request) -> ReplayResponse:
     """Re-render a scan's report from persisted state.
 
-    Replay reuses the render activity over the findings, attack surface, and
-    manifest already stored for the scan. It runs no scan stages and makes no
-    model or tool calls — it only regenerates the markdown report.
+    Replay reuses the render activity over the findings and manifest already
+    stored for the scan. It runs no scan stages and makes no model or tool
+    calls — it only regenerates the markdown report.
     """
     repository = _repository_from_request(request)
     scan = _load_existing_scan(repository, scan_id)
 
     candidate_findings = repository.load_candidate_findings(scan_id)
     final_findings = repository.load_final_findings(scan_id)
-    attack_surface = repository.load_attack_surface_items(scan_id)
     manifest = repository.load_scan_manifest(scan_id)
 
     output_dir = _metadata_str(scan, "output_dir", default=".quarry") or ".quarry"
@@ -250,7 +248,6 @@ async def replay_scan(scan_id: str, request: Request) -> ReplayResponse:
         scan_json=reporting_scan.model_dump_json(),
         findings_json=_model_list_json(candidate_findings),
         snapshot_json=None,
-        attack_surface_json=_model_list_json(attack_surface),
         final_findings_json=_model_list_json(final_findings),
         report_path=report_path,
         coverage_json=None,
@@ -275,14 +272,6 @@ async def get_findings(
     }
 
 
-@router.get("/{scan_id}/attack-surface")
-async def get_attack_surface(scan_id: str, request: Request) -> list[AttackSurfaceItem]:
-    """Load attack surface items for one scan."""
-    repository = _repository_from_request(request)
-    _load_existing_scan(repository, scan_id)
-    return repository.load_attack_surface_items(scan_id)
-
-
 @router.get("/{scan_id}/integrations")
 async def get_integrations(scan_id: str, request: Request) -> list[IntegrationRun]:
     """Load integration runs (dry-run sink deliveries) for one scan."""
@@ -292,7 +281,7 @@ async def get_integrations(scan_id: str, request: Request) -> list[IntegrationRu
 
 
 def _model_list_json(
-    items: list[CandidateFinding] | list[AttackSurfaceItem] | list[FinalFinding],
+    items: list[CandidateFinding] | list[FinalFinding],
 ) -> str:
     return json.dumps([item.model_dump(mode="json") for item in items], sort_keys=True)
 

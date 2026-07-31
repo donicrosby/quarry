@@ -20,10 +20,6 @@ from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.dynamic_http import http_request_activity
-from quarry_activities.dynamic_validation import (
-    validate_command_injection_candidate_activity,
-    validate_idor_candidate_activity,
-)
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
@@ -89,8 +85,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 scan_repo_for_secrets,
                 map_impacted_regions,
                 validate_secret_candidate,
-                validate_idor_candidate_activity,
-                validate_command_injection_candidate_activity,
                 promote_to_final_finding_metadata,
                 build_coverage_ledger_activity,
                 deliver_integrations_activity,
