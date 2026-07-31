@@ -28,10 +28,11 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
@@ -69,6 +70,7 @@ def prove_impl(
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
     prior_attempts: list[dict[str, Any]] | None = None,
+    artifact_root: str | None = None,
 ) -> ProveResponse:
     """Core prove implementation — callable from the activity and from tests.
 
@@ -126,8 +128,17 @@ def prove_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        prompt_provenance=PromptProvenance.from_rendered(prompt),
+        scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
     )
+
+    if artifact_root is not None:
+        persist_seed_prompt(
+            artifact_root,
+            rendered_messages=prompt.messages,
+            invocations=client.invocations,
+        )
 
     if result.final_answer and isinstance(result.final_answer, ProveResponse):
         return result.final_answer
@@ -146,6 +157,7 @@ def prove_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     prior_attempts: list[dict[str, Any]] | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: agentic proof-of-concept generation for a single finding.
 
@@ -180,6 +192,7 @@ def prove_activity(
             max_iterations,
             scan_seed,
             prior_attempts,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -196,6 +209,7 @@ def _prove_activity_impl(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     prior_attempts: list[dict[str, Any]] | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -226,6 +240,7 @@ def _prove_activity_impl(
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
         prior_attempts=prior_attempts,
+        artifact_root=artifact_root,
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

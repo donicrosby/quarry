@@ -8,7 +8,7 @@ normalize token usage across providers, and estimate cost.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -16,6 +16,9 @@ from pydantic import BaseModel
 from quarry.schemas import ModelInvocation, RedactionStatus, utc_now
 from quarry_models.panel import resolve
 from quarry_models.types import ModelRequest, ModelResponse
+
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
 
 
 class ModelClient(Protocol):
@@ -76,6 +79,8 @@ def build_invocation(
         provider=provider,
         model=model,
         # Per-part hashes from the rendered prompt (ADR-019 provenance addendum).
+        prompt_template_id=request.prompt_template_id,
+        prompt_template_version=request.prompt_template_version,
         template_sha256=request.template_sha256,
         system_prompt_hash=request.system_prompt_hash,
         developer_prompt_hash=request.developer_prompt_hash,
@@ -88,4 +93,43 @@ def build_invocation(
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
         created_at=utc_now(),
+    )
+
+
+def resolve_artifact_backend() -> str:
+    """Resolve the configured artifact backend name (design D5).
+
+    Reads ``QuarrySettings.artifact_backend`` so the client shares one notion of
+    "local" with ``build_artifact_store`` and ``store_prompt``'s fail-closed guard.
+    """
+    from quarry.config import QuarrySettings
+
+    return QuarrySettings().artifact_backend
+
+
+def attach_prompt_ref(
+    invocation: ModelInvocation,
+    request: ModelRequest,
+    *,
+    artifact_store: ArtifactStore | None,
+    backend: str,
+) -> None:
+    """Store the rendered prompt (retention-gated) and link it on the invocation.
+
+    No-op when no store is configured — preserving current behavior for clients
+    constructed without one. Otherwise persists ``request.messages`` under
+    ``request.redaction_policy.retention`` and assigns the resulting
+    ``ArtifactRef`` (or ``None``) to ``invocation.prompt_ref``.
+    """
+    if artifact_store is None:
+        return
+    from quarry_artifacts.store import store_prompt
+
+    invocation.prompt_ref = store_prompt(
+        artifact_store,
+        scan_id=request.scan_id,
+        invocation=invocation,
+        messages=request.messages,
+        retention=request.redaction_policy.retention,
+        backend=backend,
     )

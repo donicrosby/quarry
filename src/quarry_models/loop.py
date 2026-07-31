@@ -51,11 +51,24 @@ from quarry.schemas import (
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
-from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest, ProviderPolicy
+from quarry_models.types import (
+    BudgetSpec,
+    ModelMessage,
+    ModelRequest,
+    PromptProvenance,
+    ProviderPolicy,
+)
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 
 _log = logging.getLogger(__name__)
+
+
+def _hash_text(text: str) -> str:
+    """sha256 hex of *text* — matches build_prompt's part-hash convention."""
+    from hashlib import sha256
+
+    return sha256(text.encode("utf-8")).hexdigest()
 
 
 def _store_rejected_reasoning(
@@ -224,6 +237,11 @@ def run_agent_loop(
     # get the old placeholder-string behaviour (backward compatible).
     artifact_store_path: str | None = None,
     scan_id: str | None = None,
+    # ADR-019 per-part prompt provenance (loop-path-prompt-provenance).  When
+    # provided, every turn's request/invocation carries the rendered prompt's
+    # per-part hashes so loop-sourced invocations are verifiable.  When None, the
+    # loop leaves the hashes empty exactly as before (backward compatible).
+    prompt_provenance: PromptProvenance | None = None,
     # Per-turn model-call wall-clock timeout.  Set to 120 s so Chutes queue
     # delays surface as a retriable activity failure rather than a hung scan.
     turn_timeout_seconds: int = 120,
@@ -291,6 +309,24 @@ def run_agent_loop(
         LocalArtifactStore(artifact_store_path) if artifact_store_path else None
     )
 
+    # ADR-019 per-part provenance is constant for the loop's lifetime (it describes
+    # the seed rendered prompt); compute the request kwargs once and stamp them on
+    # every turn's request so each turn's invocation is independently verifiable.
+    # ``user_prompt_hash`` is the sha256 of the initial user message (the loop owns
+    # the user message it sends), matching the round-trip rule the storage layer uses.
+    _request_scan_id = scan_id if scan_id is not None else "loop"
+    _provenance_kwargs: dict[str, Any] = {}
+    if prompt_provenance is not None:
+        _provenance_kwargs = {
+            "template_sha256": prompt_provenance.template_sha256,
+            "system_prompt_hash": prompt_provenance.part_hashes.get("system", ""),
+            "developer_prompt_hash": prompt_provenance.part_hashes.get("developer"),
+            "user_prompt_hash": _hash_text(initial_user_message),
+            "evidence_hashes": list(prompt_provenance.evidence_hashes),
+            "prompt_template_id": prompt_provenance.template_id,
+            "prompt_template_version": prompt_provenance.template_version,
+        }
+
     for iteration in range(1, max_iterations + 1):
         # ── Re-prompt sub-loop (reasoning + schema repair) ──────────────────
         # Neither reasoning_retries nor parse_retries advance ``iteration`` (the
@@ -313,9 +349,10 @@ def run_agent_loop(
         while True:
             req_kwargs: dict[str, Any] = {
                 "task_name": f"{role}-loop",
-                "scan_id": "loop",
+                "scan_id": _request_scan_id,
                 "role": role,
                 "messages": list(history),
+                **_provenance_kwargs,
             }
             if provider_policy is not None:
                 req_kwargs["provider_policy"] = provider_policy

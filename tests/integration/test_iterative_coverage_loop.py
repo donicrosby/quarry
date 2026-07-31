@@ -59,6 +59,7 @@ def _empty_hunt_activity(
     panel_json: str | None = None,
     db_path: str | None = None,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[object]:
     """Always returns zero findings — keeps AGENTIC_VALIDATE/TRACER inert."""
     return []
@@ -104,6 +105,7 @@ def _make_always_new_gapfill_activity() -> Callable[..., list[dict[str, Any]]]:
         existing_findings: object = None,
         max_iterations: int = 20,
         scan_seed: int | None = None,
+        artifact_root: str | None = None,
     ) -> list[dict[str, Any]]:
         with _lock:
             counter[0] += 1
@@ -139,6 +141,7 @@ def _never_gapfill_activity(
     existing_findings: object = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, object]]:
     """A gapfill-coverage mock that never emits anything (forces convergence)."""
     return []
@@ -368,6 +371,7 @@ def _validated_activity(
     db_path: str | None = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, object]:
     return {"verdict": "validated"}
 
@@ -408,6 +412,7 @@ def _reachable_tracer_activity(
     db_path: str | None = None,
     max_iterations: int = 10,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, object]:
     """Always returns a REACHABLE verdict, so the feedback edge fires."""
     finding = cast("dict[str, Any]", finding_json) if isinstance(finding_json, dict) else {}
@@ -441,6 +446,7 @@ def _make_feedback_hunt_activity() -> tuple[Callable[..., list[Any]], list[dict[
         panel_json: str | None = None,
         db_path: str | None = None,
         scan_seed: int | None = None,
+        artifact_root: str | None = None,
     ) -> list[Any]:
         with _lock:
             calls.append(

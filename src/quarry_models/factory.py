@@ -26,7 +26,11 @@ def build_model_client(provider: Provider, **kwargs: Any) -> Any:
     if provider == Provider.LITELLM:
         from quarry_models.litellm_client import LiteLLMModelClient
 
-        litellm_kwargs = {k: v for k, v in kwargs.items() if k in ("temperature", "seed")}
+        litellm_kwargs = {
+            k: v
+            for k, v in kwargs.items()
+            if k in ("temperature", "seed", "artifact_store", "backend")
+        }
         return LiteLLMModelClient(**litellm_kwargs)
 
     # Exhaustiveness: StrEnum guarantees *provider* is a valid member, but

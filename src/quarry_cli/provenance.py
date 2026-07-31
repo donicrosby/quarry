@@ -11,7 +11,13 @@ See ADR-019 (prompt provenance addendum).
 
 from __future__ import annotations
 
+from hashlib import sha256
+from typing import TYPE_CHECKING
+
 from quarry.schemas import ModelInvocation, Scan
+
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
 
 
 def verify_invocation(
@@ -46,6 +52,41 @@ def verify_invocation(
     return not (
         expected_user_prompt_hash is not None
         and invocation.user_prompt_hash != expected_user_prompt_hash
+    )
+
+
+def verify_stored_prompt(invocation: ModelInvocation, store: ArtifactStore) -> bool | None:
+    """Verify a stored MODEL_PROMPT artifact against the invocation's hashes.
+
+    Reads the bytes referenced by ``invocation.prompt_ref``, re-splits the
+    messages, strips the system message's provenance header, and confirms:
+
+    - re-hashing the system body reproduces ``invocation.system_prompt_hash``, and
+    - the stored header's ``template_sha256`` matches ``invocation.template_sha256``.
+
+    Returns ``None`` when the invocation has no ``prompt_ref`` (nothing to check),
+    ``True`` when the stored bytes match the record, and ``False`` on any mismatch
+    (a tampered or drifted artifact).
+    """
+    from quarry_artifacts.store import decode_prompt_messages
+    from quarry_prompts.build_prompt import strip_provenance_header
+
+    if invocation.prompt_ref is None:
+        return None
+
+    messages = decode_prompt_messages(store.get_bytes(invocation.prompt_ref))
+    system_content = next((m.content for m in messages if m.role == "system"), None)
+    if system_content is None:
+        return False
+
+    header, body = strip_provenance_header(system_content)
+    if (
+        invocation.system_prompt_hash
+        and sha256(body.encode("utf-8")).hexdigest() != invocation.system_prompt_hash
+    ):
+        return False
+    return not (
+        invocation.template_sha256 and header.get("template_sha256") != invocation.template_sha256
     )
 
 

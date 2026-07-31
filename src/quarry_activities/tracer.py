@@ -42,10 +42,11 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import run_agent_loop
 from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
@@ -160,6 +161,7 @@ def tracer_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    artifact_root: str | None = None,
 ) -> Trace:
     """Core tracer implementation — callable from the activity and from tests.
 
@@ -232,8 +234,17 @@ def tracer_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        prompt_provenance=PromptProvenance.from_rendered(prompt),
+        scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
     )
+
+    if artifact_root is not None:
+        persist_seed_prompt(
+            artifact_root,
+            rendered_messages=prompt.messages,
+            invocations=client.invocations,
+        )
 
     if result.final_answer and isinstance(result.final_answer, TraceResponse):
         raw_verdict = result.final_answer.verdict
@@ -279,6 +290,7 @@ def tracer_activity(
     db_path: str | None = None,
     max_iterations: int = 10,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: reachability verdict for a single finding.
 
@@ -308,6 +320,7 @@ def tracer_activity(
             db_path,
             max_iterations,
             scan_seed,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -324,6 +337,7 @@ def _tracer_activity_impl(
     db_path: str | None = None,
     max_iterations: int = 10,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -356,6 +370,7 @@ def _tracer_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        artifact_root=artifact_root,
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)
