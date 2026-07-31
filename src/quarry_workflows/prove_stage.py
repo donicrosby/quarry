@@ -36,6 +36,38 @@ def filter_needs_proof(
     return [f for f in findings if f.status == FindingStatus.NEEDS_PROOF]
 
 
+# Live-verdict priority for the PROVE stage: corroborated findings are the
+# strongest leads (the live target already confirmed the hypothesis), so they
+# are proved first; unannotated / inconclusive / defended findings follow.
+_LIVE_VERDICT_RANK = {
+    "corroborated": 0,
+    "inconclusive": 1,
+    "not_corroborated": 2,
+}
+_UNANNOTATED_RANK = 1  # same tier as inconclusive: no live signal either way.
+
+
+def prioritize_by_live_verdict(
+    findings: list[CandidateFinding],
+) -> list[CandidateFinding]:
+    """Order NEEDS_PROOF findings so live-corroborated ones are proved first.
+
+    The dynamic_validate stage annotates each finding with a live verdict in
+    ``metadata["live_verdict"]`` (``corroborated`` / ``not_corroborated`` /
+    ``inconclusive``).  This is a stable sort by verdict rank — findings with no
+    live signal keep their original relative order within the middle tier.  Pure
+    function: safe to call during Temporal replay.
+    """
+
+    def _rank(finding: CandidateFinding) -> int:
+        verdict = finding.metadata.get("live_verdict") if finding.metadata else None
+        if verdict is None:
+            return _UNANNOTATED_RANK
+        return _LIVE_VERDICT_RANK.get(str(verdict), _UNANNOTATED_RANK)
+
+    return sorted(findings, key=_rank)
+
+
 def prove_outcome_from_captures(
     exec_captures: list[SandboxExecCapture],
     http_captures: list[HttpResponseCapture],

@@ -90,6 +90,7 @@ from quarry_workflows.coverage_loop import (
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
     filter_needs_proof,
+    prioritize_by_live_verdict,
     prove_outcome_from_captures,
 )
 from quarry_workflows.tracer_stage import (
@@ -1188,19 +1189,64 @@ class RunScanWorkflow:
                     # so the future prove stage can filter on status == NEEDS_PROOF.
                     retained = candidate.model_copy(update={"status": FindingStatus.NEEDS_PROOF})
 
-                    # ── Dynamic validate sub-step (ADR-017) ──────────────────
-                    # If live dynamic validation is enabled, try to corroborate
-                    # NEEDS_PROOF findings with a live HTTP probe.  A 2xx response
-                    # promotes the finding to FinalFinding with proof_artifact_ids.
-                    # Non-idempotent methods are non-retryable (single attempt only).
+                    # ── dynamic_validate stage (ADR-017, Option A) ───────────
+                    # Between AGENTIC_VALIDATE and PROVE: when live dynamic
+                    # validation is enabled AND a target is resolved, the
+                    # dynamic_validate agent (no-I/O http tool) proposes an
+                    # http_request; the WORKFLOW performs the single egress and
+                    # maps the capture to a live verdict.  A `corroborated` (2xx)
+                    # result promotes the finding to FinalFinding with
+                    # proof_artifact_ids; otherwise the finding stays NEEDS_PROOF
+                    # annotated with its live verdict so PROVE can prioritize.
+                    # Non-idempotent methods are non-retryable (single attempt).
                     dyn_promoted = False
-                    if (
+                    dyn_verdict = LIVE_INCONCLUSIVE
+                    dynamic_active = (
                         scan_input.dynamic_validation_enabled
-                        and scan_input.target_url
+                        and bool(scan_input.target_url)
                         and not val_over_budget
-                    ):
-                        probe_spec = build_dynamic_probe_spec(retained)
-                        if probe_spec is not None:
+                    )
+                    if dynamic_active:
+                        # Agent proposes → workflow dispatches.
+                        dyn_panel_json = panel_json_for_role(scan, "dynamic_validate")
+                        proposed_http_specs: list[dict[str, Any]] = []
+                        try:
+                            dyn_raw = await workflow.execute_activity(
+                                "dynamic-validate-finding",
+                                args=[
+                                    retained.model_dump(mode="json"),
+                                    repo_path,
+                                    None,
+                                    val_budget_remaining,
+                                    dyn_panel_json,
+                                    scan_input.db_path,
+                                    scan_input.validate_max_iterations,
+                                    scan_input.scan_seed,
+                                    None,
+                                    scan_input.allowed_hosts or None,
+                                    None,
+                                    artifact_root,
+                                ],
+                                start_to_close_timeout=timedelta(hours=2),
+                                heartbeat_timeout=timedelta(minutes=3),
+                                retry_policy=self._retry_policy,
+                            )
+                            if isinstance(dyn_raw, dict):
+                                dyn_payload = cast("dict[str, Any]", dyn_raw)
+                                proposed_http_specs = list(
+                                    dyn_payload.get("proposed_http_specs") or []
+                                )
+                        except Exception as exc:
+                            # Agent failure is non-fatal; fall back to the
+                            # deterministic per-class probe below.
+                            await _append_workflow_event(
+                                scan_input.db_path,
+                                scan.id,
+                                "dynamic_validate.failed",
+                                {"finding_id": candidate.id, "error": _describe_failure(exc)},
+                            )
+                        probe_spec = select_dynamic_probe_spec(proposed_http_specs, retained)
+                        if probe_spec is not None and scan_input.target_url is not None:
                             target_ep = build_target_endpoint_from_url(scan_input.target_url)
                             inp = HttpRequestActivityInput(
                                 spec_json=probe_spec.model_dump_json(),
@@ -1221,35 +1267,45 @@ class RunScanWorkflow:
                                 capture = HttpResponseCapture.model_validate(
                                     capture_raw if isinstance(capture_raw, dict) else capture_raw
                                 )
-                                promotion = promote_with_dynamic_evidence(
-                                    retained, capture, scan.id, workflow.now()
-                                )
-                                if promotion is not None:
-                                    dyn_final, _dyn_link = promotion
-                                    await _persist_scan_state(
-                                        scan_input.db_path,
-                                        "save_final_finding",
-                                        {"finding": _model_json_dict(dyn_final)},
+                                dyn_verdict = live_verdict_from_status(capture.status_code)
+                                if dyn_verdict == LIVE_CORROBORATED:
+                                    promotion = promote_with_dynamic_evidence(
+                                        retained, capture, scan.id, workflow.now()
                                     )
-                                    final_findings.append(dyn_final)
-                                    await _append_workflow_event(
-                                        scan_input.db_path,
-                                        scan.id,
-                                        "finding.dynamic_validated",
-                                        {
-                                            "finding_id": dyn_final.id,
-                                            "status_code": str(capture.status_code),
-                                            "proof_artifact_count": str(
-                                                len(dyn_final.proof_artifact_ids)
-                                            ),
-                                        },
-                                    )
-                                    dyn_promoted = True
+                                    if promotion is not None:
+                                        dyn_final, _dyn_link = promotion
+                                        await _persist_scan_state(
+                                            scan_input.db_path,
+                                            "save_final_finding",
+                                            {"finding": _model_json_dict(dyn_final)},
+                                        )
+                                        final_findings.append(dyn_final)
+                                        await _append_workflow_event(
+                                            scan_input.db_path,
+                                            scan.id,
+                                            "finding.dynamic_validated",
+                                            {
+                                                "finding_id": dyn_final.id,
+                                                "status_code": str(capture.status_code),
+                                                "proof_artifact_count": str(
+                                                    len(dyn_final.proof_artifact_ids)
+                                                ),
+                                            },
+                                        )
+                                        dyn_promoted = True
                             except Exception:
-                                # Dynamic probe failure is non-fatal; finding stays NEEDS_PROOF.
+                                # Dynamic probe failure is non-fatal; stays NEEDS_PROOF.
                                 pass
 
                     if not dyn_promoted:
+                        if dynamic_active:
+                            # Annotate the live verdict so PROVE can prioritize
+                            # corroborated-but-unpromoted leads first.
+                            retained = retained.model_copy(
+                                update={
+                                    "metadata": {**retained.metadata, "live_verdict": dyn_verdict}
+                                }
+                            )
                         await _persist_scan_state(
                             scan_input.db_path,
                             "save_candidate_finding",
@@ -1260,7 +1316,11 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan.id,
                             "finding.needs_proof",
-                            {"finding_id": candidate.id, "verdict": verdict},
+                            {
+                                "finding_id": candidate.id,
+                                "verdict": verdict,
+                                "live_verdict": dyn_verdict if dynamic_active else "",
+                            },
                         )
                 elif verdict == "rejected":
                     # Drop — explicitly labelled, not an implicit fallthrough.
@@ -1376,7 +1436,8 @@ class RunScanWorkflow:
                     if scan_input.target_url
                     else None
                 )
-                for finding in filter_needs_proof(round_needs_proof):
+                # Prove live-corroborated leads first (dynamic_validate verdict).
+                for finding in prioritize_by_live_verdict(filter_needs_proof(round_needs_proof)):
                     final_verdict = "not_proved"
                     prior_attempts: list[dict[str, Any]] = []
                     for attempt in range(PROVE_MAX_ATTEMPTS):
@@ -2296,6 +2357,56 @@ def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | N
     if path is None:
         return None
     return HttpRequestSpec(method="GET", path=path)
+
+
+def select_dynamic_probe_spec(
+    proposed_http_specs: list[Any],
+    candidate: CandidateFinding,
+) -> HttpRequestSpec | None:
+    """Pick the probe spec to dispatch for a dynamic-validation attempt.
+
+    Option A (ADR-017): the dynamic_validate agent PROPOSES http specs (no I/O)
+    and the workflow dispatches them.  Prefer the first well-formed proposal;
+    fall back to the deterministic per-class probe when the agent proposed
+    nothing usable.  Malformed proposals (e.g. inline auth rejected by
+    ``HttpRequestSpec``) are skipped rather than aborting the attempt.
+
+    Pure function — safe inside sandboxed workflow code.
+    """
+    for raw in proposed_http_specs:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            return HttpRequestSpec.model_validate(raw)
+        except Exception:
+            continue
+    return build_dynamic_probe_spec(candidate)
+
+
+# Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017).
+LIVE_CORROBORATED = "corroborated"
+LIVE_NOT_CORROBORATED = "not_corroborated"
+LIVE_INCONCLUSIVE = "inconclusive"
+
+# Status codes that indicate the live target actively defends the path — the
+# candidate hypothesis is NOT corroborated (guard present / resource absent).
+_LIVE_DEFENDED_STATUS = frozenset({401, 403, 404})
+
+
+def live_verdict_from_status(status_code: int) -> str:
+    """Map an HTTP status code to a live-corroboration verdict.
+
+    Pure function (no I/O) — safe inside sandboxed workflow code.
+
+    - 2xx → ``corroborated`` (the hypothesised path is served live).
+    - 401/403/404 → ``not_corroborated`` (the target enforces the guard).
+    - anything else (5xx, other ambiguous codes) → ``inconclusive``.
+    """
+    if 200 <= status_code < 300:
+        return LIVE_CORROBORATED
+    if status_code in _LIVE_DEFENDED_STATUS:
+        return LIVE_NOT_CORROBORATED
+    return LIVE_INCONCLUSIVE
 
 
 def promote_with_dynamic_evidence(

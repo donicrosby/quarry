@@ -16,7 +16,9 @@ from quarry.schemas import RedactionStatus
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-Role = Literal["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+Role = Literal[
+    "recon", "hunt", "validate", "dynamic_validate", "gapfill", "prove", "trace", "report"
+]
 MessageRole = Literal["system", "user", "assistant"]
 
 

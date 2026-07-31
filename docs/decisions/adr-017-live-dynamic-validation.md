@@ -340,3 +340,77 @@ candidate.
 Rejected. The `quarry-proof` queue is rate-limited and isolated for sandbox execution; adding
 dynamic requests would expand its network surface area beyond its intended scope. `quarry-dynamic`
 is the existing intended queue for `httpx` and target checks (`architecture.md:691`).
+
+## Implementation notes: the agentic `dynamic_validate` stage
+
+The `dynamic_validate` seat provisioned above is now filled by a real agent. The seam
+between "agent decides" and "workflow acts" follows the same "agent proposes → workflow
+dispatches" contract the `prove` stage uses (Option A). This keeps every socket-opening
+operation inside a Temporal activity and off both the workflow and the agent loop.
+
+### Stage placement and gating
+
+The stage runs inside `AGENTIC_VALIDATE` for each finding the static validator returns as
+`needs_proof` / `inconclusive`, after the validate verdict and before `PROVE`. It is active
+only when `dynamic_validation_enabled` is set AND a `target_url` is resolved — the pure
+predicate `dynamic_validation_active(enabled, target_url)`
+(`src/quarry_workflows/dynamic_validate_stage.py`). Target presence alone never enables live
+traffic. When the predicate is false the stage is a no-op: no `dynamic-validate-finding`
+activity runs and no `http_request` is dispatched, so the pipeline behaves exactly as it did
+before this change (the backward-compatibility guarantee in Decision §1).
+
+`--dynamic-validation` without a target is rejected before any model call by the config gate
+(`resolve_dynamic()`) and the CLI guard, per Decision §8.
+
+### Agent proposes, workflow dispatches
+
+1. `dynamic_validate_activity` (`name="dynamic-validate-finding"`, registered in both
+   `quarry_worker/main.py` and `quarry_server/app.py`) runs `run_agent_loop` in the
+   `dynamic_validate` role with a no-I/O `http_request` tool. The agent returns a
+   `DynamicValidateResponse` carrying `proposed_http_specs` and a verdict; it never opens a
+   socket.
+2. The workflow selects the spec to send via `select_dynamic_probe_spec()`: the first
+   well-formed agent proposal, falling back to the deterministic per-class probe
+   (`build_dynamic_probe_spec`) when the agent proposed nothing usable. Malformed proposals
+   (e.g. inline auth rejected by `HttpRequestSpec`) are skipped, not fatal.
+3. The workflow performs the single egress via the `http-request` activity
+   (`RetryPolicy(maximum_attempts=1)` — non-idempotent methods are never auto-retried,
+   Decision §6) and maps the capture to a live verdict with the pure helper
+   `live_verdict_from_status()`:
+   - `2xx` → `corroborated`
+   - `401` / `403` / `404` → `not_corroborated` (target enforces the guard)
+   - anything else (5xx, ambiguous) → `inconclusive`
+4. A `corroborated` result promotes the finding to a `FinalFinding` with non-empty
+   `proof_artifact_ids` and a `DynamicEvidenceLink` (`promote_with_dynamic_evidence`). Any
+   other verdict keeps the finding `NEEDS_PROOF`, annotated with `metadata["live_verdict"]`.
+5. `PROVE` orders its queue with `prioritize_by_live_verdict()`: live-corroborated leads are
+   proved first, then unannotated / inconclusive, then target-defended. The sort is stable.
+
+### Prompt family
+
+Templates live under `prompts/dynamic_validate/` using the four-part envelope. A generic
+`dynamic_validate.1.0.0.j2` ("Live Corroboration Specialist") plus per-class specializations
+for the high-value classes (`idor`, `command_injection`, `ssrf`) select via `build_prompt`
+with a `TemplateNotFoundError` fallback to the generic template. `resolve_prompts()` startup
+validation and `prompt-lint` cover the whole family. The per-class prompts instruct
+non-destructive corroboration only — IDOR reads another principal's object; command injection
+uses a benign marker payload; SSRF uses a safe allow-listed canary URL.
+
+### Fail-closed authorization, as built
+
+All six layers from Decision §1 apply to the `dynamic_validate` seat and are locked in by
+`tests/unit/test_dynamic_validate_safety.py` against the real tool registry:
+
+- **Role gate** — `http_request` is registered for `dynamic_validate` (and `prove`) only.
+- **allowed_hosts fail-closed** — an empty allowlist refuses every request before I/O; an
+  out-of-scope host is refused with a `denied_reason` and no capture.
+- **Scope exclusions / `block_dynamic`** — a matching `block_dynamic` route is refused; a
+  non-`block_dynamic` exclusion does not block.
+- **Credentials** — an unknown `auth_profile` is refused; a known one passes. The agent only
+  ever sees a profile NAME. Even with a live secret in the environment, no persisted seed
+  prompt or artifact contains the secret value (credentials are injected worker-side at
+  dispatch, per ADR-018).
+
+Every HTTP response remains target-controlled content: it passes through `scrub()` and the
+`<target_content>` boundary before re-entering any prompt (the cross-cutting rule in
+Decision §1).
