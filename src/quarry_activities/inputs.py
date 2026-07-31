@@ -153,6 +153,10 @@ class RenderReportInput(BaseModel):
     model_invocations_json: str | None = None
     # Findings retained pending proof (status=NEEDS_PROOF); rendered as Unverified section.
     needs_proof_findings_json: str | None = None
+    # Why the ADR-022 coverage loop ended: "budget" | "convergence" |
+    # "finding_plateau" | "round_cap". Rendered in the Coverage section so an early
+    # stop on diminishing yield is distinguishable from exhausting the round cap.
+    coverage_stop_reason: str | None = None
 
 
 class DeliverIntegrationsInput(BaseModel):

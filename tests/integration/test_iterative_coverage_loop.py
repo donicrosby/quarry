@@ -544,3 +544,100 @@ async def test_reachable_trace_emits_feedback_task_hunted_next_round(
     # hunted in round 1, which then converges (round 1 finds nothing new).
     started = _round_events(db_path, scan_id, "round.started")
     assert len(started) == 2, f"Expected exactly 2 rounds, got {len(started)}: {started}"
+
+
+# ── rising-bar early stop (coverage-loop-rising-bar-stop) ──────────────────
+
+
+@pytest.mark.skipif(not FIXTURE_REPO.exists(), reason=_SKIP_REASON)
+async def test_rising_bar_stops_on_finding_plateau(
+    temporal_client: Client,
+    tmp_path: Path,
+) -> None:
+    """Gaps keep appearing, but no findings do — the yield bar halts round 0.
+
+    The gapfill edge always emits a fresh task, so task-side convergence never
+    fires and the loop would otherwise run to max_coverage_rounds. The hunters
+    return nothing, so round 0's new-distinct-finding yield is 0 against a bar of
+    max(1, ceil(0.15 * 0)) == 1 — below the bar, so the loop stops with
+    finding_plateau after a single round.
+    """
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
+    scan_id = "loop-test-plateau"
+    task_queue = "quarry-loop-plateau"
+
+    activity_executor = ThreadPoolExecutor(max_workers=4)
+    worker = _build_worker(
+        temporal_client, task_queue, _make_always_new_gapfill_activity(), activity_executor
+    )
+    try:
+        async with worker:
+            await temporal_client.execute_workflow(
+                RunScanWorkflow.run,
+                RunScanInput(
+                    repo_path=str(FIXTURE_REPO),
+                    scan_id=scan_id,
+                    db_path=str(db_path),
+                    output_dir=str(output_dir),
+                    vuln_classes=[VulnerabilityClass.XSS],
+                    max_coverage_rounds=3,
+                    coverage_yield_threshold=0.15,
+                ),
+                id=scan_id,
+                task_queue=task_queue,
+            )
+    finally:
+        activity_executor.shutdown(wait=True)
+
+    started = _round_events(db_path, scan_id, "round.started")
+    assert len(started) == 1, f"Expected the yield bar to stop after 1 round, got {started}"
+
+    completed = _round_events(db_path, scan_id, "round.completed")
+    assert completed[-1]["stop_reason"] == "finding_plateau"
+    assert completed[-1]["new_finding_count"] == "0"
+
+
+@pytest.mark.skipif(not FIXTURE_REPO.exists(), reason=_SKIP_REASON)
+async def test_threshold_zero_preserves_round_cap_behaviour(
+    temporal_client: Client,
+    tmp_path: Path,
+) -> None:
+    """coverage_yield_threshold=0.0 disables the rule: same run reaches the cap.
+
+    Identical to the plateau scenario above except the rule is off, so the loop
+    runs all three rounds and reports round_cap — the pre-change behaviour.
+    """
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
+    scan_id = "loop-test-plateau-disabled"
+    task_queue = "quarry-loop-plateau-disabled"
+
+    activity_executor = ThreadPoolExecutor(max_workers=4)
+    worker = _build_worker(
+        temporal_client, task_queue, _make_always_new_gapfill_activity(), activity_executor
+    )
+    try:
+        async with worker:
+            await temporal_client.execute_workflow(
+                RunScanWorkflow.run,
+                RunScanInput(
+                    repo_path=str(FIXTURE_REPO),
+                    scan_id=scan_id,
+                    db_path=str(db_path),
+                    output_dir=str(output_dir),
+                    vuln_classes=[VulnerabilityClass.XSS],
+                    max_coverage_rounds=3,
+                    coverage_yield_threshold=0.0,
+                ),
+                id=scan_id,
+                task_queue=task_queue,
+            )
+    finally:
+        activity_executor.shutdown(wait=True)
+
+    started = _round_events(db_path, scan_id, "round.started")
+    assert len(started) == 3, f"Expected the full round cap, got {started}"
+
+    completed = _round_events(db_path, scan_id, "round.completed")
+    assert completed[-1]["stop_reason"] == "round_cap"

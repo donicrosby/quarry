@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from datetime import datetime
+from math import ceil
 
 from quarry.schemas import (
     AgentTask,
@@ -61,24 +62,93 @@ def dedup_new_tasks(
     return result
 
 
+def yield_bar(cumulative_findings: int, coverage_yield_threshold: float) -> int:
+    """The minimum new distinct findings a round must add to justify the next one.
+
+    ``max(1, ceil(f * C))`` — a fraction of what the scan has already found, so the
+    bar *rises* as findings accumulate and later rounds must clear more to keep the
+    loop alive. Using a fraction of cumulative findings (rather than a bar indexed
+    on the round number) keeps the rule scale-invariant: it adapts to a 3-file CLI
+    and a 200-module service alike.
+
+    The ``max(1, ...)`` floor is the grace mechanism: while ``ceil(f * C)`` still
+    rounds to 0, only a round that adds *nothing* stops the loop. Returns ``0`` —
+    an unreachable bar — when the rule is disabled (``f <= 0``).
+    """
+    if coverage_yield_threshold <= 0:
+        return 0
+    return max(1, ceil(coverage_yield_threshold * cumulative_findings))
+
+
+def loop_stop_reason(
+    round_index: int,
+    max_rounds: int,
+    new_task_count: int,
+    over_budget: bool,
+    *,
+    new_finding_count: int | None = None,
+    cumulative_findings: int = 0,
+    coverage_yield_threshold: float = 0.0,
+) -> str | None:
+    """Why the coverage loop should stop after this round, or ``None`` to continue.
+
+    Criteria, in precedence order — the first that applies is the reported reason:
+
+    - ``budget``          the scan budget is exhausted
+    - ``convergence``     the round emitted no new hunt tasks (ADR-022)
+    - ``finding_plateau`` the round's new distinct findings fell below
+      :func:`yield_bar` (rising-bar rule; skipped when disabled or when no
+      finding count was supplied)
+    - ``round_cap``       the configured ``max_rounds`` is reached
+
+    ``budget`` and ``convergence`` are checked first so their reasons win when
+    several criteria apply at once. The rising-bar rule is additive: it can only
+    stop the loop *earlier* than the pre-existing criteria, never extend it.
+    """
+    if over_budget:
+        return "budget"
+    if new_task_count <= 0:
+        return "convergence"
+    if (
+        coverage_yield_threshold > 0
+        and new_finding_count is not None
+        and new_finding_count < yield_bar(cumulative_findings, coverage_yield_threshold)
+    ):
+        return "finding_plateau"
+    if round_index + 1 >= max_rounds:
+        return "round_cap"
+    return None
+
+
 def should_continue(
     round_index: int,
     max_rounds: int,
     new_task_count: int,
     over_budget: bool,
+    *,
+    new_finding_count: int | None = None,
+    cumulative_findings: int = 0,
+    coverage_yield_threshold: float = 0.0,
 ) -> bool:
-    """Explicit ADR-022 stop criteria: convergence, round cap, or budget.
+    """Whether to run another coverage-loop round.
 
-    *round_index* is the round that just completed (0-based); the loop should
-    continue only if another round (``round_index + 1``) is still within the
-    ``max_rounds`` cap, the round produced at least one new task
-    (convergence), and the scan is not over budget.
+    *round_index* is the round that just completed (0-based). Thin wrapper over
+    :func:`loop_stop_reason`; see it for the criteria and their precedence.
+    Omitting the keyword-only finding arguments reproduces the pre-rising-bar
+    behavior (convergence, round cap, budget only).
     """
-    if over_budget:
-        return False
-    if new_task_count <= 0:
-        return False
-    return not round_index + 1 >= max_rounds
+    return (
+        loop_stop_reason(
+            round_index,
+            max_rounds,
+            new_task_count,
+            over_budget,
+            new_finding_count=new_finding_count,
+            cumulative_findings=cumulative_findings,
+            coverage_yield_threshold=coverage_yield_threshold,
+        )
+        is None
+    )
 
 
 _NON_WORD = re.compile(r"[^a-zA-Z0-9]+")

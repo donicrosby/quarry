@@ -94,6 +94,13 @@ class ScanDefaultsConfig(BaseModel):
     # hunt -> validate -> (prove) -> trace; the loop halts sooner on
     # convergence (no new tasks) or budget exhaustion. Default 3 per ADR-022.
     max_coverage_rounds: int = 3
+    # Rising-bar early-stop: a round must add at least
+    # ``max(1, ceil(f * cumulative_findings))`` new distinct findings to justify
+    # another round, so the bar climbs as the scan accumulates findings. Trades
+    # recall for cost by design — lower it for a more patient (higher-recall)
+    # scan, and set it to 0.0 to disable the rule entirely (exhaustive audit),
+    # leaving only convergence / round-cap / budget as stop criteria.
+    coverage_yield_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
     # Optional fixed seed. When None, each scan derives a deterministic seed
     # from its scan_id UUID so runs are reproducible without pinning a global value.
     seed: int | None = None

@@ -55,15 +55,58 @@ edges decide whether to iterate. `dedup` runs each round to keep the candidate s
 
 ### Stop criteria (explicit — Glasswing leaves these implicit)
 
-The loop terminates at the first of:
+The loop terminates at the first of (in this precedence order, which is also the reported
+`stop_reason`):
 
-- **Convergence:** a full round produces **zero** new hunt tasks (coverage floor satisfied
-  *and* no new reachability-feedback tasks), or
-- **Round cap:** a configured `max_coverage_rounds` (default 3) is reached, or
-- **Budget:** the scan budget (`budget_cap_usd`) is exhausted.
+- **Budget** (`budget`): the scan budget (`budget_cap_usd`) is exhausted, or
+- **Convergence** (`convergence`): a full round produces **zero** new hunt tasks (coverage
+  floor satisfied *and* no new reachability-feedback tasks), or
+- **Finding plateau** (`finding_plateau`): the round's new distinct findings fell below the
+  rising yield bar (see below), or
+- **Round cap** (`round_cap`): a configured `max_coverage_rounds` (default 3) is reached.
 
 Every round must make progress (emit at least one *new* task) or the loop halts — this is
 what guarantees termination.
+
+#### Amendment: rising-bar finding-yield stop
+
+The criteria above are all measured on the **input** side (tasks emitted) or are hard caps.
+Nothing consulted the *findings* a round produced, so a round could emit new hunt cells
+that, once hunted and deduped, collapsed into `root_cause_key` clusters already seen — the
+loop paid for a full agentic round to re-derive known vulnerabilities. The waste grows with
+`max_coverage_rounds`.
+
+A round must therefore add at least
+
+```
+bar = max(1, ceil(coverage_yield_threshold * cumulative_findings_before_round))
+```
+
+new **distinct** findings (the delta of the deduplicated candidate count across the round,
+since `dedup` already runs each round over the full accumulated set) to justify the next
+round. Otherwise the loop stops with `finding_plateau`.
+
+The bar is a *fraction of cumulative findings*, not a bar indexed on the round number: it
+rises as findings accumulate (the denominator grows) **and** stays scale-invariant, adapting
+to a 3-file CLI and a 200-module service alike. The `max(1, …)` floor is the grace
+mechanism — while `ceil(f · C)` still rounds to 0, only a round that adds *nothing* stops
+the loop — so no separate patience counter is needed.
+
+`coverage_yield_threshold` (`[scan_defaults]`, default `0.15`) is the dial: lower is more
+patient and higher-recall, `0.0` disables the rule entirely for an exhaustive audit. This
+trades recall for cost **by design** — on a target where every round honestly yields a fixed
+number of findings, the bar will eventually stop the loop. The rule is additive and
+one-directional: it can only stop the loop *earlier*, never extend it, so `max_coverage_rounds`
+and `budget_cap_usd` remain the recall backstops.
+
+Evaluation stays a pure function of values already in workflow scope (round index, caps,
+cumulative and new finding counts, over-budget flag), so Temporal replay is unaffected.
+
+Not adopted: a *live* per-subsystem coverage-percentage signal ("touched everything"). Cell
+exhaustion already covers it structurally — when every `(scope, vuln_class, source)` cell has
+been hunted, `dedup_new_tasks` empties the queue and `convergence` fires. Computing real
+coverage during the loop is a larger change; the ledger handed to gapfill mid-loop is a
+placeholder that reports 100% by construction.
 
 ### Invariants
 

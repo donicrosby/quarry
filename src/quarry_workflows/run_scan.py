@@ -85,7 +85,7 @@ from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
     cell_key,
     dedup_new_tasks,
-    should_continue,
+    loop_stop_reason,
 )
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
@@ -176,6 +176,11 @@ class RunScanInput(BaseModel):
     # halts sooner on convergence (no new gapfill/feedback tasks) or budget
     # exhaustion. See coverage_loop.should_continue.
     max_coverage_rounds: int = 3
+    # Rising-bar early stop: minimum fraction of cumulative findings a round must
+    # add to justify the next one. 0.0 disables the rule. Default 0.0 here (not
+    # 0.15) so direct/test construction keeps the historical behaviour; the API
+    # layer passes the configured quarry.toml value.
+    coverage_yield_threshold: float = 0.0
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -561,6 +566,9 @@ class RunScanWorkflow:
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
 
         round_tasks: list[AgentTask] = agent_tasks
+        # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
+        # "round_cap". Stays None only if the loop body never ran (no tasks).
+        loop_stop_reason_final: str | None = None
         for round_index in range(scan_input.max_coverage_rounds):
             round_completed_stage = completed_stage if round_index == 0 else None
             await _append_workflow_event(
@@ -574,6 +582,10 @@ class RunScanWorkflow:
                 "update_scan_metadata",
                 {"scan_id": scan.id, "metadata": {"coverage_round_index": round_index}},
             )
+
+            # Distinct-finding count before the round; the delta after DEDUP is this
+            # round's new-finding yield (see the rising-bar stop check below).
+            findings_before_round = len(candidate_findings)
 
             round_outcome = await self._run_round(
                 scan_input,
@@ -713,19 +725,37 @@ class RunScanWorkflow:
             )
             over_budget_after_round, _ = budget_decision(scan.budget_cap_usd, spent_after_round)
 
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "round.completed",
-                {"round_index": str(round_index), "new_task_count": str(len(next_tasks))},
-            )
+            # Rising-bar early stop: DEDUP has already run inside _run_round over the
+            # full accumulated candidate set and replaced ``candidate_findings`` in
+            # place, so the delta across the round is this round's count of new
+            # *distinct* findings. Clamped at 0 — a round that only merged existing
+            # clusters added nothing new.
+            new_finding_count = max(0, len(candidate_findings) - findings_before_round)
 
-            if not should_continue(
+            stop_reason = loop_stop_reason(
                 round_index,
                 scan_input.max_coverage_rounds,
                 len(next_tasks),
                 over_budget_after_round,
-            ):
+                new_finding_count=new_finding_count,
+                cumulative_findings=findings_before_round,
+                coverage_yield_threshold=scan_input.coverage_yield_threshold,
+            )
+
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "round.completed",
+                {
+                    "round_index": str(round_index),
+                    "new_task_count": str(len(next_tasks)),
+                    "new_finding_count": str(new_finding_count),
+                    "stop_reason": stop_reason or "",
+                },
+            )
+
+            if stop_reason is not None:
+                loop_stop_reason_final = stop_reason
                 break
             round_tasks = next_tasks
 
@@ -764,6 +794,7 @@ class RunScanWorkflow:
                 needs_proof_findings_json=(
                     _model_list_json(needs_proof_findings) if needs_proof_findings else None
                 ),
+                coverage_stop_reason=loop_stop_reason_final,
             ),
             start_to_close_timeout=timedelta(minutes=5),
             retry_policy=self._retry_policy,

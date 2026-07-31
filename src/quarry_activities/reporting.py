@@ -68,6 +68,18 @@ No routes mapped.
 - Vuln classes requested: `{{ coverage.vuln_classes_requested | join(", ") or "none" }}`
 - Vuln classes completed: `{{ coverage.vuln_classes_completed | join(", ") or "none" }}`
 - Attack surface items scanned: `{{ scanned }}` of `{{ total }}`
+{% if coverage_stop_reason -%}
+{% if coverage_stop_reason == "finding_plateau" -%}
+- Loop stopped early: **finding plateau** — a round's new findings fell below the
+  rising yield bar, so further rounds were not worth their cost.
+{% elif coverage_stop_reason == "round_cap" -%}
+- Loop stopped: reached the configured **round cap**.
+{% elif coverage_stop_reason == "budget" -%}
+- Loop stopped: **budget** exhausted.
+{% elif coverage_stop_reason == "convergence" -%}
+- Loop stopped: **convergence** — no new hunt tasks were produced.
+{% endif -%}
+{% endif %}
 
 {% if coverage.skipped_items -%}
 ### Skipped coverage
@@ -229,6 +241,7 @@ def render_markdown_report(
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
     needs_proof_findings: list[CandidateFinding] | None = None,
+    coverage_stop_reason: str | None = None,
 ) -> str:
     return _render_markdown_report_impl(
         scan,
@@ -241,6 +254,7 @@ def render_markdown_report(
         manifest,
         model_invocations,
         needs_proof_findings,
+        coverage_stop_reason,
     )
 
 
@@ -298,6 +312,7 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         manifest,
         model_invocations,
         needs_proof_findings,
+        input.coverage_stop_reason,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -323,6 +338,7 @@ def _render_markdown_report_impl(
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
     needs_proof_findings: list[CandidateFinding] | None = None,
+    coverage_stop_reason: str | None = None,
 ) -> str:
     np_findings = needs_proof_findings or []
     summary = (
@@ -343,6 +359,7 @@ def _render_markdown_report_impl(
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
         manifest=manifest,
         cost=cost,
+        coverage_stop_reason=coverage_stop_reason,
     )
 
 

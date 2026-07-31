@@ -22,6 +22,17 @@
 # gapfill_max_iterations = 20    # iterations for the gapfill coverage agent (default: 20)
 # recon_max_iterations = 40      # iterations for the recon subsystem agent (default: 40)
 # dedup_max_iterations = 8       # iterations per dedup cluster agent (default: 8)
+# max_coverage_rounds = 3        # cap on iterative-coverage-loop rounds (default: 3)
+#
+# Rising-bar early stop (ADR-022). A round must add at least
+#   max(1, ceil(coverage_yield_threshold * findings_so_far))
+# new distinct findings to justify another round, so the bar climbs as findings
+# accumulate and the loop stops once rounds stop paying off. This trades recall
+# for cost by design: lower it to be more patient (higher recall, more rounds),
+# raise it to stop sooner. Set it to 0.0 to disable the rule entirely for an
+# exhaustive audit, leaving only convergence / round cap / budget as stop
+# criteria. The rule can only ever stop the loop *earlier*, never extend it.
+# coverage_yield_threshold = 0.15
 # seed = 42                      # fix model seed for reproducible runs (omit to derive from scan ID)
 
 # --------------------------------------------------------------------------
