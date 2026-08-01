@@ -133,16 +133,16 @@ def test_all_builtins_have_recon_role() -> None:
 
 
 def test_http_request_does_not_have_recon_role() -> None:
-    """http_request is strictly dynamic_validate/prove — never recon."""
+    """http_request is restricted to the live/proof roles — never recon."""
     from quarry_tools.http_tool import HTTP_REQUEST_TOOL
 
     assert "recon" not in HTTP_REQUEST_TOOL.roles
-    assert set(HTTP_REQUEST_TOOL.roles) == {"dynamic_validate", "prove"}
+    assert set(HTTP_REQUEST_TOOL.roles) == {"dynamic_validate", "prove", "live_recon", "exploit"}
 
 
 def test_run_in_sandbox_does_not_have_recon_role() -> None:
-    """run_in_sandbox is strictly prove — never recon or other roles."""
+    """run_in_sandbox is restricted to prove/exploit — never recon or other roles."""
     from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL
 
     assert "recon" not in RUN_IN_SANDBOX_TOOL.roles
-    assert RUN_IN_SANDBOX_TOOL.roles == ["prove"]
+    assert RUN_IN_SANDBOX_TOOL.roles == ["prove", "exploit"]

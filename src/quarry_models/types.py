@@ -17,7 +17,16 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 Role = Literal[
-    "recon", "hunt", "validate", "dynamic_validate", "gapfill", "prove", "trace", "report"
+    "recon",
+    "hunt",
+    "validate",
+    "dynamic_validate",
+    "live_recon",
+    "exploit",
+    "gapfill",
+    "prove",
+    "trace",
+    "report",
 ]
 MessageRole = Literal["system", "user", "assistant"]
 

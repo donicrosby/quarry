@@ -29,6 +29,13 @@ dependencies = [
   "uvicorn>=0.34.3",
 ]
 
+[project.optional-dependencies]
+# Browser-based login for authenticated live exploitation (ADR-023). Heavy
+# (bundled Chromium, hundreds of MB); opt-in only. Non-browser scans must never
+# require it — the browser_login path imports Playwright lazily and errors
+# actionably when this extra is not installed.
+browser = ["playwright>=1.49.0"]
+
 [dependency-groups]                                                                                                            
   dev = [
   "pre-commit>=4.5.0",

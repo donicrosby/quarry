@@ -22,10 +22,12 @@ from quarry_activities.diff import git_diff_commits
 from quarry_activities.dynamic_http import http_request_activity
 from quarry_activities.dynamic_validate import dynamic_validate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.exploit import exploit_turn_activity
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.lifecycle_hooks import dispatch_lifecycle_hooks_activity
+from quarry_activities.live_recon import live_recon_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.prove import prove_activity
 from quarry_activities.provenance import build_scan_manifest_activity
@@ -99,6 +101,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 hunt_activity,
                 validate_candidate_finding_activity,
                 dynamic_validate_activity,
+                live_recon_activity,
+                exploit_turn_activity,
                 gapfill_activity,
                 deduplicate_activity,
                 http_request_activity,

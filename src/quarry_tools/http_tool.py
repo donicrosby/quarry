@@ -23,11 +23,12 @@ class _HttpRequestTool:
     name = "http_request"
     description = (
         "Propose an HTTP request to the authorized target for live dynamic "
-        "corroboration. Only available in the dynamic_validate and prove roles. "
-        "Does not send the request directly — the request is dispatched to the "
-        "quarry-control worker for scope-checked, network-contained execution."
+        "corroboration or exploitation. Only available in the dynamic_validate, "
+        "prove, live_recon, and exploit roles. Does not send the request directly "
+        "— the request is dispatched to the quarry-control worker for "
+        "scope-checked, network-contained execution."
     )
-    roles: list[str] = ["dynamic_validate", "prove"]
+    roles: list[str] = ["dynamic_validate", "prove", "live_recon", "exploit"]
 
     input_schema: dict[str, Any] = {
         "type": "object",

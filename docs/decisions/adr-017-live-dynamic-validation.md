@@ -55,6 +55,11 @@ Add an opt-in, scope-gated live dynamic exploitation and validation path to Mile
 It is entirely additive: with no `target_url` or when either gate flag is off, the pipeline
 behaves exactly as today.
 
+> **Responsible use:** the live-exploitation track (active, chained exploitation, not just
+> validation) is governed by [Responsible use and threat model — live exploitation](../responsible-use.md):
+> authorization required, `do_not_test` enforced, `allowed_hosts` fail-closed, never against
+> production.
+
 ### 1. Safety boundary — six independent layers, all required
 
 A live HTTP request may be sent only when **all** of the following hold. These are independent

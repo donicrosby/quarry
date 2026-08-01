@@ -949,6 +949,8 @@ class AgentStep(BaseModel):
         "trace",
         "gapfill",
         "dynamic_validate",
+        "live_recon",
+        "exploit",
     ]
     iteration: int
     tool_calls: list[str] = Field(default_factory=_empty_strings)
@@ -1145,6 +1147,60 @@ class DynamicEvidenceLink(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Live exploitation schemas (Shannon pillar — the app-centric track)
+# ---------------------------------------------------------------------------
+
+
+class LiveSessionContext(BaseModel):
+    """Redacted live-session state carried across exploitation turns (design D2).
+
+    Distinct from the LLM message history: holds the session cookies, CSRF/auth
+    tokens, and IDs discovered mid-chain that later requests depend on. Values are
+    redacted references (never raw secrets) — the dispatch/egress path is
+    responsible for scrubbing before anything re-enters a prompt.
+    """
+
+    cookies: dict[str, str] = Field(default_factory=dict)
+    tokens: dict[str, str] = Field(default_factory=dict)
+    discovered_ids: dict[str, str] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=_empty_strings)
+
+
+class ExploitStep(BaseModel):
+    """One request/response round in an exploit chain — an ordered proof unit (D3)."""
+
+    order: int
+    intent: str  # "login" | "enumerate" | "exploit" | ...
+    request_spec: HttpRequestSpec
+    request_artifact_id: str | None = None
+    response_artifact_id: str | None = None
+    status_code: int | None = None
+    dispatched: bool = True  # False when refused by rules-of-engagement before egress
+    confirmed: bool = False  # this step demonstrated the exploit
+    notes: str = ""
+
+
+def _empty_exploit_steps() -> list[ExploitStep]:
+    return []
+
+
+class ExploitChain(BaseModel):
+    """Ordered request/response chain that demonstrates an exploit — the proof (D3).
+
+    The app-centric analogue of Glasswing's compile-and-run PoC: a finding is emitted
+    only when a chain is ``proven`` (at least one confirmed exploit step). The chain
+    is also the persisted provenance artifact for a live-proven finding.
+    """
+
+    scan_id: str
+    workspace_id: str
+    vuln_class: VulnerabilityClass
+    steps: list[ExploitStep] = Field(default_factory=_empty_exploit_steps)
+    proven: bool = False
+    summary: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
 # ---------------------------------------------------------------------------
 
@@ -1326,12 +1382,51 @@ class LoginStep(BaseModel):
     ttl_seconds: int | None = None  # cache TTL; re-login on expiry or 401
 
 
+class SuccessCheck(BaseModel):
+    """Operator-defined, code-evaluated signal that a login or call succeeded (ADR-023 §3).
+
+    The verdict is decided deterministically in code — never by the model. ``description``
+    is surfaced to the agent for reasoning only.
+    """
+
+    kind: Literal["url_matches", "selector_present", "text_present", "status_ok"]
+    value: str = ""  # url substring | CSS selector | expected text | (status: unused)
+    description: str = ""
+
+
+class BrowserAction(BaseModel):
+    """One step in a browser login's closed action vocabulary (ADR-023 §2 — never raw JS)."""
+
+    action: Literal["click", "fill", "wait_for"]
+    selector: str
+    value: str | None = None  # for fill; supports ${username}/${secret:ENV}/${totp}
+
+
+def _empty_browser_actions() -> list[BrowserAction]:
+    return []
+
+
+class BrowserLoginStep(BaseModel):
+    """Declarative browser-login flow — no secrets, no arbitrary code (ADR-023 §2)."""
+
+    start_url: str  # login page path (host must be in allowed_hosts)
+    username_selector: str
+    password_selector: str
+    submit_selector: str
+    otp_selector: str | None = None  # OTP field selector (when TOTP-gated)
+    extra_steps: list[BrowserAction] = Field(default_factory=_empty_browser_actions)
+    success: SuccessCheck
+    failure_check: SuccessCheck | None = None
+    ttl_seconds: int | None = None
+
+
 class AuthProfileKind(StrEnum):
     BEARER = "bearer"
     BASIC = "basic"
     STATIC_HEADER = "static_header"
     COOKIE = "cookie"
     LOGIN_FLOW = "login_flow"
+    BROWSER_LOGIN = "browser_login"
 
 
 class AuthProfile(BaseModel):
@@ -1348,6 +1443,7 @@ class AuthProfile(BaseModel):
     username: str | None = None  # non-secret (basic auth / login template)
     name_hint: str | None = None  # custom header or cookie name
     login: LoginStep | None = None  # required when kind == login_flow
+    browser_login: BrowserLoginStep | None = None  # required when kind == browser_login
     totp: TotpConfig | None = None  # TOTP when login is OTP-gated
 
     @field_validator("secret_ref")

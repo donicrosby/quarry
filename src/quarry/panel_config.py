@@ -64,6 +64,10 @@ DEFAULT_PANEL: dict[str, RoleConfig] = {
     # dynamic_validate: live corroboration role (ADR-017). Separate from static
     # validate to keep the network-free adversarial-review boundary intact.
     "dynamic_validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    # live_recon / exploit: app-centric live-exploitation track (Shannon pillar).
+    # live_recon builds a live attack map; exploit chains stateful exploitation.
+    "live_recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "exploit": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
 }
 
 

@@ -28,6 +28,8 @@ from quarry.schemas import (
     CallGraph,
     CandidateFinding,
     DynamicEvidenceLink,
+    ExploitChain,
+    ExploitStep,
     FinalFinding,
     FindingStatus,
     HttpRequestSpec,
@@ -49,7 +51,9 @@ from quarry.schemas import (
     Severity,
     SourceRef,
     SubsystemAssignment,
+    SuccessCheck,
     Target,
+    TargetAuthorization,
     TargetEndpoint,
     Trace,
     VulnerabilityClass,
@@ -87,12 +91,17 @@ from quarry_workflows.coverage_loop import (
     dedup_new_tasks,
     loop_stop_reason,
 )
+from quarry_workflows.exploitation_loop import (
+    evaluate_exploit_success,
+    exploit_chain_to_candidate,
+)
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
     filter_needs_proof,
     prioritize_by_live_verdict,
     prove_outcome_from_captures,
 )
+from quarry_workflows.roe import authorization_active, request_in_scope
 from quarry_workflows.tracer_stage import (
     apply_trace_severity_reranking,
     sync_final_finding_trace,
@@ -197,12 +206,22 @@ class RunScanInput(BaseModel):
     dynamic_validation_enabled: bool = False
     # When True, also probe confirmed findings with live HTTP to collect proof artifacts.
     live_prove_enabled: bool = False
+    # Live-exploitation track (ADR-017 + live-exploitation-loop). When True AND a target
+    # is resolved AND a live authorization is present, the app-centric exploitation loop
+    # (live recon → stateful propose→dispatch chain) runs and feeds live-PROVEN findings
+    # into the candidate set as first-class candidates (design D1). Fail-closed: a CLI
+    # flag is the sole authority; target_url presence alone must never flip this.
+    live_exploit_enabled: bool = False
     # When True, run the agentic PROVE stage after AGENTIC_VALIDATE (ADR-017 §5/§7).
     proof_enabled: bool = False
     # Hosts the dynamic worker may contact; empty tuple = all hosts blocked.
     allowed_hosts: tuple[str, ...] = ()
     # AuthProfileSet serialized as JSON; None = unauthenticated scans only.
     auth_profiles_json: str | None = None
+    # TargetAuthorization serialized as JSON; None = no live authorization. Required
+    # (and enforced fail-closed) for the live-exploitation track — the rules of
+    # engagement (authorized_by / allowed_hosts / do_not_test) live here (design D4).
+    authorization_json: str | None = None
     # Primary language drives TRACER backend selection: "python" uses AST-grep;
     # any other value routes to the SCIP backend when the indexer is on PATH.
     target_language: str = "python"
@@ -566,6 +585,18 @@ class RunScanWorkflow:
         # in round 0, gapfill/feedback tasks thereafter) shares one binding.
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
 
+        # ── Live-exploitation track (Shannon pillar; design D1) ──────────────
+        # When live exploitation is authorized, the app-centric loop (live recon →
+        # stateful propose→dispatch exploit chain) runs against the target and feeds
+        # live-PROVEN findings into candidate_findings as first-class candidates, so
+        # they flow through the same DEDUP/PROVE/TRACER/report path as code-hunted
+        # ones. Fail-closed and best-effort: it requires a fresh ArchitectureDoc (so
+        # it is skipped on a post-RECON resume) and never blocks the code pipeline.
+        if arch_doc is not None:
+            await self._run_live_exploitation(
+                scan_input, scan, repo_path, artifact_root, arch_doc, candidate_findings
+            )
+
         round_tasks: list[AgentTask] = agent_tasks
         # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
         # "round_cap". Stays None only if the loop body never ran (no tasks).
@@ -865,6 +896,248 @@ class RunScanWorkflow:
             candidate_finding_count=len(candidate_findings),
             final_finding_count=len(final_findings),
         )
+
+    async def _run_live_exploitation(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        arch_doc: ArchitectureDoc,
+        candidate_findings: list[CandidateFinding],
+    ) -> None:
+        """Live-exploitation track (Shannon pillar; design D1/D3/D4).
+
+        Fail-closed: runs only when ``live_exploit_enabled`` AND a target AND an active
+        ``TargetAuthorization`` are all present. Runs live recon to build an attack map,
+        then for each vuln class drives a stateful propose→dispatch exploit chain — the
+        ``exploit-turn`` activity PROPOSES one request per turn (no socket I/O) and the
+        workflow performs the single allow-listed egress via the ``http-request``
+        activity, confirming each step IN CODE (``evaluate_exploit_success``) and
+        threading session cookies across turns. A PROVEN chain becomes a first-class
+        ``CandidateFinding`` carrying the ordered chain as its proof (task 6.2); unproven
+        chains yield nothing ("prove by doing"). Every step is provenance-tracked: each
+        propose records a model invocation, each dispatch records request/response
+        artifacts. Best-effort — any activity failure is logged and never aborts the scan.
+        """
+        authorization = (
+            TargetAuthorization.model_validate_json(scan_input.authorization_json)
+            if scan_input.authorization_json
+            else None
+        )
+        if not live_exploitation_active(
+            enabled=scan_input.live_exploit_enabled,
+            target_url=scan_input.target_url,
+            authorization=authorization,
+        ):
+            return
+        # The gate guarantees both are set; assert for the type-checker.
+        assert authorization is not None
+        assert scan_input.target_url is not None
+
+        target_ep = build_target_endpoint_from_url(scan_input.target_url)
+        allowed_hosts: tuple[str, ...] = scan_input.allowed_hosts or (
+            target_ep.host,
+            "127.0.0.1",
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "live_exploit.started",
+            {"target": scan_input.target_url},
+        )
+
+        # Step 1: live recon → attack map (agent proposes; no socket I/O in the loop).
+        try:
+            recon_raw = await workflow.execute_activity(
+                "live-recon",
+                args=[
+                    arch_doc.model_dump(mode="json"),
+                    repo_path,
+                    True,  # authorized — the fail-closed gate above already enforced it
+                    panel_json_for_role(scan, "live_recon"),
+                    scan_input.budget_cap_usd,
+                    scan_input.db_path,
+                    scan_input.validate_max_iterations,
+                    scan_input.scan_seed,
+                    scan.id,
+                    scan_input.target_url,
+                    allowed_hosts,
+                    artifact_root,
+                ],
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+        except Exception as exc:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "live_exploit.failed",
+                {"stage": "live_recon", "error": _describe_failure(exc)},
+            )
+            return
+        attack_map: list[Any] = (
+            cast("list[Any]", recon_raw.get("attack_map") or [])
+            if isinstance(recon_raw, dict)
+            else []
+        )
+        exploit_panel_json = panel_json_for_role(scan, "exploit")
+
+        # Step 2: per vuln class, drive a stateful propose→dispatch exploit chain.
+        for vuln_class in scan.profile.vuln_classes:
+            steps: list[ExploitStep] = []
+            session_cookies: dict[str, str] = {}
+            for _turn in range(scan_input.validate_max_iterations):
+                prior_steps = [s.model_dump(mode="json") for s in steps]
+                session_summary = "cookies set" if session_cookies else "(no session state yet)"
+                try:
+                    turn_raw = await workflow.execute_activity(
+                        "exploit-turn",
+                        args=[
+                            vuln_class.value,
+                            repo_path,
+                            True,  # authorized — enforced by the gate above
+                            session_summary,
+                            prior_steps,
+                            attack_map,
+                            exploit_panel_json,
+                            scan_input.budget_cap_usd,
+                            scan_input.db_path,
+                            scan_input.validate_max_iterations,
+                            scan_input.scan_seed,
+                            scan.id,
+                            scan_input.target_url,
+                            allowed_hosts,
+                            artifact_root,
+                        ],
+                        start_to_close_timeout=timedelta(hours=1),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
+                    )
+                except Exception as exc:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "live_exploit.failed",
+                        {"stage": "exploit_turn", "error": _describe_failure(exc)},
+                    )
+                    break
+                if not isinstance(turn_raw, dict):
+                    break
+                turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
+                if turn.get("done") or not turn.get("proposed_http_spec"):
+                    break
+
+                spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
+                intent = str(turn.get("intent") or "exploit")
+                raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
+                headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
+                if session_cookies:
+                    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
+                spec = HttpRequestSpec(
+                    method=spec_dict.get("method", "GET"),
+                    path=str(spec_dict.get("path", "/")),
+                    headers=headers,
+                    body=spec_dict.get("body"),
+                    auth_profile=spec_dict.get("auth_profile"),
+                )
+
+                # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
+                if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
+                    steps.append(
+                        ExploitStep(
+                            order=len(steps),
+                            intent=intent,
+                            request_spec=spec,
+                            dispatched=False,
+                            confirmed=False,
+                            notes="refused: outside rules of engagement",
+                        )
+                    )
+                    continue
+
+                inp = HttpRequestActivityInput(
+                    spec_json=spec.model_dump_json(),
+                    target_endpoint_json=target_ep.model_dump_json(),
+                    allowed_hosts=allowed_hosts,
+                    artifact_store_path=artifact_root,
+                    scan_id=scan.id,
+                    candidate_finding_id=f"live-exploit-{vuln_class.value}",
+                    auth_profile_set_json=scan_input.auth_profiles_json,
+                )
+                try:
+                    capture_raw = await workflow.execute_activity(
+                        "http-request",
+                        args=[inp],
+                        start_to_close_timeout=timedelta(minutes=2),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    capture = HttpResponseCapture.model_validate(capture_raw)
+                except Exception:
+                    # A failed dispatch ends this class's chain; other classes continue.
+                    break
+
+                success_raw = turn.get("success")
+                check = SuccessCheck.model_validate(success_raw) if success_raw else None
+                confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
+
+                # Thread any Set-Cookie into the carried session for later turns (D2).
+                set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
+                if set_cookie:
+                    pair = set_cookie.split(";", 1)[0]
+                    if "=" in pair:
+                        name, value = pair.split("=", 1)
+                        session_cookies[name] = value
+
+                steps.append(
+                    ExploitStep(
+                        order=len(steps),
+                        intent=intent,
+                        request_spec=spec,
+                        request_artifact_id=capture.request_artifact_ref,
+                        response_artifact_id=capture.body_artifact_ref,
+                        status_code=capture.status_code,
+                        confirmed=confirmed,
+                        notes=str(turn.get("reasoning") or ""),
+                    )
+                )
+                if confirmed:
+                    break  # we have our proof
+
+            chain = ExploitChain(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id,
+                vuln_class=vuln_class,
+                steps=steps,
+                proven=any(s.confirmed for s in steps),
+                summary=f"live exploitation chain for {vuln_class.value}",
+            )
+            candidate = exploit_chain_to_candidate(
+                chain,
+                finding_id=str(workflow.uuid4()),
+                title=f"Live-proven {vuln_class.value} via chained exploitation",
+                hypothesis="Confirmed against the running target by a chained live exploit.",
+                created_by="exploit-agent",
+                created_at=workflow.now(),
+            )
+            if candidate is not None:
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.proven",
+                    {
+                        "finding_id": candidate.id,
+                        "vuln_class": vuln_class.value,
+                        "step_count": str(len(chain.steps)),
+                    },
+                )
 
     async def _run_round(
         self,
@@ -2313,6 +2586,22 @@ def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) ->
         validation_result_id=f"{candidate.id}-validation",
         created_at=now,
     )
+
+
+def live_exploitation_active(
+    *,
+    enabled: bool,
+    target_url: str | None,
+    authorization: TargetAuthorization | None,
+) -> bool:
+    """Fail-closed gate for the live-exploitation track (design D1 + D4).
+
+    The track runs only when the CLI flag opts in AND a live target is resolved AND an
+    active ``TargetAuthorization`` is present. Any missing input means the track is a
+    no-op that runs no loop and sends no live traffic — target_url presence alone must
+    never flip it on.
+    """
+    return bool(enabled and target_url and authorization_active(authorization))
 
 
 def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:
