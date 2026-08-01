@@ -245,6 +245,15 @@ def run_agent_loop(
     # Per-turn model-call wall-clock timeout.  Set to 120 s so Chutes queue
     # delays surface as a retriable activity failure rather than a hung scan.
     turn_timeout_seconds: int = 120,
+    # Per-tier cap on the total number of tool calls this loop may issue (MDASH
+    # per-role caps, task 1.3).  ``None`` = bounded only by ``max_iterations``.
+    tool_call_cap: int | None = None,
+    # Optional per-(provider, role) rate limiter (MDASH, design D5).  When set,
+    # ``limiter.acquire()`` is called once per model turn before dispatch to
+    # throttle to the role's configured rpm.  ``None`` = unthrottled.  The limiter
+    # lives in the dispatch path (quarry_models), never in workflow code, so it is
+    # replay-safe.
+    limiter: Any | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -290,12 +299,13 @@ def run_agent_loop(
     Returns
     -------
     AgentLoopResult
-        With one of six stop reasons: ``final_answer``, ``max_iterations``,
-        ``budget_exceeded``, ``guard_triggered``, ``reasoning_rejected``, or
-        ``schema_rejected``.
+        With one of these stop reasons: ``final_answer``, ``max_iterations``,
+        ``budget_exceeded``, ``guard_triggered``, ``reasoning_rejected``,
+        ``schema_rejected``, or ``tool_call_cap``.
     """
     steps: list[AgentStep] = []
     total_cost: float = 0.0
+    tool_calls_used: int = 0  # cumulative tool calls issued (for tool_call_cap)
     history: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
         ModelMessage(role="user", content=initial_user_message),
@@ -365,6 +375,8 @@ def run_agent_loop(
             # Provider/network failures (timeout, etc.) still burn an iteration so
             # the loop naturally backs off on transient outages.
             try:
+                if limiter is not None:
+                    limiter.acquire()
                 response = client.complete_structured(request, response_model)
             except ValidationError as exc:
                 # Schema / parse failure — re-prompt in-place without burning iteration.
@@ -572,6 +584,24 @@ def run_agent_loop(
                 elif isinstance(item, dict):
                     tool_calls.append(ToolCallRequest.model_validate(item))
 
+        # Per-tier tool_call_cap (task 1.3): once the cap is reached the loop stops
+        # issuing tool calls.  A turn that would exceed the remaining budget is
+        # truncated to it; a turn with nothing left to spend halts the loop.
+        if tool_call_cap is not None and tool_calls:
+            remaining = tool_call_cap - tool_calls_used
+            if remaining <= 0:
+                _last_capped = parsed if isinstance(parsed, response_model) else None
+                return AgentLoopResult(
+                    final_answer=_last_capped,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="tool_call_cap",
+                )
+            if len(tool_calls) > remaining:
+                tool_calls = tool_calls[:remaining]
+
+        tool_calls_used += len(tool_calls)
         step_tool_names = [tc.tool for tc in tool_calls]
         steps.append(
             AgentStep(

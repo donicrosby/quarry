@@ -14,7 +14,12 @@ from sse_starlette.sse import EventSourceResponse
 from temporalio.client import Client
 
 from quarry.config import QuarrySettings
-from quarry.panel_config import load_quarry_config, resolve_integration_configs, resolve_panel
+from quarry.panel_config import (
+    enforce_vendor_allowlist,
+    load_quarry_config,
+    resolve_integration_configs,
+    resolve_panel,
+)
 from quarry.schemas import (
     CandidateFinding,
     FinalFinding,
@@ -50,6 +55,10 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
     # load_quarry_config reads quarry.toml from cwd or ~/.config/quarry/quarry.toml.
     quarry_config = load_quarry_config()
     resolved = resolve_panel(quarry_config, settings.panel)
+    # Fail fast before launching the workflow if any panel vendor is out of scope
+    # (design D6). Empty allowlist = unrestricted. This runs outside the sandboxed
+    # workflow, so raising here is replay-safe.
+    enforce_vendor_allowlist(resolved, quarry_config.scan_defaults.vendor_allowlist)
     panel_entries = [
         ModelPanelEntry(
             id=str(uuid4()),

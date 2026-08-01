@@ -32,6 +32,7 @@ from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
+from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -69,6 +70,7 @@ def prove_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    limiter: Any | None = None,
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
 ) -> ProveResponse:
@@ -131,6 +133,7 @@ def prove_impl(
         prompt_provenance=PromptProvenance.from_rendered(prompt),
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        limiter=limiter,
     )
 
     if artifact_root is not None:
@@ -225,9 +228,11 @@ def _prove_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=ProveResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "prove", role_cfg.rpm)
 
     result = prove_impl(
         finding=finding,
@@ -239,6 +244,7 @@ def _prove_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        limiter=limiter,
         prior_attempts=prior_attempts,
         artifact_root=artifact_root,
     )

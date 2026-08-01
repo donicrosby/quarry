@@ -34,22 +34,68 @@
 # criteria. The rule can only ever stop the loop *earlier*, never extend it.
 # coverage_yield_threshold = 0.15
 # seed = 42                      # fix model seed for reproducible runs (omit to derive from scan ID)
+#
+# Vendor allowlist (optional). Fail fast before any model call if a panel names a
+# provider outside this set — a guardrail against accidentally sending target code
+# to an unapproved vendor. Empty or omitted means unrestricted. Values match the
+# provider names below ("anthropic", "bedrock", "litellm", ...).
+# vendor_allowlist = ["anthropic", "bedrock"]
 
 # --------------------------------------------------------------------------
 # Model panels
 # Define named panels that override the built-in defaults role-by-role.
 # Any role not listed falls back to the DEFAULT_PANEL (mock provider).
+#
+# A role is single-model by default (one provider/model). It behaves as an
+# implicit single "reasoner" tier, so existing single-model configs keep working.
+#
+# Provider is one of "mock", "litellm", or "bedrock". LiteLLM routes to any vendor
+# via a "/"-prefixed model string (e.g. "anthropic/claude-3-5-sonnet-20241022");
+# Bedrock takes a bare Bedrock model id and prefixes "bedrock/" itself.
+#
+# Rate limiting: each role/tier takes an `rpm` (requests per minute). Calls are
+# smoothed through a per-(provider, role) token bucket in the dispatch path, so a
+# burst is throttled to the limit rather than rejected. Omit rpm (or set 0) to run
+# unthrottled. Rate limiting lives outside workflow code and is replay-safe.
 # --------------------------------------------------------------------------
 
 # [panels.oss.roles.recon]
-# provider = "anthropic"
-# model = "claude-3-haiku-20240307"
+# provider = "litellm"
+# model = "anthropic/claude-3-haiku-20240307"
 # rpm = 10
 #
 # [panels.oss.roles.hunt]
-# provider = "anthropic"
-# model = "claude-3-5-sonnet-20241022"
+# provider = "litellm"
+# model = "anthropic/claude-3-5-sonnet-20241022"
 # rpm = 5
+
+# --------------------------------------------------------------------------
+# Tiered panel (MDASH ensemble)
+# A role MAY instead declare an ordered set of tiers instead of a single model:
+#   - reasoner:    the SOTA heavy-reasoning pass (required; the primary verdict).
+#   - debater:     a cheaper, independent model that argues to *refute* the
+#                  candidate from the code (distinct `prompt_regime = "refute"`).
+#   - counterpoint: an optional second independent SOTA model.
+# Cross-model (dis)agreement becomes an ordinal credibility signal on the finding
+# — refuted / contested / unrefuted — rather than a discarded boolean. A debater
+# that tries and fails to refute *raises* credibility; it never emits new findings
+# and a finding is never silently dropped on credibility alone. The report surfaces
+# the credibility and each contributing judgement, traceable to its invocation.
+# Use a different vendor for the debater to get genuine independence.
+# --------------------------------------------------------------------------
+
+# [[panels.ensemble.roles.validate.tiers]]
+# kind = "reasoner"
+# provider = "litellm"
+# model = "anthropic/claude-3-5-sonnet-20241022"
+# rpm = 5
+#
+# [[panels.ensemble.roles.validate.tiers]]
+# kind = "debater"
+# provider = "bedrock"
+# model = "anthropic.claude-3-haiku-20240307-v1:0"
+# prompt_regime = "refute"
+# rpm = 10
 
 # [panels.bedrock.roles.recon]
 # provider = "bedrock"
@@ -62,13 +108,13 @@
 # rpm = 5
 
 # [panels.benchmark.roles.recon]
-# provider = "anthropic"
-# model = "claude-3-opus-20240229"
+# provider = "litellm"
+# model = "anthropic/claude-3-opus-20240229"
 # rpm = 3
 #
 # [panels.benchmark.roles.hunt]
-# provider = "anthropic"
-# model = "claude-3-opus-20240229"
+# provider = "litellm"
+# model = "anthropic/claude-3-opus-20240229"
 # rpm = 3
 
 # --------------------------------------------------------------------------

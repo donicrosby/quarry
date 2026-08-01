@@ -37,6 +37,7 @@ from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
+from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -137,6 +138,8 @@ def hunt_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    tool_call_cap: int | None = None,
+    limiter: Any | None = None,
     artifact_root: str | None = None,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
@@ -204,6 +207,8 @@ def hunt_impl(
         prompt_provenance=PromptProvenance.from_rendered(prompt),
         scan_id=task.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        tool_call_cap=tool_call_cap,
+        limiter=limiter,
     )
 
     if artifact_root is not None:
@@ -305,9 +310,11 @@ def _hunt_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=_HuntResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "hunt", role_cfg.rpm)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
@@ -320,6 +327,8 @@ def _hunt_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, task.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        tool_call_cap=role_cfg.tool_call_cap,
+        limiter=limiter,
         artifact_root=artifact_root,
     )
 

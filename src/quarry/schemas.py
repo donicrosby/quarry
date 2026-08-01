@@ -58,11 +58,35 @@ class Confidence(StrEnum):
     HIGH = "high"
 
 
+class CredibilityLevel(StrEnum):
+    """Ordinal ensemble credibility posterior for a finding (MDASH, design D3).
+
+    Ordinal-first by design — a small, explicit, auditable set rather than a
+    numeric score, so the rule stays legible and a finding is never silently
+    dropped on credibility alone.
+
+    - ``refuted``: a debater tier argued the candidate away from the code.
+    - ``contested``: independent models disagree about the candidate.
+    - ``unrefuted``: a debater tried and *failed* to refute it → credibility up.
+
+    Ordered least-to-most credible: refuted < contested < unrefuted.
+    """
+
+    REFUTED = "refuted"
+    CONTESTED = "contested"
+    UNREFUTED = "unrefuted"
+
+
 class Provider(StrEnum):
     """Model provider identifiers.  Add new vendors as new members."""
 
     MOCK = "mock"
     LITELLM = "litellm"
+    # Bedrock routes through LiteLLM (``bedrock/<model>``) but is a distinct vendor
+    # so a panel can span genuinely different vendors and cross-vendor disagreement
+    # reflects real independence (MDASH ensemble, design D4). AWS credentials are
+    # only needed at call time, not at client construction.
+    BEDROCK = "bedrock"
 
 
 class VulnerabilityClass(StrEnum):
@@ -340,6 +364,27 @@ class ScanSummary(BaseModel):
     error: str | None = None
 
 
+class EnsembleJudgement(BaseModel):
+    """One model's contribution to a finding's ensemble credibility (design D3).
+
+    Each judgement is a retained credibility *input* — not a discarded boolean —
+    and links to the ``ModelInvocation`` that produced it so the report can trace
+    the credibility posterior back to provenance-tracked model calls.
+    """
+
+    role: str
+    tier: str  # TierKind value: "reasoner" / "debater" / "counterpoint"
+    provider: str
+    model: str
+    verdict: str  # e.g. "validated" / "rejected" / "refuted" / "unrefuted"
+    refuted: bool | None = None  # set only for debater judgements
+    model_invocation_id: str | None = None
+
+
+def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
+    return []
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
@@ -358,6 +403,11 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    # Ensemble credibility posterior (MDASH, design D3). ``None`` when the finding
+    # was not reviewed by a debater/counterpoint ensemble. ``ensemble`` retains
+    # each contributing judgement (provenance-linked) so the report is auditable.
+    credibility: CredibilityLevel | None = None
+    ensemble: list[EnsembleJudgement] = Field(default_factory=_empty_ensemble_judgements)
     hunter_provider: str | None = None
     trigger_input: str | None = None
     scrubber_hits: int = 0
@@ -483,6 +533,10 @@ class ValidationResult(BaseModel):
     model_invocation_id: str | None = None
     cross_vendor: bool = False  # deprecated alias; use cross_vendor_disagreement
     cross_vendor_disagreement: bool = False
+    # Ensemble credibility posterior + its contributing judgements (MDASH, D3).
+    # ``credibility`` is None when no debater tier reviewed the candidate.
+    credibility: CredibilityLevel | None = None
+    ensemble: list[EnsembleJudgement] = Field(default_factory=_empty_ensemble_judgements)
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -985,6 +1039,8 @@ class AgentLoopResult(BaseModel):
         "reasoning_rejected",
         # All max_parse_retries for a turn consumed (schema/parse failure); loop halted.
         "schema_rejected",
+        # Per-tier tool_call_cap reached; loop stopped issuing tool calls (mdash D1).
+        "tool_call_cap",
     ]
 
 

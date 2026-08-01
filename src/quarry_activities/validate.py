@@ -15,23 +15,27 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from temporalio import activity
 
-from quarry.panel_config import DEFAULT_PANEL, RoleConfig
+from quarry.panel_config import DEFAULT_PANEL, ModelTier, RoleConfig, TierKind, resolve_tier
 from quarry.schemas import (
     CandidateFinding,
+    CredibilityLevel,
+    EnsembleJudgement,
     Provider,
     ValidationResult,
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
+from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_models.validation import validate_claim_from_finding
 from quarry_prompts import get_registry
@@ -48,6 +52,98 @@ class ValidateResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = []
 
 
+class RefuteResponse(BaseModel):
+    """Model output schema for the debater (refute) agent loop.
+
+    The debater argues to refute the candidate and emits NO new findings — its
+    ``refuted`` flag is the only stance it contributes to the ensemble.
+    """
+
+    refuted: bool = False
+    reasons: list[str] = []
+    tool_calls: list[ToolCallRequest] = []
+
+
+def _last_invocation_id(client: Any) -> str | None:
+    """Provenance link: id of the model's most recent recorded invocation."""
+    invocations = getattr(client, "invocations", None)
+    if not isinstance(invocations, (list, tuple)) or not invocations:
+        return None
+    last = cast("Any", invocations[-1])
+    candidate_id = getattr(last, "id", None)
+    return candidate_id if isinstance(candidate_id, str) else None
+
+
+def _run_debater(
+    *,
+    finding: CandidateFinding,
+    claim: Any,
+    repo_path: str,
+    debater_client: Any,
+    debater_tier: ModelTier,
+    max_iterations: int,
+    budget_spec: BudgetSpec,
+    cost_per_iteration: float,
+    event_sink: Any | None,
+    turn_timeout_seconds: int,
+    limiter: Any | None,
+) -> RefuteResponse | None:
+    """Run the independent debater's refute loop over the same claim.
+
+    Reuses the ADR-021 independence boundary — the debater sees only the
+    ValidatorClaim, never the reasoner's verdict, reasoning, or trace.
+    """
+    runner = ToolRunner(
+        repo_root=Path(repo_path),
+        role="validate",
+        registry=load_registry(),
+        budget_spec=budget_spec,
+    )
+    registry = get_registry()
+    prompt = build_prompt(
+        registry=registry,
+        role="validate",
+        name=debater_tier.prompt_regime or "refute",
+        version="1.0.0",
+        variables={
+            "vuln_class": claim.vuln_class.value,
+            "file": claim.file or "",
+            "line_start": claim.line_start,
+            "line_end": claim.line_end,
+            "description": claim.description,
+            "affected_code_snippet": claim.affected_code_snippet,
+        },
+    )
+    _, system_prompt = strip_provenance_header(prompt.messages[0].content)
+    initial_message = prompt.messages[1].content
+
+    policy: ProviderPolicy | None = None
+    if debater_tier.provider != Provider.MOCK:
+        policy = ProviderPolicy(provider=debater_tier.provider.value, model=debater_tier.model)
+
+    result = run_agent_loop(
+        client=debater_client,
+        role="validate",
+        agent_kind="validate",
+        system_prompt=system_prompt,
+        initial_user_message=initial_message,
+        runner=runner,
+        budget_spec=budget_spec,
+        response_model=RefuteResponse,
+        max_iterations=max_iterations,
+        cost_per_iteration=cost_per_iteration,
+        provider_policy=policy,
+        event_sink=event_sink,
+        prompt_provenance=PromptProvenance.from_rendered(prompt),
+        scan_id=finding.scan_id,
+        turn_timeout_seconds=turn_timeout_seconds,
+        limiter=limiter,
+    )
+    if result.final_answer and isinstance(result.final_answer, RefuteResponse):
+        return result.final_answer
+    return None
+
+
 def validate_impl(
     *,
     finding: CandidateFinding,
@@ -60,7 +156,11 @@ def validate_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    limiter: Any | None = None,
     artifact_root: str | None = None,
+    debater_client: Any | None = None,
+    debater_tier: ModelTier | None = None,
+    debater_limiter: Any | None = None,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -118,6 +218,7 @@ def validate_impl(
         prompt_provenance=PromptProvenance.from_rendered(prompt),
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        limiter=limiter,
     )
 
     if artifact_root is not None:
@@ -158,6 +259,51 @@ def validate_impl(
         and hunter_provider.lower() != validate_provider.lower()
     )
 
+    # Ensemble (design D3): the reasoner is always a tier; a debater tier, when
+    # present, contributes an independent refute stance. Credibility is an ordinal
+    # posterior over these judgements — never a bare boolean, never a silent drop.
+    validate_cfg = panel.get("validate")
+    reasoner_model = getattr(validate_cfg, "model", "") if validate_cfg is not None else ""
+    ensemble: list[EnsembleJudgement] = [
+        EnsembleJudgement(
+            role="validate",
+            tier=TierKind.REASONER.value,
+            provider=validate_provider or Provider.MOCK.value,
+            model=reasoner_model,
+            verdict=verdict,
+            refuted=None,
+            model_invocation_id=_last_invocation_id(client),
+        )
+    ]
+    credibility: CredibilityLevel | None = None
+    if debater_client is not None and debater_tier is not None:
+        refute = _run_debater(
+            finding=finding,
+            claim=claim,
+            repo_path=repo_path,
+            debater_client=debater_client,
+            debater_tier=debater_tier,
+            max_iterations=max_iterations,
+            budget_spec=budget_spec,
+            cost_per_iteration=cost_per_iteration,
+            event_sink=event_sink,
+            turn_timeout_seconds=turn_timeout_seconds,
+            limiter=debater_limiter,
+        )
+        refuted = refute.refuted if refute is not None else False
+        ensemble.append(
+            EnsembleJudgement(
+                role="validate",
+                tier=TierKind.DEBATER.value,
+                provider=debater_tier.provider.value,
+                model=debater_tier.model,
+                verdict="refuted" if refuted else "unrefuted",
+                refuted=refuted,
+                model_invocation_id=_last_invocation_id(debater_client),
+            )
+        )
+        credibility = compute_credibility(ensemble)
+
     return ValidationResult(
         id=str(uuid.uuid4()),
         candidate_finding_id=finding.id,
@@ -166,6 +312,8 @@ def validate_impl(
         reasons=reasons,
         cross_vendor=cross_vendor,
         cross_vendor_disagreement=cross_vendor,
+        credibility=credibility,
+        ensemble=ensemble if debater_client is not None else [],
         created_at=datetime.now(UTC),
     )
 
@@ -244,9 +392,23 @@ def _validate_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=ValidateResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "validate", role_cfg.rpm)
+
+    # Resolve an optional debater tier (design D1/D2). A single-model validate role
+    # has no debater tier, so the ensemble collapses to a single reasoner pass.
+    debater_tier = resolve_tier(role_cfg, TierKind.DEBATER)
+    debater_client: Any | None = None
+    debater_limiter: Any | None = None
+    if debater_tier is not None:
+        if debater_tier.provider == Provider.MOCK:
+            debater_client = MockModelClient(default=RefuteResponse())
+        else:
+            debater_client = build_model_client(debater_tier.provider, seed=scan_seed)
+            debater_limiter = get_limiter(debater_tier.provider.value, "validate", debater_tier.rpm)
 
     result = validate_impl(
         finding=finding,
@@ -258,8 +420,15 @@ def _validate_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        limiter=limiter,
         artifact_root=artifact_root,
+        debater_client=debater_client,
+        debater_tier=debater_tier,
+        debater_limiter=debater_limiter,
     )
+
+    if debater_client is not None:
+        persist_model_invocations(db_path, finding.scan_id, debater_client)
 
     persist_model_invocations(db_path, finding.scan_id, client)
 

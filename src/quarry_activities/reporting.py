@@ -149,6 +149,13 @@ Full coverage: no items were skipped.
 - Component: `{{ finding.affected_component or "unknown" }}`
 {% if finding.cross_vendor_disagreement -%}
 - Note: cross-vendor disagreement (credibility signal)
+{% endif -%}
+{% if finding.credibility -%}
+- Ensemble credibility: `{{ finding.credibility.value }}`
+{% for judgement in finding.ensemble -%}
+  - {{ judgement.tier }} ({{ judgement.provider }}/{{ judgement.model }}):
+    verdict `{{ judgement.verdict }}` — invocation `{{ judgement.model_invocation_id }}`
+{% endfor -%}
 {% endif %}
 {{ finding.hypothesis }}
 
@@ -164,7 +171,13 @@ Full coverage: no items were skipped.
 - Confidence: `{{ finding.confidence.value }}`
 - Status: `{{ finding.status.value }}`
 - Component: `{{ finding.affected_component or "unknown" }}`
-
+{% if finding.credibility -%}
+- Ensemble credibility: `{{ finding.credibility.value }}`
+{% for judgement in finding.ensemble -%}
+  - {{ judgement.tier }} ({{ judgement.provider }}/{{ judgement.model }}):
+    verdict `{{ judgement.verdict }}` — invocation `{{ judgement.model_invocation_id }}`
+{% endfor -%}
+{% endif %}
 {{ finding.hypothesis }}
 
 {% else -%}

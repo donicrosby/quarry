@@ -1384,6 +1384,17 @@ class RunScanWorkflow:
                 if isinstance(validate_payload, dict):
                     payload_dict = cast("dict[str, Any]", validate_payload)
                     verdict = str(payload_dict.get("verdict", "")).lower()
+                    # Mirror the ensemble credibility posterior (design D3) onto the
+                    # candidate so it flows to whichever report section it lands in.
+                    credibility = payload_dict.get("credibility")
+                    ensemble = payload_dict.get("ensemble")
+                    if credibility is not None or ensemble:
+                        candidate = candidate.model_copy(
+                            update={
+                                "credibility": credibility,
+                                "ensemble": ensemble or [],
+                            }
+                        )
 
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).

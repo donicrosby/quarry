@@ -35,6 +35,7 @@ from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
+from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -70,6 +71,7 @@ def dynamic_validate_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    limiter: Any | None = None,
     target_summary: str | None = None,
     allowed_hosts: list[str] | tuple[str, ...] | None = None,
     scope_exclusions: list[Any] | None = None,
@@ -150,6 +152,7 @@ def dynamic_validate_impl(
         prompt_provenance=PromptProvenance.from_rendered(prompt),
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        limiter=limiter,
     )
 
     if artifact_root is not None:
@@ -246,9 +249,11 @@ def _dynamic_validate_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=DynamicValidateResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "dynamic_validate", role_cfg.rpm)
 
     result = dynamic_validate_impl(
         finding=finding,
@@ -259,6 +264,7 @@ def _dynamic_validate_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        limiter=limiter,
         target_summary=target_summary,
         allowed_hosts=allowed_hosts,
         prior_attempts=prior_attempts,
