@@ -1,7 +1,6 @@
 """Test worker registration and configuration."""
 
 from quarry_activities.coverage import build_coverage_ledger_activity
-from quarry_activities.dynamic_validation import validate_idor_candidate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
@@ -25,12 +24,11 @@ class TestWorkerImports:
             emit_agent_tasks,
             hunt_activity,
             validate_secret_candidate,
-            validate_idor_candidate_activity,
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
             render_markdown_report,
         ]
-        assert len(activities) == 9
+        assert len(activities) == 8
         for act in activities:
             assert callable(act)
 
@@ -43,7 +41,6 @@ class TestActivityDecorators:
             emit_agent_tasks,
             hunt_activity,
             validate_secret_candidate,
-            validate_idor_candidate_activity,
             promote_to_final_finding_metadata,
             build_coverage_ledger_activity,
             render_markdown_report,
@@ -91,7 +88,6 @@ class TestWorkerConfiguration:
             "emit_agent_tasks",
             "hunt_activity",
             "validate_secret_candidate",
-            "validate_idor_candidate_activity",
             "promote_to_final_finding_metadata",
             "build_coverage_ledger_activity",
             "render_markdown_report_activity",

@@ -75,7 +75,7 @@ def _proof() -> ProofArtifact:
 
 
 def test_report_renders_command_injection_proof_with_safe_payload() -> None:
-    report = render_markdown_report(_scan(), [], None, [], [_finding()], None, [_proof()])
+    report = render_markdown_report(_scan(), [], None, [_finding()], None, [_proof()])
 
     assert "#### Proof: dynamic_command_injection_echo" in report
     assert "Safe payload: `127.0.0.1; echo QUARRY_PROOF_deadbeefcafe`" in report

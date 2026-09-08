@@ -10,7 +10,6 @@ from temporalio import activity
 from quarry.schemas import (
     ArtifactKind,
     ArtifactRef,
-    AttackSurfaceItem,
     CandidateFinding,
     CoverageLedger,
     FinalFinding,
@@ -47,27 +46,26 @@ Profile: `{{ scan.profile.id }}`
 
 {% endif -%}
 
-## Attack surface
-
-{% if attack_surface -%}
-| Method | Route | Handler | Parameters |
-|--------|-------|---------|------------|
-{% for item in attack_surface -%}
-{% set param_str = item.params | join(", ") or "-" %}
-| {{ item.method }} | `{{ item.route }}` | {{ item.handler_symbol or "unknown" }} | {{ param_str }}|
-{% endfor %}
-{% else -%}
-No routes mapped.
-{% endif %}
-
 {% if coverage -%}
-{% set scanned = coverage.attack_surface_items_scanned -%}
-{% set total = coverage.attack_surface_items_total -%}
+{% set scanned = coverage.agent_tasks_scanned -%}
+{% set total = coverage.agent_tasks_total -%}
 ## Coverage
 
 - Vuln classes requested: `{{ coverage.vuln_classes_requested | join(", ") or "none" }}`
 - Vuln classes completed: `{{ coverage.vuln_classes_completed | join(", ") or "none" }}`
-- Attack surface items scanned: `{{ scanned }}` of `{{ total }}`
+- Agent tasks scanned: `{{ scanned }}` of `{{ total }}`
+{% if coverage_stop_reason -%}
+{% if coverage_stop_reason == "finding_plateau" -%}
+- Loop stopped early: **finding plateau** — a round's new findings fell below the
+  rising yield bar, so further rounds were not worth their cost.
+{% elif coverage_stop_reason == "round_cap" -%}
+- Loop stopped: reached the configured **round cap**.
+{% elif coverage_stop_reason == "budget" -%}
+- Loop stopped: **budget** exhausted.
+{% elif coverage_stop_reason == "convergence" -%}
+- Loop stopped: **convergence** — no new hunt tasks were produced.
+{% endif -%}
+{% endif %}
 
 {% if coverage.skipped_items -%}
 ### Skipped coverage
@@ -75,7 +73,7 @@ No routes mapped.
 | Item | Class | Reason | Recommended next task |
 |------|-------|--------|-----------------------|
 {% for gap in coverage.skipped_items -%}
-{% set gap_item = gap.attack_surface_item_id or "-" -%}
+{% set gap_item = gap.scope_unit_id or "-" -%}
 {% set gap_class = gap.vuln_class.value if gap.vuln_class else "-" -%}
 {% set gap_next = gap.recommended_next_task or "-" -%}
 | {{ gap_item }} | {{ gap_class }} | {{ gap.reason }} | {{ gap_next }} |
@@ -151,6 +149,13 @@ Full coverage: no items were skipped.
 - Component: `{{ finding.affected_component or "unknown" }}`
 {% if finding.cross_vendor_disagreement -%}
 - Note: cross-vendor disagreement (credibility signal)
+{% endif -%}
+{% if finding.credibility -%}
+- Ensemble credibility: `{{ finding.credibility.value }}`
+{% for judgement in finding.ensemble -%}
+  - {{ judgement.tier }} ({{ judgement.provider }}/{{ judgement.model }}):
+    verdict `{{ judgement.verdict }}` — invocation `{{ judgement.model_invocation_id }}`
+{% endfor -%}
 {% endif %}
 {{ finding.hypothesis }}
 
@@ -166,7 +171,13 @@ Full coverage: no items were skipped.
 - Confidence: `{{ finding.confidence.value }}`
 - Status: `{{ finding.status.value }}`
 - Component: `{{ finding.affected_component or "unknown" }}`
-
+{% if finding.credibility -%}
+- Ensemble credibility: `{{ finding.credibility.value }}`
+{% for judgement in finding.ensemble -%}
+  - {{ judgement.tier }} ({{ judgement.provider }}/{{ judgement.model }}):
+    verdict `{{ judgement.verdict }}` — invocation `{{ judgement.model_invocation_id }}`
+{% endfor -%}
+{% endif %}
 {{ finding.hypothesis }}
 
 {% else -%}
@@ -207,7 +218,6 @@ def render_markdown_report_activity(
             scan_json=scan_json,
             findings_json=findings_json,
             snapshot_json=input.get("snapshot_json"),
-            attack_surface_json=input.get("attack_surface_json"),
             final_findings_json=input.get("final_findings_json"),
             report_path=input.get("report_path"),
             coverage_json=input.get("coverage_json"),
@@ -222,25 +232,25 @@ def render_markdown_report(
     scan: Scan,
     findings: list[CandidateFinding],
     snapshot: RepositorySnapshot | None = None,
-    attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
     needs_proof_findings: list[CandidateFinding] | None = None,
+    coverage_stop_reason: str | None = None,
 ) -> str:
     return _render_markdown_report_impl(
         scan,
         findings,
         snapshot,
-        attack_surface,
         final_findings,
         coverage,
         proof_artifacts,
         manifest,
         model_invocations,
         needs_proof_findings,
+        coverage_stop_reason,
     )
 
 
@@ -250,11 +260,6 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
     snapshot = (
         RepositorySnapshot.model_validate_json(input.snapshot_json)
         if input.snapshot_json is not None
-        else None
-    )
-    attack_surface = (
-        _attack_surface_from_json(input.attack_surface_json)
-        if input.attack_surface_json is not None
         else None
     )
     final_findings = (
@@ -291,13 +296,13 @@ def _render_markdown_report_from_input(input: RenderReportInput) -> RenderReport
         scan,
         findings,
         snapshot,
-        attack_surface,
         final_findings,
         coverage,
         proof_artifacts,
         manifest,
         model_invocations,
         needs_proof_findings,
+        input.coverage_stop_reason,
     )
     if input.report_path is None:
         raise TypeError("report_path is required for Temporal report rendering")
@@ -316,13 +321,13 @@ def _render_markdown_report_impl(
     scan: Scan,
     findings: list[CandidateFinding],
     snapshot: RepositorySnapshot | None = None,
-    attack_surface: list[AttackSurfaceItem] | None = None,
     final_findings: list[FinalFinding] | None = None,
     coverage: CoverageLedger | None = None,
     proof_artifacts: list[ProofArtifact] | None = None,
     manifest: ScanManifest | None = None,
     model_invocations: list[ModelInvocation] | None = None,
     needs_proof_findings: list[CandidateFinding] | None = None,
+    coverage_stop_reason: str | None = None,
 ) -> str:
     np_findings = needs_proof_findings or []
     summary = (
@@ -336,13 +341,13 @@ def _render_markdown_report_impl(
         findings=findings,
         summary=summary,
         snapshot=snapshot,
-        attack_surface=attack_surface or [],
         final_findings=final_findings or [],
         needs_proof_findings=np_findings,
         coverage=coverage,
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
         manifest=manifest,
         cost=cost,
+        coverage_stop_reason=coverage_stop_reason,
     )
 
 
@@ -425,10 +430,6 @@ def _proofs_by_finding(proof_artifacts: list[ProofArtifact]) -> dict[str, list[P
 
 def _candidate_findings_from_json(payload: str) -> list[CandidateFinding]:
     return [CandidateFinding.model_validate(item) for item in json.loads(payload)]
-
-
-def _attack_surface_from_json(payload: str) -> list[AttackSurfaceItem]:
-    return [AttackSurfaceItem.model_validate(item) for item in json.loads(payload)]
 
 
 def _final_findings_from_json(payload: str) -> list[FinalFinding]:

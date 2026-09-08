@@ -575,15 +575,25 @@ def provenance_verify(
         str | None,
         typer.Option("--user-hash", help="Expected SHA-256 of the user prompt."),
     ] = None,
+    prompt_store: Annotated[
+        Path | None,
+        typer.Option(
+            "--prompt-store",
+            help="Local artifact-store root. When set and the invocation has a "
+            "prompt_ref, the stored prompt bytes are re-hashed against the record.",
+        ),
+    ] = None,
 ) -> None:
     """Verify prompt-provenance hashes for a stored ModelInvocation.
 
     Reads the invocation from INVOCATION_FILE (a JSON file produced by a scan),
     then checks that the stored per-part hashes match the provided expected
-    values.  Exits 0 on success, 1 on mismatch or missing file.
+    values.  With --prompt-store, if the invocation links a stored MODEL_PROMPT
+    artifact, its bytes are re-hashed and checked against the record too.
+    Exits 0 on success, 1 on mismatch or missing file.
     """
     from quarry.schemas import ModelInvocation
-    from quarry_cli.provenance import verify_invocation
+    from quarry_cli.provenance import verify_invocation, verify_stored_prompt
 
     if not invocation_file.exists():
         typer.echo(f"Error: file not found: {invocation_file}", err=True)
@@ -601,6 +611,17 @@ def provenance_verify(
         expected_template_sha256=template_sha,
         expected_user_prompt_hash=user_hash,
     )
+
+    if ok and prompt_store is not None:
+        from quarry_artifacts.local import LocalArtifactStore
+
+        stored_ok = verify_stored_prompt(inv, LocalArtifactStore(prompt_store))
+        if stored_ok is False:
+            typer.echo(f"FAIL  {inv.id}  stored prompt bytes do not match record", err=True)
+            raise typer.Exit(code=1)
+        if stored_ok is True:
+            typer.echo(f"OK  {inv.id}  stored prompt bytes match record")
+
     if ok:
         typer.echo(f"OK  {inv.id}  hashes match")
     else:

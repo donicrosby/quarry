@@ -22,12 +22,15 @@ class TestHttpToolRegistration:
         registry = load_registry()
         assert "http_request" in registry, "http_request tool must be in the registry"
 
-    def test_allowed_roles_are_dynamic_validate_and_prove(self) -> None:
+    def test_allowed_roles_are_the_live_and_proof_roles(self) -> None:
         registry = load_registry()
         tool = registry["http_request"]
         roles = set(tool.roles)
-        assert roles == {"dynamic_validate", "prove"}, (
-            f"http_request must be restricted to dynamic_validate and prove only; got {roles}"
+        # http_request is restricted to the roles that perform live egress: dynamic
+        # validation, proof, live recon, and exploitation. It is never exposed to the
+        # code-centric roles (recon/hunt/validate/gapfill/dedup/tracer).
+        assert roles == {"dynamic_validate", "prove", "live_recon", "exploit"}, (
+            f"http_request must be restricted to the live/proof roles only; got {roles}"
         )
 
     def test_not_registered_for_recon(self) -> None:

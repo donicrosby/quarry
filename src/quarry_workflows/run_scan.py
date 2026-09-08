@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -19,6 +19,7 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
 from quarry.schemas import (
     AgentTask,
@@ -28,6 +29,8 @@ from quarry.schemas import (
     CallGraph,
     CandidateFinding,
     DynamicEvidenceLink,
+    ExploitChain,
+    ExploitStep,
     FinalFinding,
     FindingStatus,
     HttpRequestSpec,
@@ -37,6 +40,7 @@ from quarry.schemas import (
     IntegrationStatus,
     ModelPanelEntry,
     ProofArtifact,
+    ReachabilityVerdict,
     RedactionStatus,
     Report,
     RepositorySnapshot,
@@ -48,7 +52,9 @@ from quarry.schemas import (
     Severity,
     SourceRef,
     SubsystemAssignment,
+    SuccessCheck,
     Target,
+    TargetAuthorization,
     TargetEndpoint,
     Trace,
     VulnerabilityClass,
@@ -80,12 +86,27 @@ from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
 from quarry_persistence import QuarryRepository
+from quarry_workflows.coverage_loop import (
+    build_feedback_tasks,
+    cell_key,
+    dedup_new_tasks,
+    loop_stop_reason,
+)
+from quarry_workflows.exploitation_loop import (
+    evaluate_exploit_success,
+    exploit_chain_to_candidate,
+)
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
     filter_needs_proof,
+    prioritize_by_live_verdict,
     prove_outcome_from_captures,
 )
-from quarry_workflows.tracer_stage import apply_trace_severity_reranking
+from quarry_workflows.roe import authorization_active, request_in_scope
+from quarry_workflows.tracer_stage import (
+    apply_trace_severity_reranking,
+    sync_final_finding_trace,
+)
 
 # Default orchestration retry policy (overridden per-run from RunScanInput at the
 # start of the workflow). State-persistence writes keep their own fixed policy.
@@ -113,6 +134,18 @@ COMPLETED_STAGE_ORDER = {
     "INTEGRATING": 12,
     "COMPLETED": 13,
 }
+
+
+class _RoundOutcome(NamedTuple):
+    """Result of one ADR-022 iterative-coverage-loop round.
+
+    ``reachable_traces`` and ``call_graph`` are only populated when the round
+    actually ran the TRACER stage against at least one pending finding; they
+    feed the caller's reachability-feedback edge (build_feedback_tasks).
+    """
+
+    reachable_traces: list[Trace]
+    call_graph: CallGraph | None
 
 
 def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
@@ -150,6 +183,15 @@ class RunScanInput(BaseModel):
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40
     dedup_max_iterations: int = 8
+    # Cap on iterative-coverage-loop rounds (ADR-022). Default 3; the loop
+    # halts sooner on convergence (no new gapfill/feedback tasks) or budget
+    # exhaustion. See coverage_loop.should_continue.
+    max_coverage_rounds: int = 3
+    # Rising-bar early stop: minimum fraction of cumulative findings a round must
+    # add to justify the next one. 0.0 disables the rule. Default 0.0 here (not
+    # 0.15) so direct/test construction keeps the historical behaviour; the API
+    # layer passes the configured quarry.toml value.
+    coverage_yield_threshold: float = 0.0
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -165,12 +207,22 @@ class RunScanInput(BaseModel):
     dynamic_validation_enabled: bool = False
     # When True, also probe confirmed findings with live HTTP to collect proof artifacts.
     live_prove_enabled: bool = False
+    # Live-exploitation track (ADR-017 + live-exploitation-loop). When True AND a target
+    # is resolved AND a live authorization is present, the app-centric exploitation loop
+    # (live recon → stateful propose→dispatch chain) runs and feeds live-PROVEN findings
+    # into the candidate set as first-class candidates (design D1). Fail-closed: a CLI
+    # flag is the sole authority; target_url presence alone must never flip this.
+    live_exploit_enabled: bool = False
     # When True, run the agentic PROVE stage after AGENTIC_VALIDATE (ADR-017 §5/§7).
     proof_enabled: bool = False
     # Hosts the dynamic worker may contact; empty tuple = all hosts blocked.
     allowed_hosts: tuple[str, ...] = ()
     # AuthProfileSet serialized as JSON; None = unauthenticated scans only.
     auth_profiles_json: str | None = None
+    # TargetAuthorization serialized as JSON; None = no live authorization. Required
+    # (and enforced fail-closed) for the live-exploitation track — the rules of
+    # engagement (authorized_by / allowed_hosts / do_not_test) live here (design D4).
+    authorization_json: str | None = None
     # Primary language drives TRACER backend selection: "python" uses AST-grep;
     # any other value routes to the SCIP backend when the indexer is on PATH.
     target_language: str = "python"
@@ -307,6 +359,10 @@ class RunScanWorkflow:
                     "origin_commit_sha": origin_commit_sha or "",
                     "current_stage": "CREATED",
                     "target_language": scan_input.target_language,
+                    # ADR-022: the TUI round counter reads these two keys via
+                    # GET /scans/{id}; coverage_round_index is updated every
+                    # round (see the loop in _run()).
+                    "max_coverage_rounds": scan_input.max_coverage_rounds,
                 },
             )
             await _persist_scan_state(
@@ -429,6 +485,7 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan_input.recon_max_iterations,
                             scan_input.scan_seed,
+                            artifact_root,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -507,22 +564,614 @@ class RunScanWorkflow:
                 {"task_count": str(len(agent_tasks))},
             )
 
-        # ── HUNT stage ───────────────────────────────────────────────────────
-        # Focus + exclusion drops happen here in workflow code (deterministic).
+        # ── Iterative coverage loop (ADR-022) ───────────────────────────────
+        # Each round runs HUNT -> AGENTIC_VALIDATE -> DEDUP -> (PROVE) -> TRACER
+        # against that round's tasks (see self._run_round); two feedback edges —
+        # coverage-driven gapfill (emission only) and trace-driven reachability
+        # feedback — decide the next round's tasks. The loop halts on
+        # convergence (no new tasks), the configured max_coverage_rounds cap,
+        # or budget exhaustion. round_index==0 hunts the recon-derived tasks;
+        # completed_stage-based resume only applies to round 0 — resuming a
+        # partially-run loop (round_index > 0) is not supported (see
+        # openspec/changes/iterative-coverage-loop/design.md Non-Goals).
         candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
-        # Retained pending proof — verdict was needs_proof or inconclusive.
-        # This is the carry-forward set for the future prove stage:
-        #   prove_stage(findings) should filter to status == NEEDS_PROOF.
         needs_proof_findings: list[CandidateFinding] = []
         proof_artifacts: list[ProofArtifact] = []
-        # Coverage gaps the hunters self-reported (areas they didn't fully cover);
-        # gapfill turns these into a targeted re-hunt round.
         hunter_gaps: list[dict[str, Any]] = []
-        # Hoist panel JSON before the HUNT conditional so that the gapfill
-        # re-hunt closure (which runs outside the HUNT else-branch) always has a
-        # valid binding regardless of whether HUNT was a fresh run or a resume.
+        traced_finding_ids: set[str] = set()
+        all_agent_tasks: list[AgentTask] = list(agent_tasks)
+        hunted_cells: set[tuple[str | None, str | None, str]] = set()
+        # Hoist panel JSON so every round's hunt fan-out (recon-derived tasks
+        # in round 0, gapfill/feedback tasks thereafter) shares one binding.
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
+
+        # ── Live-exploitation track (Shannon pillar; design D1) ──────────────
+        # When live exploitation is authorized, the app-centric loop (live recon →
+        # stateful propose→dispatch exploit chain) runs against the target and feeds
+        # live-PROVEN findings into candidate_findings as first-class candidates, so
+        # they flow through the same DEDUP/PROVE/TRACER/report path as code-hunted
+        # ones. Fail-closed and best-effort: it requires a fresh ArchitectureDoc (so
+        # it is skipped on a post-RECON resume) and never blocks the code pipeline.
+        if arch_doc is not None:
+            await self._run_live_exploitation(
+                scan_input, scan, repo_path, artifact_root, arch_doc, candidate_findings
+            )
+
+        round_tasks: list[AgentTask] = agent_tasks
+        # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
+        # "round_cap". Stays None only if the loop body never ran (no tasks).
+        loop_stop_reason_final: str | None = None
+        for round_index in range(scan_input.max_coverage_rounds):
+            round_completed_stage = completed_stage if round_index == 0 else None
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "round.started",
+                {"round_index": str(round_index), "task_count": str(len(round_tasks))},
+            )
+            await _persist_scan_state(
+                scan_input.db_path,
+                "update_scan_metadata",
+                {"scan_id": scan.id, "metadata": {"coverage_round_index": round_index}},
+            )
+
+            # Distinct-finding count before the round; the delta after DEDUP is this
+            # round's new-finding yield (see the rising-bar stop check below).
+            findings_before_round = len(candidate_findings)
+
+            round_outcome = await self._run_round(
+                scan_input,
+                scan,
+                repo_path,
+                artifact_root,
+                hunt_panel_json,
+                round_index,
+                round_tasks,
+                round_completed_stage,
+                candidate_findings,
+                final_findings,
+                needs_proof_findings,
+                proof_artifacts,
+                hunter_gaps,
+                traced_finding_ids,
+            )
+
+            hunted_cells.update(cell_key(t) for t in round_tasks)
+
+            # ── Gapfill edge (coverage-driven, emission only) ───────────────
+            # The re-hunt happens next round via the bounded loop below, so
+            # gapfill-discovered findings pass through AGENTIC_VALIDATE like
+            # any other round's candidates (ADR-022).
+            gf_spent = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
+            )
+            gf_over_budget, gf_budget_remaining = budget_decision(scan.budget_cap_usd, gf_spent)
+            gapfill_tasks: list[AgentTask] = []
+            if gf_over_budget:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "stage.budget_exceeded",
+                    {"stage": "GAPFILL", "cap": str(scan.budget_cap_usd)},
+                )
+            else:
+                self._current_stage = "GAPFILL"
+                focused_classes = [vc.value for vc in scan.profile.vuln_classes]
+
+                # Build a minimal coverage ledger for the gapfill stage.
+                # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
+                ledger = build_coverage_ledger(
+                    scan_id=scan.id,
+                    workspace_id="local",
+                    requested_vuln_classes=scan.profile.vuln_classes,
+                    completed_vuln_classes=[],
+                    agent_tasks_total=len(all_agent_tasks),
+                    agent_tasks_scanned=len(all_agent_tasks),
+                    skipped_items=[],
+                    id=str(workflow.uuid4()),
+                    created_at=workflow.now(),
+                )
+
+                gapfill_panel_json = panel_json_for_role(scan, "gapfill")
+                # Compact summary of findings discovered so far, so gapfill avoids
+                # re-hunting (and re-reporting) vectors that are already covered.
+                existing_findings_summary = [
+                    {
+                        "vuln_class": f.vuln_class.value,
+                        "title": f.title,
+                        "affected_component": f.affected_component or "",
+                        "root_cause_key": f.root_cause_key or "",
+                    }
+                    for f in candidate_findings
+                ]
+                # Gapfill is optional: if it fails, the scan keeps its findings
+                # so far rather than dying.
+                gapfill_result: list[Any] = []
+                try:
+                    gapfill_result = cast(
+                        list[Any],
+                        await workflow.execute_activity(
+                            "gapfill-coverage",
+                            args=[
+                                ledger.model_dump(mode="json"),
+                                [t.model_dump(mode="json") for t in all_agent_tasks],
+                                focused_classes,
+                                repo_path,
+                                gf_budget_remaining,
+                                gapfill_panel_json,
+                                hunter_gaps,
+                                scan_input.db_path,
+                                existing_findings_summary,
+                                scan_input.gapfill_max_iterations,
+                                scan_input.scan_seed,
+                                artifact_root,
+                            ],
+                            start_to_close_timeout=timedelta(hours=4),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=self._retry_policy,
+                        ),
+                    )
+                except Exception as exc:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "gapfill.failed",
+                        {"error": _describe_failure(exc)},
+                    )
+                    gapfill_result = []
+
+                for task_dict in cast(list[dict[str, Any]], gapfill_result):
+                    gapfill_tasks.append(AgentTask.model_validate(task_dict))
+
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "gapfill.completed",
+                {"gapfill_task_count": str(len(gapfill_tasks))},
+            )
+
+            # ── Reachability-feedback edge (trace-driven) ────────────────────
+            feedback_tasks: list[AgentTask] = []
+            if round_outcome.reachable_traces and round_outcome.call_graph is not None:
+                feedback_tasks = build_feedback_tasks(
+                    scan_id=scan.id,
+                    traces=round_outcome.reachable_traces,
+                    call_graph=round_outcome.call_graph,
+                    findings=candidate_findings,
+                    now=workflow.now(),
+                )
+
+            next_tasks_raw = [
+                t.model_copy(update={"round_index": round_index + 1})
+                for t in (*gapfill_tasks, *feedback_tasks)
+            ]
+            next_tasks = dedup_new_tasks(next_tasks_raw, hunted_cells)
+            all_agent_tasks.extend(next_tasks)
+
+            spent_after_round = (
+                await _scan_cost_so_far(scan_input.db_path, scan.id)
+                if scan.budget_cap_usd is not None
+                else 0.0
+            )
+            over_budget_after_round, _ = budget_decision(scan.budget_cap_usd, spent_after_round)
+
+            # Rising-bar early stop: DEDUP has already run inside _run_round over the
+            # full accumulated candidate set and replaced ``candidate_findings`` in
+            # place, so the delta across the round is this round's count of new
+            # *distinct* findings. Clamped at 0 — a round that only merged existing
+            # clusters added nothing new.
+            new_finding_count = max(0, len(candidate_findings) - findings_before_round)
+
+            stop_reason = loop_stop_reason(
+                round_index,
+                scan_input.max_coverage_rounds,
+                len(next_tasks),
+                over_budget_after_round,
+                new_finding_count=new_finding_count,
+                cumulative_findings=findings_before_round,
+                coverage_yield_threshold=scan_input.coverage_yield_threshold,
+            )
+
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "round.completed",
+                {
+                    "round_index": str(round_index),
+                    "new_task_count": str(len(next_tasks)),
+                    "new_finding_count": str(new_finding_count),
+                    "stop_reason": stop_reason or "",
+                },
+            )
+
+            if stop_reason is not None:
+                loop_stop_reason_final = stop_reason
+                break
+            round_tasks = next_tasks
+
+        # COVERAGE/REPORT report over every task hunted across all rounds.
+        agent_tasks = all_agent_tasks
+
+        self._current_stage = "COVERAGE"
+        coverage_ledger_json = await self._record_coverage(
+            scan_input,
+            scan,
+            agent_tasks,
+            final_findings,
+            artifact_root,
+        )
+
+        self._current_stage = "REPORT"
+        reporting_scan = scan.model_copy(
+            update={"status": ScanStatus.COMPLETED, "started_at": started_at}
+        )
+        model_invocations_json = await _load_model_invocations_json(scan_input.db_path, scan.id)
+        rendered_report_payload = await workflow.execute_activity(
+            "render-markdown-report",
+            RenderReportInput(
+                scan_json=reporting_scan.model_dump_json(),
+                findings_json=_model_list_json(candidate_findings),
+                snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
+                final_findings_json=_model_list_json(final_findings),
+                report_path=report_path,
+                coverage_json=coverage_ledger_json,
+                proof_artifacts_json=(
+                    _model_list_json(proof_artifacts) if proof_artifacts else None
+                ),
+                manifest_json=scan_manifest.model_dump_json(),
+                model_invocations_json=model_invocations_json,
+                needs_proof_findings_json=(
+                    _model_list_json(needs_proof_findings) if needs_proof_findings else None
+                ),
+                coverage_stop_reason=loop_stop_reason_final,
+            ),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=self._retry_policy,
+        )
+        rendered_report = _render_report_output_from_activity(rendered_report_payload)
+
+        report_ref = ArtifactRef.model_validate_json(rendered_report.report_ref_json)
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_artifact_ref",
+            {"scan_id": scan.id, "artifact_ref": _model_json_dict(report_ref)},
+        )
+        report = Report(
+            id=str(workflow.uuid4()),
+            scan_id=scan.id,
+            workspace_id="local",
+            title="Quarry Scan Report",
+            summary=f"Scan found {len(final_findings)} validated finding(s) "
+            f"and {len(candidate_findings)} candidate finding(s).",
+            finding_ids=[f.id for f in final_findings],
+            formats=["markdown"],
+            artifact_refs=[report_ref],
+            generated_at=workflow.now(),
+        )
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_report",
+            {"report": _model_json_dict(report), "report_path": rendered_report.report_path},
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "report.generated",
+            {"report_path": rendered_report.report_path},
+        )
+        await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
+
+        if scan.profile.integrations_enabled and not _stage_completed(
+            completed_stage, "INTEGRATING"
+        ):
+            self._current_stage = "INTEGRATING"
+            await self._deliver_integrations(scan_input, scan, final_findings, artifact_root)
+            await _persist_scan_stage(scan_input.db_path, scan.id, "INTEGRATING")
+
+        self._current_stage = "COMPLETED"
+        await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
+        completed_at = workflow.now()
+        await _persist_scan_state(
+            scan_input.db_path,
+            "update_scan_status",
+            {
+                "scan_id": scan.id,
+                "status": ScanStatus.COMPLETED.value,
+                "started_at": None,
+                "completed_at": completed_at.isoformat(),
+                "report_path": rendered_report.report_path,
+            },
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "scan.completed",
+            {"report_path": rendered_report.report_path},
+        )
+        return RunScanResult(
+            scan_id=scan.id,
+            report_path=rendered_report.report_path,
+            candidate_finding_count=len(candidate_findings),
+            final_finding_count=len(final_findings),
+        )
+
+    async def _run_live_exploitation(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        arch_doc: ArchitectureDoc,
+        candidate_findings: list[CandidateFinding],
+    ) -> None:
+        """Live-exploitation track (Shannon pillar; design D1/D3/D4).
+
+        Fail-closed: runs only when ``live_exploit_enabled`` AND a target AND an active
+        ``TargetAuthorization`` are all present. Runs live recon to build an attack map,
+        then for each vuln class drives a stateful propose→dispatch exploit chain — the
+        ``exploit-turn`` activity PROPOSES one request per turn (no socket I/O) and the
+        workflow performs the single allow-listed egress via the ``http-request``
+        activity, confirming each step IN CODE (``evaluate_exploit_success``) and
+        threading session cookies across turns. A PROVEN chain becomes a first-class
+        ``CandidateFinding`` carrying the ordered chain as its proof (task 6.2); unproven
+        chains yield nothing ("prove by doing"). Every step is provenance-tracked: each
+        propose records a model invocation, each dispatch records request/response
+        artifacts. Best-effort — any activity failure is logged and never aborts the scan.
+        """
+        authorization = (
+            TargetAuthorization.model_validate_json(scan_input.authorization_json)
+            if scan_input.authorization_json
+            else None
+        )
+        if not live_exploitation_active(
+            enabled=scan_input.live_exploit_enabled,
+            target_url=scan_input.target_url,
+            authorization=authorization,
+        ):
+            return
+        # The gate guarantees both are set; assert for the type-checker.
+        assert authorization is not None
+        assert scan_input.target_url is not None
+
+        target_ep = build_target_endpoint_from_url(scan_input.target_url)
+        allowed_hosts: tuple[str, ...] = scan_input.allowed_hosts or (
+            target_ep.host,
+            "127.0.0.1",
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "live_exploit.started",
+            {"target": scan_input.target_url},
+        )
+
+        # Step 1: live recon → attack map (agent proposes; no socket I/O in the loop).
+        try:
+            recon_raw = await workflow.execute_activity(
+                "live-recon",
+                args=[
+                    arch_doc.model_dump(mode="json"),
+                    repo_path,
+                    True,  # authorized — the fail-closed gate above already enforced it
+                    panel_json_for_role(scan, "live_recon"),
+                    scan_input.budget_cap_usd,
+                    scan_input.db_path,
+                    scan_input.validate_max_iterations,
+                    scan_input.scan_seed,
+                    scan.id,
+                    scan_input.target_url,
+                    allowed_hosts,
+                    artifact_root,
+                ],
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+        except Exception as exc:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "live_exploit.failed",
+                {"stage": "live_recon", "error": _describe_failure(exc)},
+            )
+            return
+        attack_map: list[Any] = (
+            cast("list[Any]", recon_raw.get("attack_map") or [])
+            if isinstance(recon_raw, dict)
+            else []
+        )
+        exploit_panel_json = panel_json_for_role(scan, "exploit")
+
+        # Step 2: per vuln class, drive a stateful propose→dispatch exploit chain.
+        for vuln_class in scan.profile.vuln_classes:
+            steps: list[ExploitStep] = []
+            session_cookies: dict[str, str] = {}
+            for _turn in range(scan_input.validate_max_iterations):
+                prior_steps = [s.model_dump(mode="json") for s in steps]
+                session_summary = "cookies set" if session_cookies else "(no session state yet)"
+                try:
+                    turn_raw = await workflow.execute_activity(
+                        "exploit-turn",
+                        args=[
+                            vuln_class.value,
+                            repo_path,
+                            True,  # authorized — enforced by the gate above
+                            session_summary,
+                            prior_steps,
+                            attack_map,
+                            exploit_panel_json,
+                            scan_input.budget_cap_usd,
+                            scan_input.db_path,
+                            scan_input.validate_max_iterations,
+                            scan_input.scan_seed,
+                            scan.id,
+                            scan_input.target_url,
+                            allowed_hosts,
+                            artifact_root,
+                        ],
+                        start_to_close_timeout=timedelta(hours=1),
+                        heartbeat_timeout=timedelta(minutes=3),
+                        retry_policy=self._retry_policy,
+                    )
+                except Exception as exc:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "live_exploit.failed",
+                        {"stage": "exploit_turn", "error": _describe_failure(exc)},
+                    )
+                    break
+                if not isinstance(turn_raw, dict):
+                    break
+                turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
+                if turn.get("done") or not turn.get("proposed_http_spec"):
+                    break
+
+                spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
+                intent = str(turn.get("intent") or "exploit")
+                raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
+                headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
+                if session_cookies:
+                    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
+                spec = HttpRequestSpec(
+                    method=spec_dict.get("method", "GET"),
+                    path=str(spec_dict.get("path", "/")),
+                    headers=headers,
+                    body=spec_dict.get("body"),
+                    auth_profile=spec_dict.get("auth_profile"),
+                )
+
+                # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
+                if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
+                    steps.append(
+                        ExploitStep(
+                            order=len(steps),
+                            intent=intent,
+                            request_spec=spec,
+                            dispatched=False,
+                            confirmed=False,
+                            notes="refused: outside rules of engagement",
+                        )
+                    )
+                    continue
+
+                inp = HttpRequestActivityInput(
+                    spec_json=spec.model_dump_json(),
+                    target_endpoint_json=target_ep.model_dump_json(),
+                    allowed_hosts=allowed_hosts,
+                    artifact_store_path=artifact_root,
+                    scan_id=scan.id,
+                    candidate_finding_id=f"live-exploit-{vuln_class.value}",
+                    auth_profile_set_json=scan_input.auth_profiles_json,
+                )
+                try:
+                    capture_raw = await workflow.execute_activity(
+                        "http-request",
+                        args=[inp],
+                        start_to_close_timeout=timedelta(minutes=2),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    capture = HttpResponseCapture.model_validate(capture_raw)
+                except Exception:
+                    # A failed dispatch ends this class's chain; other classes continue.
+                    break
+
+                success_raw = turn.get("success")
+                check = SuccessCheck.model_validate(success_raw) if success_raw else None
+                confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
+
+                # Thread any Set-Cookie into the carried session for later turns (D2).
+                set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
+                if set_cookie:
+                    pair = set_cookie.split(";", 1)[0]
+                    if "=" in pair:
+                        name, value = pair.split("=", 1)
+                        session_cookies[name] = value
+
+                steps.append(
+                    ExploitStep(
+                        order=len(steps),
+                        intent=intent,
+                        request_spec=spec,
+                        request_artifact_id=capture.request_artifact_ref,
+                        response_artifact_id=capture.body_artifact_ref,
+                        status_code=capture.status_code,
+                        confirmed=confirmed,
+                        notes=str(turn.get("reasoning") or ""),
+                    )
+                )
+                if confirmed:
+                    break  # we have our proof
+
+            chain = ExploitChain(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id,
+                vuln_class=vuln_class,
+                steps=steps,
+                proven=any(s.confirmed for s in steps),
+                summary=f"live exploitation chain for {vuln_class.value}",
+            )
+            candidate = exploit_chain_to_candidate(
+                chain,
+                finding_id=str(workflow.uuid4()),
+                title=f"Live-proven {vuln_class.value} via chained exploitation",
+                hypothesis="Confirmed against the running target by a chained live exploit.",
+                created_by="exploit-agent",
+                created_at=workflow.now(),
+            )
+            if candidate is not None:
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.proven",
+                    {
+                        "finding_id": candidate.id,
+                        "vuln_class": vuln_class.value,
+                        "step_count": str(len(chain.steps)),
+                    },
+                )
+
+    async def _run_round(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        hunt_panel_json: str | None,
+        round_index: int,
+        round_tasks: list[AgentTask],
+        completed_stage: str | None,
+        candidate_findings: list[CandidateFinding],
+        final_findings: list[FinalFinding],
+        needs_proof_findings: list[CandidateFinding],
+        proof_artifacts: list[ProofArtifact],
+        hunter_gaps: list[dict[str, Any]],
+        traced_finding_ids: set[str],
+    ) -> _RoundOutcome:
+        """Run one ADR-022 round: hunt -> validate -> dedup -> (prove) -> trace.
+
+        Mutates candidate_findings / final_findings / needs_proof_findings /
+        proof_artifacts / hunter_gaps / traced_finding_ids in place, matching
+        the accumulator convention used throughout ``_run``. *completed_stage*
+        is the resume marker for round 0 only — callers pass None for every
+        later round, so every stage below always runs on round_index > 0.
+        Returns this round's newly reachable Traces and the CallGraph used to
+        find them, so the caller can build the reachability-feedback edge.
+        """
+        hunt_new_start = len(candidate_findings)
+        needs_proof_new_start = len(needs_proof_findings)
+
+        # ── HUNT stage ───────────────────────────────────────────────────────
+        # Focus + exclusion drops happen here in workflow code (deterministic).
         hunt_spent = (
             await _scan_cost_so_far(scan_input.db_path, scan.id)
             if scan.budget_cap_usd is not None
@@ -530,8 +1179,12 @@ class RunScanWorkflow:
         )
         hunt_over_budget, hunt_budget_remaining = budget_decision(scan.budget_cap_usd, hunt_spent)
         if _stage_completed(completed_stage, "HUNT"):
-            candidate_findings = await _load_candidate_findings(scan_input.db_path, scan.id)
-            final_findings = await _load_final_findings(scan_input.db_path, scan.id)
+            loaded_candidates = await _load_candidate_findings(scan_input.db_path, scan.id)
+            loaded_finals = await _load_final_findings(scan_input.db_path, scan.id)
+            candidate_findings.clear()
+            candidate_findings.extend(loaded_candidates)
+            final_findings.clear()
+            final_findings.extend(loaded_finals)
         elif hunt_over_budget:
             # Budget already exhausted before this stage: skip hunting, mark the
             # stage budget-overrun, and let the scan continue to the next stage.
@@ -548,7 +1201,7 @@ class RunScanWorkflow:
             # Drop 1: focus guard (structural enforcement of --focus)
             focused_tasks = [
                 t
-                for t in agent_tasks
+                for t in round_tasks
                 if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
             ]
             # Drop 2: exclusion guard (always wins over focus)
@@ -581,6 +1234,7 @@ class RunScanWorkflow:
                             hunt_panel_json,
                             scan_input.db_path,
                             scan_input.scan_seed,
+                            artifact_root,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -670,7 +1324,7 @@ class RunScanWorkflow:
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
 
         # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
-        # Adversarial review of each CandidateFinding (ADR-021).
+        # Adversarial review of each CandidateFinding new this round (ADR-021).
         # Each finding is reviewed independently with the 'validate' role.
         # The validator receives only ValidatorClaim fields — no hunter provenance.
         if not _stage_completed(completed_stage, "AGENTIC_VALIDATE"):
@@ -691,7 +1345,7 @@ class RunScanWorkflow:
             validate_panel_json = panel_json_for_role(scan, "validate")
             # Candidates already promoted by the deterministic secret gate above.
             already_final = {f.id for f in final_findings}
-            for candidate in list(candidate_findings):
+            for candidate in list(candidate_findings[hunt_new_start:]):
                 if val_over_budget:
                     break  # budget exhausted: stop validating, continue the scan
                 if candidate.triage_label == "oos":
@@ -710,6 +1364,7 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan_input.validate_max_iterations,
                             scan_input.scan_seed,
+                            artifact_root,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -730,6 +1385,17 @@ class RunScanWorkflow:
                 if isinstance(validate_payload, dict):
                     payload_dict = cast("dict[str, Any]", validate_payload)
                     verdict = str(payload_dict.get("verdict", "")).lower()
+                    # Mirror the ensemble credibility posterior (design D3) onto the
+                    # candidate so it flows to whichever report section it lands in.
+                    credibility = payload_dict.get("credibility")
+                    ensemble = payload_dict.get("ensemble")
+                    if credibility is not None or ensemble:
+                        candidate = candidate.model_copy(
+                            update={
+                                "credibility": credibility,
+                                "ensemble": ensemble or [],
+                            }
+                        )
 
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
@@ -808,19 +1474,64 @@ class RunScanWorkflow:
                     # so the future prove stage can filter on status == NEEDS_PROOF.
                     retained = candidate.model_copy(update={"status": FindingStatus.NEEDS_PROOF})
 
-                    # ── Dynamic validate sub-step (ADR-017) ──────────────────
-                    # If live dynamic validation is enabled, try to corroborate
-                    # NEEDS_PROOF findings with a live HTTP probe.  A 2xx response
-                    # promotes the finding to FinalFinding with proof_artifact_ids.
-                    # Non-idempotent methods are non-retryable (single attempt only).
+                    # ── dynamic_validate stage (ADR-017, Option A) ───────────
+                    # Between AGENTIC_VALIDATE and PROVE: when live dynamic
+                    # validation is enabled AND a target is resolved, the
+                    # dynamic_validate agent (no-I/O http tool) proposes an
+                    # http_request; the WORKFLOW performs the single egress and
+                    # maps the capture to a live verdict.  A `corroborated` (2xx)
+                    # result promotes the finding to FinalFinding with
+                    # proof_artifact_ids; otherwise the finding stays NEEDS_PROOF
+                    # annotated with its live verdict so PROVE can prioritize.
+                    # Non-idempotent methods are non-retryable (single attempt).
                     dyn_promoted = False
-                    if (
+                    dyn_verdict = LIVE_INCONCLUSIVE
+                    dynamic_active = (
                         scan_input.dynamic_validation_enabled
-                        and scan_input.target_url
+                        and bool(scan_input.target_url)
                         and not val_over_budget
-                    ):
-                        probe_spec = build_dynamic_probe_spec(retained)
-                        if probe_spec is not None:
+                    )
+                    if dynamic_active:
+                        # Agent proposes → workflow dispatches.
+                        dyn_panel_json = panel_json_for_role(scan, "dynamic_validate")
+                        proposed_http_specs: list[dict[str, Any]] = []
+                        try:
+                            dyn_raw = await workflow.execute_activity(
+                                "dynamic-validate-finding",
+                                args=[
+                                    retained.model_dump(mode="json"),
+                                    repo_path,
+                                    None,
+                                    val_budget_remaining,
+                                    dyn_panel_json,
+                                    scan_input.db_path,
+                                    scan_input.validate_max_iterations,
+                                    scan_input.scan_seed,
+                                    None,
+                                    scan_input.allowed_hosts or None,
+                                    None,
+                                    artifact_root,
+                                ],
+                                start_to_close_timeout=timedelta(hours=2),
+                                heartbeat_timeout=timedelta(minutes=3),
+                                retry_policy=self._retry_policy,
+                            )
+                            if isinstance(dyn_raw, dict):
+                                dyn_payload = cast("dict[str, Any]", dyn_raw)
+                                proposed_http_specs = list(
+                                    dyn_payload.get("proposed_http_specs") or []
+                                )
+                        except Exception as exc:
+                            # Agent failure is non-fatal; fall back to the
+                            # deterministic per-class probe below.
+                            await _append_workflow_event(
+                                scan_input.db_path,
+                                scan.id,
+                                "dynamic_validate.failed",
+                                {"finding_id": candidate.id, "error": _describe_failure(exc)},
+                            )
+                        probe_spec = select_dynamic_probe_spec(proposed_http_specs, retained)
+                        if probe_spec is not None and scan_input.target_url is not None:
                             target_ep = build_target_endpoint_from_url(scan_input.target_url)
                             inp = HttpRequestActivityInput(
                                 spec_json=probe_spec.model_dump_json(),
@@ -841,35 +1552,45 @@ class RunScanWorkflow:
                                 capture = HttpResponseCapture.model_validate(
                                     capture_raw if isinstance(capture_raw, dict) else capture_raw
                                 )
-                                promotion = promote_with_dynamic_evidence(
-                                    retained, capture, scan.id, workflow.now()
-                                )
-                                if promotion is not None:
-                                    dyn_final, _dyn_link = promotion
-                                    await _persist_scan_state(
-                                        scan_input.db_path,
-                                        "save_final_finding",
-                                        {"finding": _model_json_dict(dyn_final)},
+                                dyn_verdict = live_verdict_from_status(capture.status_code)
+                                if dyn_verdict == LIVE_CORROBORATED:
+                                    promotion = promote_with_dynamic_evidence(
+                                        retained, capture, scan.id, workflow.now()
                                     )
-                                    final_findings.append(dyn_final)
-                                    await _append_workflow_event(
-                                        scan_input.db_path,
-                                        scan.id,
-                                        "finding.dynamic_validated",
-                                        {
-                                            "finding_id": dyn_final.id,
-                                            "status_code": str(capture.status_code),
-                                            "proof_artifact_count": str(
-                                                len(dyn_final.proof_artifact_ids)
-                                            ),
-                                        },
-                                    )
-                                    dyn_promoted = True
+                                    if promotion is not None:
+                                        dyn_final, _dyn_link = promotion
+                                        await _persist_scan_state(
+                                            scan_input.db_path,
+                                            "save_final_finding",
+                                            {"finding": _model_json_dict(dyn_final)},
+                                        )
+                                        final_findings.append(dyn_final)
+                                        await _append_workflow_event(
+                                            scan_input.db_path,
+                                            scan.id,
+                                            "finding.dynamic_validated",
+                                            {
+                                                "finding_id": dyn_final.id,
+                                                "status_code": str(capture.status_code),
+                                                "proof_artifact_count": str(
+                                                    len(dyn_final.proof_artifact_ids)
+                                                ),
+                                            },
+                                        )
+                                        dyn_promoted = True
                             except Exception:
-                                # Dynamic probe failure is non-fatal; finding stays NEEDS_PROOF.
+                                # Dynamic probe failure is non-fatal; stays NEEDS_PROOF.
                                 pass
 
                     if not dyn_promoted:
+                        if dynamic_active:
+                            # Annotate the live verdict so PROVE can prioritize
+                            # corroborated-but-unpromoted leads first.
+                            retained = retained.model_copy(
+                                update={
+                                    "metadata": {**retained.metadata, "live_verdict": dyn_verdict}
+                                }
+                            )
                         await _persist_scan_state(
                             scan_input.db_path,
                             "save_candidate_finding",
@@ -880,7 +1601,11 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan.id,
                             "finding.needs_proof",
-                            {"finding_id": candidate.id, "verdict": verdict},
+                            {
+                                "finding_id": candidate.id,
+                                "verdict": verdict,
+                                "live_verdict": dyn_verdict if dynamic_active else "",
+                            },
                         )
                 elif verdict == "rejected":
                     # Drop — explicitly labelled, not an implicit fallthrough.
@@ -906,152 +1631,10 @@ class RunScanWorkflow:
                 {"candidate_count": str(len(candidate_findings))},
             )
 
-        # ── GAPFILL stage ────────────────────────────────────────────────────
-        # Coverage floor enforcement + agentic gap detection (ADR-021).
-        # Gapfill tasks re-enter the hunt stage as a second pass.
-        gapfill_tasks: list[AgentTask] = []
-        gf_spent = (
-            await _scan_cost_so_far(scan_input.db_path, scan.id)
-            if scan.budget_cap_usd is not None
-            else 0.0
-        )
-        gf_over_budget, gf_budget_remaining = budget_decision(scan.budget_cap_usd, gf_spent)
-        if not _stage_completed(completed_stage, "GAPFILL"):
-            self._current_stage = "GAPFILL"
-            if gf_over_budget:
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "stage.budget_exceeded",
-                    {"stage": "GAPFILL", "cap": str(scan.budget_cap_usd)},
-                )
-            focused_classes = [vc.value for vc in scan.profile.vuln_classes]
-
-            # Build a minimal coverage ledger for the gapfill stage.
-            # Pass workflow-safe id/created_at to avoid sandbox uuid4/datetime restrictions.
-            ledger = build_coverage_ledger(
-                scan_id=scan.id,
-                workspace_id="local",
-                requested_vuln_classes=scan.profile.vuln_classes,
-                completed_vuln_classes=[],
-                attack_surface_items_total=len(agent_tasks),
-                attack_surface_items_scanned=len(agent_tasks),
-                skipped_items=[],
-                id=str(workflow.uuid4()),
-                created_at=workflow.now(),
-            )
-
-            gapfill_panel_json = panel_json_for_role(scan, "gapfill")
-            # Compact summary of findings discovered so far, so gapfill avoids
-            # re-hunting (and re-reporting) vectors that are already covered.
-            existing_findings_summary = [
-                {
-                    "vuln_class": f.vuln_class.value,
-                    "title": f.title,
-                    "affected_component": f.affected_component or "",
-                    "root_cause_key": f.root_cause_key or "",
-                }
-                for f in candidate_findings
-            ]
-            # Gapfill is optional: if it fails, the scan keeps its first-pass
-            # findings rather than dying.
-            gapfill_result: list[Any] = []
-            try:
-                gapfill_result = cast(
-                    list[Any],
-                    await workflow.execute_activity(
-                        "gapfill-coverage",
-                        args=[
-                            ledger.model_dump(mode="json"),
-                            [t.model_dump(mode="json") for t in agent_tasks],
-                            focused_classes,
-                            repo_path,
-                            gf_budget_remaining,
-                            gapfill_panel_json,
-                            hunter_gaps,
-                            scan_input.db_path,
-                            existing_findings_summary,
-                            scan_input.gapfill_max_iterations,
-                            scan_input.scan_seed,
-                        ],
-                        start_to_close_timeout=timedelta(hours=4),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
-                    ),
-                )
-            except Exception as exc:
-                await _append_workflow_event(
-                    scan_input.db_path,
-                    scan.id,
-                    "gapfill.failed",
-                    {"error": _describe_failure(exc)},
-                )
-                gapfill_result = []
-
-            for task_dict in cast(list[dict[str, Any]], gapfill_result):
-                task = AgentTask.model_validate(task_dict)
-                gapfill_tasks.append(task)
-
-            # Gapfill tasks re-enter the hunt stage (second pass)
-            if gapfill_tasks:
-                runnable_gapfill = [
-                    t
-                    for t in gapfill_tasks
-                    if t.vuln_class is not None and t.vuln_class in scan.profile.vuln_classes
-                ]
-                max_concurrent = scan_input.hunt_max_concurrent
-                semaphore_gf = asyncio.Semaphore(max_concurrent)
-
-                async def _run_one_gapfill_hunt(task: AgentTask) -> list[dict[str, Any]]:
-                    async with semaphore_gf:
-                        return cast(
-                            list[dict[str, Any]],
-                            await workflow.execute_activity(
-                                "hunt-vuln-class",
-                                args=[
-                                    task,
-                                    repo_path,
-                                    scan_input.hunt_max_iterations,
-                                    gf_budget_remaining,
-                                    hunt_panel_json,
-                                    scan_input.db_path,
-                                    scan_input.scan_seed,
-                                ],
-                                start_to_close_timeout=timedelta(hours=4),
-                                heartbeat_timeout=timedelta(minutes=3),
-                                retry_policy=self._retry_policy,
-                            ),
-                        )
-
-                gapfill_hunt_results = await asyncio.gather(
-                    *[_run_one_gapfill_hunt(t) for t in runnable_gapfill],
-                    return_exceptions=True,
-                )
-                for task_result in gapfill_hunt_results:
-                    if isinstance(task_result, BaseException):
-                        await _append_workflow_event(
-                            scan_input.db_path,
-                            scan.id,
-                            "gapfill.rehunt_failed",
-                            {"error": _describe_failure(task_result)},
-                        )
-                        continue
-                    task_findings, _ = split_hunt_result(task_result)
-                    for finding_dict in task_findings:
-                        candidate = CandidateFinding.model_validate(finding_dict)
-                        candidate_findings.append(candidate)
-
-            await _persist_scan_stage(scan_input.db_path, scan.id, "GAPFILL")
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "gapfill.completed",
-                {"gapfill_task_count": str(len(gapfill_tasks))},
-            )
-
         # ── DEDUP stage ──────────────────────────────────────────────────────
         # Deterministic clustering by root_cause_key + agentic merge for
-        # ambiguous clusters (ADR-020 algorithm).
+        # ambiguous clusters (ADR-020 algorithm). Runs over the full
+        # accumulated candidate set each round to keep it clean (ADR-022).
         if not _stage_completed(completed_stage, "DEDUP"):
             self._current_stage = "DEDUP"
             dd_spent = (
@@ -1092,7 +1675,7 @@ class RunScanWorkflow:
                     ),
                 )
                 deduped_dicts = cast(list[dict[str, Any]], dedup_result)
-                candidate_findings = [CandidateFinding.model_validate(d) for d in deduped_dicts]
+                candidate_findings[:] = [CandidateFinding.model_validate(d) for d in deduped_dicts]
             except Exception as exc:
                 # Keep candidate_findings as-is (un-deduped), but record the failure.
                 await _append_workflow_event(
@@ -1113,8 +1696,8 @@ class RunScanWorkflow:
             )
 
         # ── PROVE stage ──────────────────────────────────────────────────────
-        # Agentic proof-of-concept generation for NEEDS_PROOF findings.
-        # The prove agent proposes exec/HTTP specs; this block dispatches them.
+        # Agentic proof-of-concept generation for findings newly promoted to
+        # NEEDS_PROOF this round.
         # Gated by scan_input.proof_enabled — skipped (but persisted) if False.
         #
         # Attempt loop (PROVE_MAX_ATTEMPTS per finding):
@@ -1124,6 +1707,7 @@ class RunScanWorkflow:
         #   - Timeout beats success; exhausted-attempts → needs_manual_review.
         if not _stage_completed(completed_stage, "PROVE"):
             self._current_stage = "PROVE"
+            round_needs_proof = needs_proof_findings[needs_proof_new_start:]
             if scan_input.proof_enabled:
                 prove_panel_json = panel_json_for_role(scan, "prove")
                 pv_spent = (
@@ -1137,7 +1721,8 @@ class RunScanWorkflow:
                     if scan_input.target_url
                     else None
                 )
-                for finding in filter_needs_proof(needs_proof_findings):
+                # Prove live-corroborated leads first (dynamic_validate verdict).
+                for finding in prioritize_by_live_verdict(filter_needs_proof(round_needs_proof)):
                     final_verdict = "not_proved"
                     prior_attempts: list[dict[str, Any]] = []
                     for attempt in range(PROVE_MAX_ATTEMPTS):
@@ -1154,6 +1739,7 @@ class RunScanWorkflow:
                                     20,
                                     scan_input.scan_seed,
                                     prior_attempts or None,
+                                    artifact_root,
                                 ],
                                 start_to_close_timeout=timedelta(hours=2),
                                 heartbeat_timeout=timedelta(minutes=3),
@@ -1221,11 +1807,11 @@ class RunScanWorkflow:
                                     )
                                 except Exception:
                                     pass
-                            outcome = prove_outcome_from_captures(exec_caps, http_caps)
-                            if outcome == "proved":
+                            outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
+                            if outcome_verdict == "proved":
                                 final_verdict = "proved"
                                 break
-                            if outcome == "needs_manual_review":
+                            if outcome_verdict == "needs_manual_review":
                                 final_verdict = "needs_manual_review"
                                 await _append_workflow_event(
                                     scan_input.db_path,
@@ -1282,7 +1868,7 @@ class RunScanWorkflow:
                 scan.id,
                 "prove.completed",
                 {
-                    "findings_attempted": str(len(filter_needs_proof(needs_proof_findings)))
+                    "findings_attempted": str(len(filter_needs_proof(round_needs_proof)))
                     if scan_input.proof_enabled
                     else "0",
                     "proof_artifact_count": str(len(proof_artifacts)),
@@ -1290,22 +1876,27 @@ class RunScanWorkflow:
             )
 
         # ── TRACER stage ─────────────────────────────────────────────────────
-        # Reachability verdict per finding — one tracer-finding activity per
-        # CandidateFinding.  Single-repo trace: builds Python call graph from
-        # the primary repo, fans out to one tracer instance per finding.
-        # Cross-repo fan-out (quarry.toml consumer_repos) is a follow-on.
+        # Reachability verdict for findings not yet traced in an earlier round —
+        # one tracer-finding activity per pending CandidateFinding. Each Trace
+        # is persisted and, when the finding was already promoted, synced onto
+        # its FinalFinding (ADR-022 §Trace persistence). reachable_traces feeds
+        # the reachability-feedback edge.
+        reachable_traces: list[Trace] = []
+        call_graph: CallGraph | None = None
         if not _stage_completed(completed_stage, "TRACER"):
             self._current_stage = "TRACER"
-            if candidate_findings:
+            pending_trace = [f for f in candidate_findings if f.id not in traced_finding_ids]
+            if pending_trace:
                 _target_lang = str(scan.metadata.get("target_language") or "python")
                 call_graph_raw = await workflow.execute_activity(
                     "build-call-graph",
                     args=[scan.id, repo_path, _target_lang],
                     start_to_close_timeout=timedelta(minutes=10),
                 )
-                call_graph: CallGraph = CallGraph.model_validate(call_graph_raw)
+                call_graph = CallGraph.model_validate(call_graph_raw)
                 tracer_panel_json = panel_json_for_role(scan, "trace")
-                for finding in candidate_findings:
+                final_findings_by_id = {f.id: f for f in final_findings}
+                for finding in pending_trace:
                     try:
                         trace_raw = await workflow.execute_activity(
                             "tracer-finding",
@@ -1319,6 +1910,7 @@ class RunScanWorkflow:
                                 scan_input.db_path,
                                 10,
                                 scan_input.scan_seed,
+                                artifact_root,
                             ],
                             start_to_close_timeout=timedelta(hours=1),
                             heartbeat_timeout=timedelta(minutes=3),
@@ -1328,6 +1920,28 @@ class RunScanWorkflow:
                             trace_raw if isinstance(trace_raw, dict) else trace_raw
                         )
                         apply_trace_severity_reranking(finding, trace)
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_trace",
+                            {"trace": _model_json_dict(trace)},
+                        )
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_candidate_finding",
+                            {"finding": _model_json_dict(finding)},
+                        )
+                        updated_final = sync_final_finding_trace(
+                            finding, trace, final_findings_by_id
+                        )
+                        if updated_final is not None:
+                            await _persist_scan_state(
+                                scan_input.db_path,
+                                "save_final_finding",
+                                {"finding": _model_json_dict(updated_final)},
+                            )
+                        traced_finding_ids.add(finding.id)
+                        if trace.reachable == ReachabilityVerdict.REACHABLE:
+                            reachable_traces.append(trace)
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
@@ -1349,111 +1963,10 @@ class RunScanWorkflow:
                 scan_input.db_path,
                 scan.id,
                 "tracer.completed",
-                {"finding_count": str(len(candidate_findings))},
+                {"finding_count": str(len(pending_trace))},
             )
 
-        self._current_stage = "COVERAGE"
-        coverage_ledger_json = await self._record_coverage(
-            scan_input,
-            scan,
-            agent_tasks,
-            final_findings,
-            artifact_root,
-        )
-
-        self._current_stage = "REPORT"
-        reporting_scan = scan.model_copy(
-            update={"status": ScanStatus.COMPLETED, "started_at": started_at}
-        )
-        model_invocations_json = await _load_model_invocations_json(scan_input.db_path, scan.id)
-        rendered_report_payload = await workflow.execute_activity(
-            "render-markdown-report",
-            RenderReportInput(
-                scan_json=reporting_scan.model_dump_json(),
-                findings_json=_model_list_json(candidate_findings),
-                snapshot_json=snapshot.model_dump_json() if snapshot is not None else None,
-                attack_surface_json=None,
-                final_findings_json=_model_list_json(final_findings),
-                report_path=report_path,
-                coverage_json=coverage_ledger_json,
-                proof_artifacts_json=(
-                    _model_list_json(proof_artifacts) if proof_artifacts else None
-                ),
-                manifest_json=scan_manifest.model_dump_json(),
-                model_invocations_json=model_invocations_json,
-                needs_proof_findings_json=(
-                    _model_list_json(needs_proof_findings) if needs_proof_findings else None
-                ),
-            ),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=self._retry_policy,
-        )
-        rendered_report = _render_report_output_from_activity(rendered_report_payload)
-
-        report_ref = ArtifactRef.model_validate_json(rendered_report.report_ref_json)
-        await _persist_scan_state(
-            scan_input.db_path,
-            "save_artifact_ref",
-            {"scan_id": scan.id, "artifact_ref": _model_json_dict(report_ref)},
-        )
-        report = Report(
-            id=str(workflow.uuid4()),
-            scan_id=scan.id,
-            workspace_id="local",
-            title="Quarry Scan Report",
-            summary=f"Scan found {len(final_findings)} validated finding(s) "
-            f"and {len(candidate_findings)} candidate finding(s).",
-            finding_ids=[f.id for f in final_findings],
-            formats=["markdown"],
-            artifact_refs=[report_ref],
-            generated_at=workflow.now(),
-        )
-        await _persist_scan_state(
-            scan_input.db_path,
-            "save_report",
-            {"report": _model_json_dict(report), "report_path": rendered_report.report_path},
-        )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "report.generated",
-            {"report_path": rendered_report.report_path},
-        )
-        await _persist_scan_stage(scan_input.db_path, scan.id, "REPORT")
-
-        if scan.profile.integrations_enabled and not _stage_completed(
-            completed_stage, "INTEGRATING"
-        ):
-            self._current_stage = "INTEGRATING"
-            await self._deliver_integrations(scan_input, scan, final_findings, artifact_root)
-            await _persist_scan_stage(scan_input.db_path, scan.id, "INTEGRATING")
-
-        self._current_stage = "COMPLETED"
-        await _persist_scan_stage(scan_input.db_path, scan.id, "COMPLETED")
-        completed_at = workflow.now()
-        await _persist_scan_state(
-            scan_input.db_path,
-            "update_scan_status",
-            {
-                "scan_id": scan.id,
-                "status": ScanStatus.COMPLETED.value,
-                "started_at": None,
-                "completed_at": completed_at.isoformat(),
-                "report_path": rendered_report.report_path,
-            },
-        )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "scan.completed",
-            {"report_path": rendered_report.report_path},
-        )
-        return RunScanResult(
-            scan_id=scan.id,
-            report_path=rendered_report.report_path,
-            candidate_finding_count=len(candidate_findings),
-            final_finding_count=len(final_findings),
-        )
+        return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
@@ -1506,8 +2019,8 @@ class RunScanWorkflow:
                 artifact_root=artifact_root,
                 requested_vuln_classes=requested,
                 completed_vuln_classes=completed_classes,
-                attack_surface_items_total=len(agent_tasks),
-                attack_surface_items_scanned=len(agent_tasks),
+                agent_tasks_total=len(agent_tasks),
+                agent_tasks_scanned=len(agent_tasks),
                 skipped_json=json.dumps(skipped, sort_keys=True),
             ),
             start_to_close_timeout=timedelta(minutes=1),
@@ -1766,8 +2279,8 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         workspace_id="local",
         requested_vuln_classes=list(scan.profile.vuln_classes),
         completed_vuln_classes=[],
-        attack_surface_items_total=0,
-        attack_surface_items_scanned=0,
+        agent_tasks_total=0,
+        agent_tasks_scanned=0,
         skipped_items=[],
     )
     coverage_ref = write_coverage_artifact(
@@ -1785,7 +2298,6 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
         reporting_scan,
         candidate_findings,
         snapshot,
-        [],
         final_findings,
         coverage_ledger,
     )
@@ -2013,11 +2525,13 @@ def panel_json_for_role(scan: Scan, role: str) -> str | None:
         provider = _Provider(entry.provider)
     except ValueError:
         return None
+    tiers = [_ModelTier.model_validate(t) for t in entry.tiers]
     return _RoleConfig(
         provider=provider,
         model=entry.model,
         rpm=entry.rate_limit_rpm,
         turn_timeout_seconds=entry.turn_timeout_seconds,
+        tiers=tiers,
     ).model_dump_json()
 
 
@@ -2088,6 +2602,22 @@ def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) ->
     )
 
 
+def live_exploitation_active(
+    *,
+    enabled: bool,
+    target_url: str | None,
+    authorization: TargetAuthorization | None,
+) -> bool:
+    """Fail-closed gate for the live-exploitation track (design D1 + D4).
+
+    The track runs only when the CLI flag opts in AND a live target is resolved AND an
+    active ``TargetAuthorization`` is present. Any missing input means the track is a
+    no-op that runs no loop and sends no live traffic — target_url presence alone must
+    never flip it on.
+    """
+    return bool(enabled and target_url and authorization_active(authorization))
+
+
 def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:
     """Parse *target_url* into a TargetEndpoint.
 
@@ -2130,6 +2660,56 @@ def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | N
     if path is None:
         return None
     return HttpRequestSpec(method="GET", path=path)
+
+
+def select_dynamic_probe_spec(
+    proposed_http_specs: list[Any],
+    candidate: CandidateFinding,
+) -> HttpRequestSpec | None:
+    """Pick the probe spec to dispatch for a dynamic-validation attempt.
+
+    Option A (ADR-017): the dynamic_validate agent PROPOSES http specs (no I/O)
+    and the workflow dispatches them.  Prefer the first well-formed proposal;
+    fall back to the deterministic per-class probe when the agent proposed
+    nothing usable.  Malformed proposals (e.g. inline auth rejected by
+    ``HttpRequestSpec``) are skipped rather than aborting the attempt.
+
+    Pure function — safe inside sandboxed workflow code.
+    """
+    for raw in proposed_http_specs:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            return HttpRequestSpec.model_validate(raw)
+        except Exception:
+            continue
+    return build_dynamic_probe_spec(candidate)
+
+
+# Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017).
+LIVE_CORROBORATED = "corroborated"
+LIVE_NOT_CORROBORATED = "not_corroborated"
+LIVE_INCONCLUSIVE = "inconclusive"
+
+# Status codes that indicate the live target actively defends the path — the
+# candidate hypothesis is NOT corroborated (guard present / resource absent).
+_LIVE_DEFENDED_STATUS = frozenset({401, 403, 404})
+
+
+def live_verdict_from_status(status_code: int) -> str:
+    """Map an HTTP status code to a live-corroboration verdict.
+
+    Pure function (no I/O) — safe inside sandboxed workflow code.
+
+    - 2xx → ``corroborated`` (the hypothesised path is served live).
+    - 401/403/404 → ``not_corroborated`` (the target enforces the guard).
+    - anything else (5xx, other ambiguous codes) → ``inconclusive``.
+    """
+    if 200 <= status_code < 300:
+        return LIVE_CORROBORATED
+    if status_code in _LIVE_DEFENDED_STATUS:
+        return LIVE_NOT_CORROBORATED
+    return LIVE_INCONCLUSIVE
 
 
 def promote_with_dynamic_evidence(

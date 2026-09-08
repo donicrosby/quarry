@@ -20,7 +20,9 @@ hunt_max_concurrent = 2
 # Chutes panel — different model family per role for cross-vendor disagreement.
 # recon  : DeepSeek-V3.2  (reliable structured JSON output for architecture analysis)
 # hunt   : Qwen3-32B  (different vendor family from DeepSeek)
-# validate: Kimi-K2.6  (moonshotai family → cross_vendor_disagreement vs Qwen)
+# validate: MDASH ensemble — Kimi-K2.6 reasoner + DeepSeek-V3.2 debater (refute
+#           regime). Two vendor families argue the finding, so failure-to-refute
+#           raises credibility and genuine disagreement is recorded (design D1-D3).
 # gapfill : DeepSeek-V3.2  (Qwen3-235B-Thinking gave ChutesException; back to DeepSeek)
 # dedup reuses the gapfill role config (same toolset, no separate entry needed)
 # --------------------------------------------------------------------------
@@ -35,10 +37,21 @@ provider = "litellm"
 model    = "chutes/Qwen/Qwen3-32B-TEE"
 rpm      = 20
 
+# validate reasoner (top-level = the implicit reasoner tier / primary verdict).
 [panels.chutes.roles.validate]
 provider = "litellm"
 model    = "chutes/moonshotai/Kimi-K2.6-TEE"
 rpm      = 20
+
+# validate debater tier — an independent, cross-vendor model that argues to
+# *refute* the candidate from the code (ADR-021 independence, prompt regime
+# "refute"). Its failure to refute raises the finding's credibility.
+[[panels.chutes.roles.validate.tiers]]
+kind          = "debater"
+provider      = "litellm"
+model         = "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
+prompt_regime = "refute"
+rpm           = 20
 
 [panels.chutes.roles.gapfill]
 provider = "litellm"

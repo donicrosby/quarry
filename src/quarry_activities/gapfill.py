@@ -34,10 +34,12 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_models.rate_limit import get_limiter
+from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
@@ -163,6 +165,8 @@ def gapfill_impl(
     existing_findings: list[dict[str, Any]] | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    limiter: Any | None = None,
+    artifact_root: str | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -207,8 +211,8 @@ def gapfill_impl(
         variables={
             "vuln_classes": [vc.value for vc in vuln_classes],
             "completed_classes": completed,
-            "items_total": ledger.attack_surface_items_total,
-            "items_scanned": ledger.attack_surface_items_scanned,
+            "items_total": ledger.agent_tasks_total,
+            "items_scanned": ledger.agent_tasks_scanned,
             "existing_findings": [
                 {
                     "vuln_class": str(f.get("vuln_class", "")),
@@ -237,8 +241,18 @@ def gapfill_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        prompt_provenance=PromptProvenance.from_rendered(prompt),
+        scan_id=scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        limiter=limiter,
     )
+
+    if artifact_root is not None:
+        persist_seed_prompt(
+            artifact_root,
+            rendered_messages=prompt.messages,
+            invocations=client.invocations,
+        )
 
     # Merge hunter-reported gaps + agent gaps, deduped by (vuln_class, scope).
     # Hunter gaps come first — they are concrete self-reports of what the
@@ -281,6 +295,7 @@ def gapfill_activity(
     existing_findings: list[dict[str, Any]] | None = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -317,6 +332,7 @@ def gapfill_activity(
             existing_findings,
             max_iterations,
             scan_seed,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -336,6 +352,7 @@ def _gapfill_activity_impl(
     existing_findings: list[dict[str, Any]] | None = None,
     max_iterations: int = 20,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -366,9 +383,11 @@ def _gapfill_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=GapfillResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "gapfill", role_cfg.rpm)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
@@ -386,6 +405,8 @@ def _gapfill_activity_impl(
         existing_findings=existing_findings,
         event_sink=make_event_sink(db_path, ledger.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        limiter=limiter,
+        artifact_root=artifact_root,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

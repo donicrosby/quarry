@@ -97,6 +97,13 @@ panels and scan defaults without environment variables:
 cp quarry.toml.example quarry.toml
 ```
 
+A role can be a single model or a tiered ensemble (a SOTA `reasoner` plus an
+independent, cheaper `debater` that argues to refute each candidate from the code).
+Cross-model disagreement becomes an ordinal credibility signal on the finding
+(refuted / contested / unrefuted) rather than a discarded boolean — see
+`quarry.toml.example` for the tiered-panel, `vendor_allowlist`, per-role `rpm` rate
+limiting, and multi-vendor (Anthropic / Bedrock) options.
+
 Never store API keys in `quarry.toml` — Quarry rejects the file at startup if it
 finds credential-like keys.
 

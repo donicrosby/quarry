@@ -215,6 +215,11 @@ class CredentialProvider(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def resolve_env_secret(env_name: str) -> str:
+    """Public alias for :func:`_resolve_env_secret` (used by the browser-login resolver)."""
+    return _resolve_env_secret(env_name)
+
+
 def _resolve_env_secret(env_name: str) -> str:
     """Read a secret from an environment variable; raise EnvironmentError if missing."""
     value = os.environ.get(env_name)

@@ -39,6 +39,11 @@ def test_resolve_prompts_succeeds_on_valid_templates() -> None:
         ("hunt", "security_misconfiguration", "1.0.0"),
         ("hunt", "insecure_design", "1.0.0"),
         ("hunt", "weak_crypto", "1.0.0"),
+        # Dynamic-validation prompt family (generic + high-value per-class).
+        ("dynamic_validate", "dynamic_validate", "1.0.0"),
+        ("dynamic_validate", "idor", "1.0.0"),
+        ("dynamic_validate", "command_injection", "1.0.0"),
+        ("dynamic_validate", "ssrf", "1.0.0"),
     ]
     manifest = resolve_prompts(registry=registry, role_templates=role_templates)
 
@@ -48,6 +53,10 @@ def test_resolve_prompts_succeeds_on_valid_templates() -> None:
     assert "validate/validate" in manifest.entries
     for cls in ("ssrf", "command_injection", "sql_injection", "xss", "idor", "secrets"):
         assert f"hunt/{cls}" in manifest.entries
+    # The dynamic-validation family must resolve (generic + per-class).
+    assert "dynamic_validate/dynamic_validate" in manifest.entries
+    for cls in ("idor", "command_injection", "ssrf"):
+        assert f"dynamic_validate/{cls}" in manifest.entries
 
 
 def test_resolve_prompts_raises_on_missing_template() -> None:

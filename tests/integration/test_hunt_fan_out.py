@@ -60,6 +60,7 @@ def counting_hunt_activity(
     panel_json: str | None = None,
     db_path: str | None = None,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[object]:
     """Mock hunt activity that tracks peak concurrent execution."""
     with _lock:

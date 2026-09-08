@@ -22,12 +22,12 @@ class _RunInSandboxTool:
 
     name = "run_in_sandbox"
     description = (
-        "Propose a sandboxed CLI/binary invocation for live dynamic proof. "
-        "Only available in the prove role. "
+        "Propose a sandboxed CLI/binary invocation for live dynamic proof or "
+        "exploitation. Only available in the prove and exploit roles. "
         "Does not execute directly — the command is dispatched to the "
         "quarry-control worker for scope-checked, resource-contained execution."
     )
-    roles: list[str] = ["prove"]
+    roles: list[str] = ["prove", "exploit"]
 
     input_schema: dict[str, Any] = {
         "type": "object",

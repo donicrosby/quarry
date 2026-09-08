@@ -15,7 +15,6 @@ from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
-    AttackSurfaceItem,
     CandidateFinding,
     FileManifest,
     FileManifestEntry,
@@ -29,6 +28,7 @@ from quarry.schemas import (
     ScanStatus,
     Target,
     ToolInvocation,
+    Trace,
     WorkflowEvent,
     utc_now,
 )
@@ -184,11 +184,6 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 return repository.load_scan(payload["scan_id"]).model_dump(mode="json")
             except ValueError:
                 return None
-        case "load_attack_surface_items":
-            return [
-                item.model_dump(mode="json")
-                for item in repository.load_attack_surface_items(payload["scan_id"])
-            ]
         case "load_candidate_findings":
             return [
                 finding.model_dump(mode="json")
@@ -244,14 +239,15 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 payload["scan_id"],
                 ArtifactRef.model_validate(payload["artifact_ref"]),
             )
-        case "save_attack_surface_items":
-            repository.save_attack_surface_items(
-                [AttackSurfaceItem.model_validate(item) for item in payload["items"]]
-            )
         case "save_candidate_finding":
             repository.save_candidate_finding(CandidateFinding.model_validate(payload["finding"]))
         case "save_final_finding":
             repository.save_final_finding(FinalFinding.model_validate(payload["finding"]))
+        case "save_trace":
+            repository.save_trace(Trace.model_validate(payload["trace"]))
+        case "load_traces":
+            traces = repository.load_traces(payload["scan_id"])
+            return [trace.model_dump(mode="json") for trace in traces]
         case "save_report":
             repository.save_report(
                 Report.model_validate(payload["report"]),

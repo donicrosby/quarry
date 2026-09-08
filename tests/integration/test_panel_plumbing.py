@@ -120,6 +120,49 @@ def test_panel_json_for_role_missing_role_returns_none() -> None:
     assert panel_json_for_role(scan, "unknown_role") is None
 
 
+def test_panel_json_for_role_preserves_debater_tier() -> None:
+    """A tiered validate role must survive the snapshot round-trip.
+
+    Regression: panel_json_for_role dropped ModelPanelEntry.tiers, so the
+    debater tier never reached the worker and the ensemble/credibility path
+    never ran.
+    """
+    from quarry.panel_config import (
+        ModelTier,
+        Provider,
+        RoleConfig,
+        TierKind,
+        resolve_tier,
+    )
+
+    entry = ModelPanelEntry(
+        id=str(uuid4()),
+        scan_id="s-tier",
+        role="validate",
+        provider="litellm",
+        model="chutes/moonshotai/Kimi-K2.6-TEE",
+        rate_limit_rpm=20,
+        tiers=[
+            ModelTier(
+                kind=TierKind.DEBATER,
+                provider=Provider.LITELLM,
+                model="chutes/deepseek-ai/DeepSeek-V3.2-TEE",
+                prompt_regime="refute",
+                rpm=20,
+            ).model_dump(mode="json")
+        ],
+    )
+    scan = _make_scan([entry])
+    result = panel_json_for_role(scan, "validate")
+    assert result is not None
+
+    role_cfg = RoleConfig.model_validate_json(result)
+    debater = resolve_tier(role_cfg, TierKind.DEBATER)
+    assert debater is not None
+    assert debater.model == "chutes/deepseek-ai/DeepSeek-V3.2-TEE"
+    assert debater.prompt_regime == "refute"
+
+
 def test_panel_json_for_role_invalid_provider_returns_none() -> None:
     bad_entry = ModelPanelEntry(
         id=str(uuid4()),
@@ -157,8 +200,8 @@ def test_gapfill_activity_accepts_none_panel_json() -> None:
         id="l-1",
         scan_id="s-1",
         workspace_id="ws",
-        attack_surface_items_total=0,
-        attack_surface_items_scanned=0,
+        agent_tasks_total=0,
+        agent_tasks_scanned=0,
         vuln_classes_requested=[VulnerabilityClass.SECRETS],
         created_at=_NOW,
     )

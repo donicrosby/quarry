@@ -15,7 +15,7 @@ Severity re-ranking rules (mirrored from tracer_activity for workflow-level use)
 
 from __future__ import annotations
 
-from quarry.schemas import CandidateFinding, ReachabilityVerdict, Trace
+from quarry.schemas import CandidateFinding, FinalFinding, ReachabilityVerdict, Trace
 from quarry_activities.tracer import SEVERITY_EXEMPT_VULN_CLASSES, downgrade_severity
 
 
@@ -35,3 +35,27 @@ def apply_trace_severity_reranking(
         return
     if trace.reachable == ReachabilityVerdict.NOT_REACHABLE:
         finding.severity = downgrade_severity(finding.severity)
+
+
+def sync_final_finding_trace(
+    finding: CandidateFinding,
+    trace: Trace,
+    final_findings_by_id: dict[str, FinalFinding],
+) -> FinalFinding | None:
+    """Propagate a trace's id and reranked severity onto the promoted FinalFinding.
+
+    TRACER runs after AGENTIC_VALIDATE, so a finding may already have been
+    promoted to a ``FinalFinding`` before its trace verdict is known.
+    ``apply_trace_severity_reranking`` mutates the ``CandidateFinding`` in
+    place, but without this sync that mutation never reaches the
+    already-created ``FinalFinding`` copy and ``FinalFinding.trace_id`` stays
+    unset forever (ADR-022 §Trace persistence). Mutates and returns the
+    matching FinalFinding in place, or None if the finding was never
+    promoted.
+    """
+    final = final_findings_by_id.get(finding.id)
+    if final is None:
+        return None
+    final.trace_id = trace.id
+    final.severity = finding.severity
+    return final

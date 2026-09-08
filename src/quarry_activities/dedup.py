@@ -32,6 +32,7 @@ from quarry_activities.model_cost import persist_model_invocations
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
+from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, ProviderPolicy
 from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
@@ -80,6 +81,7 @@ def dedup_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    limiter: Any | None = None,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
@@ -162,6 +164,7 @@ def dedup_impl(
             provider_policy=provider_policy,
             event_sink=event_sink,
             turn_timeout_seconds=turn_timeout_seconds,
+            limiter=limiter,
         )
 
         if loop_result.final_answer and isinstance(loop_result.final_answer, DedupeResponse):
@@ -243,9 +246,12 @@ def _deduplicate_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=DedupeResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        # dedup reuses the gapfill role/toolset, so it shares the gapfill limiter.
+        limiter = get_limiter(role_cfg.provider.value, "gapfill", role_cfg.rpm)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
     scan_log: list[str] = []
@@ -264,6 +270,7 @@ def _deduplicate_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        limiter=limiter,
     )
 
     scan_id = parsed[0].scan_id if parsed else ""

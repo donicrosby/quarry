@@ -37,6 +37,16 @@ class TestScanDefaultsSchema:
         assert isinstance(cfg.dedup_max_iterations, int)
         assert cfg.dedup_max_iterations > 0
 
+    def test_has_max_coverage_rounds_defaulting_to_three(self) -> None:
+        """ADR-022 default round cap is 3."""
+        cfg = ScanDefaultsConfig()
+        assert hasattr(cfg, "max_coverage_rounds")
+        assert cfg.max_coverage_rounds == 3
+
+    def test_max_coverage_rounds_can_be_configured(self) -> None:
+        cfg = ScanDefaultsConfig(max_coverage_rounds=1)
+        assert cfg.max_coverage_rounds == 1
+
     def test_has_seed_field_defaulting_to_none(self) -> None:
         cfg = ScanDefaultsConfig()
         assert hasattr(cfg, "seed")
@@ -54,6 +64,7 @@ class TestScanDefaultsSchema:
         assert cfg.recon_max_iterations == 40
         assert cfg.dedup_max_iterations == 8
         assert cfg.hunt_max_iterations == 12
+        assert cfg.max_coverage_rounds == 3
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +88,11 @@ class TestRunScanInputSchema:
     def test_has_dedup_max_iterations(self) -> None:
         inp = RunScanInput(repo_path="/tmp/repo")
         assert hasattr(inp, "dedup_max_iterations")
+
+    def test_has_max_coverage_rounds_defaulting_to_three(self) -> None:
+        inp = RunScanInput(repo_path="/tmp/repo")
+        assert hasattr(inp, "max_coverage_rounds")
+        assert inp.max_coverage_rounds == 3
 
     def test_has_scan_seed_defaulting_to_none(self) -> None:
         inp = RunScanInput(repo_path="/tmp/repo")

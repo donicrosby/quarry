@@ -79,7 +79,7 @@ def _proof() -> ProofArtifact:
 
 
 def test_report_renders_idor_proof_block() -> None:
-    report = render_markdown_report(_scan(), [], None, [], [_idor_finding()], None, [_proof()])
+    report = render_markdown_report(_scan(), [], None, [_idor_finding()], None, [_proof()])
 
     assert "## Final findings" in report
     assert "#### Proof: dynamic_idor_two_user" in report
@@ -89,7 +89,7 @@ def test_report_renders_idor_proof_block() -> None:
 
 
 def test_report_omits_proof_block_when_no_proof() -> None:
-    report = render_markdown_report(_scan(), [], None, [], [_idor_finding()], None, None)
+    report = render_markdown_report(_scan(), [], None, [_idor_finding()], None, None)
 
     assert "IDOR on /users/{user_id}" in report
     assert "#### Proof" not in report

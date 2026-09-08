@@ -51,11 +51,24 @@ from quarry.schemas import (
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
-from quarry_models.types import BudgetSpec, ModelMessage, ModelRequest, ProviderPolicy
+from quarry_models.types import (
+    BudgetSpec,
+    ModelMessage,
+    ModelRequest,
+    PromptProvenance,
+    ProviderPolicy,
+)
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 
 _log = logging.getLogger(__name__)
+
+
+def _hash_text(text: str) -> str:
+    """sha256 hex of *text* — matches build_prompt's part-hash convention."""
+    from hashlib import sha256
+
+    return sha256(text.encode("utf-8")).hexdigest()
 
 
 def _store_rejected_reasoning(
@@ -224,9 +237,23 @@ def run_agent_loop(
     # get the old placeholder-string behaviour (backward compatible).
     artifact_store_path: str | None = None,
     scan_id: str | None = None,
+    # ADR-019 per-part prompt provenance (loop-path-prompt-provenance).  When
+    # provided, every turn's request/invocation carries the rendered prompt's
+    # per-part hashes so loop-sourced invocations are verifiable.  When None, the
+    # loop leaves the hashes empty exactly as before (backward compatible).
+    prompt_provenance: PromptProvenance | None = None,
     # Per-turn model-call wall-clock timeout.  Set to 120 s so Chutes queue
     # delays surface as a retriable activity failure rather than a hung scan.
     turn_timeout_seconds: int = 120,
+    # Per-tier cap on the total number of tool calls this loop may issue (MDASH
+    # per-role caps, task 1.3).  ``None`` = bounded only by ``max_iterations``.
+    tool_call_cap: int | None = None,
+    # Optional per-(provider, role) rate limiter (MDASH, design D5).  When set,
+    # ``limiter.acquire()`` is called once per model turn before dispatch to
+    # throttle to the role's configured rpm.  ``None`` = unthrottled.  The limiter
+    # lives in the dispatch path (quarry_models), never in workflow code, so it is
+    # replay-safe.
+    limiter: Any | None = None,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -272,12 +299,13 @@ def run_agent_loop(
     Returns
     -------
     AgentLoopResult
-        With one of six stop reasons: ``final_answer``, ``max_iterations``,
-        ``budget_exceeded``, ``guard_triggered``, ``reasoning_rejected``, or
-        ``schema_rejected``.
+        With one of these stop reasons: ``final_answer``, ``max_iterations``,
+        ``budget_exceeded``, ``guard_triggered``, ``reasoning_rejected``,
+        ``schema_rejected``, or ``tool_call_cap``.
     """
     steps: list[AgentStep] = []
     total_cost: float = 0.0
+    tool_calls_used: int = 0  # cumulative tool calls issued (for tool_call_cap)
     history: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
         ModelMessage(role="user", content=initial_user_message),
@@ -290,6 +318,24 @@ def run_agent_loop(
     _store: LocalArtifactStore | None = (
         LocalArtifactStore(artifact_store_path) if artifact_store_path else None
     )
+
+    # ADR-019 per-part provenance is constant for the loop's lifetime (it describes
+    # the seed rendered prompt); compute the request kwargs once and stamp them on
+    # every turn's request so each turn's invocation is independently verifiable.
+    # ``user_prompt_hash`` is the sha256 of the initial user message (the loop owns
+    # the user message it sends), matching the round-trip rule the storage layer uses.
+    _request_scan_id = scan_id if scan_id is not None else "loop"
+    _provenance_kwargs: dict[str, Any] = {}
+    if prompt_provenance is not None:
+        _provenance_kwargs = {
+            "template_sha256": prompt_provenance.template_sha256,
+            "system_prompt_hash": prompt_provenance.part_hashes.get("system", ""),
+            "developer_prompt_hash": prompt_provenance.part_hashes.get("developer"),
+            "user_prompt_hash": _hash_text(initial_user_message),
+            "evidence_hashes": list(prompt_provenance.evidence_hashes),
+            "prompt_template_id": prompt_provenance.template_id,
+            "prompt_template_version": prompt_provenance.template_version,
+        }
 
     for iteration in range(1, max_iterations + 1):
         # ── Re-prompt sub-loop (reasoning + schema repair) ──────────────────
@@ -313,9 +359,10 @@ def run_agent_loop(
         while True:
             req_kwargs: dict[str, Any] = {
                 "task_name": f"{role}-loop",
-                "scan_id": "loop",
+                "scan_id": _request_scan_id,
                 "role": role,
                 "messages": list(history),
+                **_provenance_kwargs,
             }
             if provider_policy is not None:
                 req_kwargs["provider_policy"] = provider_policy
@@ -328,6 +375,8 @@ def run_agent_loop(
             # Provider/network failures (timeout, etc.) still burn an iteration so
             # the loop naturally backs off on transient outages.
             try:
+                if limiter is not None:
+                    limiter.acquire()
                 response = client.complete_structured(request, response_model)
             except ValidationError as exc:
                 # Schema / parse failure — re-prompt in-place without burning iteration.
@@ -535,6 +584,24 @@ def run_agent_loop(
                 elif isinstance(item, dict):
                     tool_calls.append(ToolCallRequest.model_validate(item))
 
+        # Per-tier tool_call_cap (task 1.3): once the cap is reached the loop stops
+        # issuing tool calls.  A turn that would exceed the remaining budget is
+        # truncated to it; a turn with nothing left to spend halts the loop.
+        if tool_call_cap is not None and tool_calls:
+            remaining = tool_call_cap - tool_calls_used
+            if remaining <= 0:
+                _last_capped = parsed if isinstance(parsed, response_model) else None
+                return AgentLoopResult(
+                    final_answer=_last_capped,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="tool_call_cap",
+                )
+            if len(tool_calls) > remaining:
+                tool_calls = tool_calls[:remaining]
+
+        tool_calls_used += len(tool_calls)
         step_tool_names = [tc.tool for tc in tool_calls]
         steps.append(
             AgentStep(

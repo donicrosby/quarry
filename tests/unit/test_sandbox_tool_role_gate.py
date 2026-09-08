@@ -30,8 +30,10 @@ class TestRunInSandboxToolRegistration:
     def test_tool_name(self) -> None:
         assert RUN_IN_SANDBOX_TOOL.name == "run_in_sandbox"
 
-    def test_roles_contains_prove_only(self) -> None:
-        assert RUN_IN_SANDBOX_TOOL.roles == ["prove"]
+    def test_roles_are_prove_and_exploit(self) -> None:
+        # run_in_sandbox performs transport-agnostic execution for proof and live
+        # exploitation; it is never exposed to the code-centric roles.
+        assert RUN_IN_SANDBOX_TOOL.roles == ["prove", "exploit"]
 
     def test_has_input_schema(self) -> None:
         schema = RUN_IN_SANDBOX_TOOL.input_schema

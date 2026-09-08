@@ -10,14 +10,23 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import litellm
 from pydantic import BaseModel
 
 from quarry.schemas import ModelInvocation, RedactionStatus
-from quarry_models.client import build_invocation, normalize_usage, resolve_provider_model
+from quarry_models.client import (
+    attach_prompt_ref,
+    build_invocation,
+    normalize_usage,
+    resolve_artifact_backend,
+    resolve_provider_model,
+)
 from quarry_models.types import ModelRequest, ModelResponse
+
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
 
 _log = logging.getLogger(__name__)
 
@@ -25,9 +34,22 @@ _log = logging.getLogger(__name__)
 class LiteLLMModelClient:
     """A `ModelClient` that dispatches to providers through LiteLLM."""
 
-    def __init__(self, *, temperature: float = 0.0, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        temperature: float = 0.0,
+        seed: int | None = None,
+        artifact_store: ArtifactStore | None = None,
+        backend: str | None = None,
+    ) -> None:
         self.temperature = temperature
         self.seed = seed
+        self._artifact_store = artifact_store
+        self._backend = (
+            (backend if backend is not None else resolve_artifact_backend())
+            if artifact_store is not None
+            else ""
+        )
         self.invocations: list[ModelInvocation] = []
 
     def complete_structured[T: BaseModel](
@@ -82,19 +104,21 @@ class LiteLLMModelClient:
             else RedactionStatus.NOT_REQUIRED
         )
 
-        self.invocations.append(
-            build_invocation(
-                request,
-                provider=provider,
-                model=model,
-                token_input=token_input,
-                token_output=token_output,
-                cached_tokens=cached,
-                estimated_cost=estimated_cost,
-                scrubber_hits=request.scrubber_hits,
-                redaction_status=redaction_status,
-            )
+        invocation = build_invocation(
+            request,
+            provider=provider,
+            model=model,
+            token_input=token_input,
+            token_output=token_output,
+            cached_tokens=cached,
+            estimated_cost=estimated_cost,
+            scrubber_hits=request.scrubber_hits,
+            redaction_status=redaction_status,
         )
+        attach_prompt_ref(
+            invocation, request, artifact_store=self._artifact_store, backend=self._backend
+        )
+        self.invocations.append(invocation)
         return ModelResponse(
             parsed=parsed,
             provider=provider,

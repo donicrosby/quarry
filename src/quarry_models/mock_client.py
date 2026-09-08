@@ -7,11 +7,21 @@ network or provider SDK. This is the client all tests run against.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel
 
 from quarry.schemas import ModelInvocation, RedactionStatus
-from quarry_models.client import build_invocation, resolve_provider_model
+from quarry_models.client import (
+    attach_prompt_ref,
+    build_invocation,
+    resolve_artifact_backend,
+    resolve_provider_model,
+)
 from quarry_models.types import ModelRequest, ModelResponse
+
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
 
 
 class MockModelClient:
@@ -22,9 +32,19 @@ class MockModelClient:
         responses: dict[str, BaseModel] | None = None,
         *,
         default: BaseModel | None = None,
+        artifact_store: ArtifactStore | None = None,
+        backend: str | None = None,
     ) -> None:
         self._responses = dict(responses or {})
         self._default = default
+        self._artifact_store = artifact_store
+        # Resolve the backend name once at construction (design D5); only meaningful
+        # when a store is present.
+        self._backend = (
+            (backend if backend is not None else resolve_artifact_backend())
+            if artifact_store is not None
+            else ""
+        )
         self.invocations: list[ModelInvocation] = []
 
     def complete_structured[T: BaseModel](
@@ -51,19 +71,21 @@ class MockModelClient:
             if request.redaction_policy.enabled
             else RedactionStatus.NOT_REQUIRED
         )
-        self.invocations.append(
-            build_invocation(
-                request,
-                provider=provider,
-                model=model,
-                token_input=10,
-                token_output=5,
-                cached_tokens=0,
-                estimated_cost=0.0,
-                scrubber_hits=request.scrubber_hits,
-                redaction_status=redaction_status,
-            )
+        invocation = build_invocation(
+            request,
+            provider=provider,
+            model=model,
+            token_input=10,
+            token_output=5,
+            cached_tokens=0,
+            estimated_cost=0.0,
+            scrubber_hits=request.scrubber_hits,
+            redaction_status=redaction_status,
         )
+        attach_prompt_ref(
+            invocation, request, artifact_store=self._artifact_store, backend=self._backend
+        )
+        self.invocations.append(invocation)
         return ModelResponse(
             parsed=parsed,
             provider=provider,

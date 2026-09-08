@@ -20,9 +20,10 @@ from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
-from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.builtins import BUILTIN_REGISTRY
@@ -48,6 +49,7 @@ def recon_subsystem_activity(
     db_path: str | None = None,
     max_iterations: int = 40,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> Subsystem:
     """Run the recon agent loop for one subsystem and return a Subsystem.
 
@@ -80,6 +82,7 @@ def recon_subsystem_activity(
             db_path,
             max_iterations,
             scan_seed,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -95,6 +98,7 @@ def _recon_subsystem_impl(
     db_path: str | None = None,
     max_iterations: int = 40,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> Subsystem:
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
@@ -164,8 +168,17 @@ def _recon_subsystem_impl(
         max_iterations=max_iterations,
         provider_policy=policy,
         event_sink=make_event_sink(db_path, scan_id),
+        prompt_provenance=PromptProvenance.from_rendered(rendered),
+        scan_id=scan_id,
         turn_timeout_seconds=recon_role.turn_timeout_seconds,
     )
+
+    if artifact_root is not None:
+        persist_seed_prompt(
+            artifact_root,
+            rendered_messages=rendered.messages,
+            invocations=client.invocations,
+        )
 
     persist_model_invocations(db_path, scan_id, client)
 

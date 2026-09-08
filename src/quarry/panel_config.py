@@ -11,6 +11,7 @@ import os
 import re
 import tomllib
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -40,8 +41,47 @@ def _empty_vuln_classes() -> list[VulnerabilityClass]:
 _CREDENTIAL_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL)$")
 
 
+class TierKind(StrEnum):
+    """The function a model tier serves within a role (MDASH ensemble, design D1).
+
+    ``reasoner`` is the SOTA heavy-reasoning pass, ``debater`` the cheaper distilled
+    model that argues to refute on high-volume passes, and ``counterpoint`` a second
+    independent SOTA model. A single-model role is an implicit one-entry reasoner tier.
+    """
+
+    REASONER = "reasoner"
+    DEBATER = "debater"
+    COUNTERPOINT = "counterpoint"
+
+
+class ModelTier(BaseModel):
+    """One tier within a role: a model with its own provider, regime, and caps."""
+
+    kind: TierKind = TierKind.REASONER
+    provider: Provider = Provider.MOCK
+    model: str = ""
+    rpm: int = 30
+    turn_timeout_seconds: int = 120
+    # Prompt regime name (e.g. "refute" for a debater) — lets a tier run a distinct
+    # prompt from the model that produced the candidate (ADR-021 independence, D2).
+    prompt_regime: str = ""
+    # Per-role caps the reference panel specifies (currently-absent knobs).
+    tool_call_cap: int | None = None
+    thinking_budget_tokens: int | None = None
+
+
+def _empty_tiers() -> list[ModelTier]:
+    return []
+
+
 class RoleConfig(BaseModel):
-    """Configuration for one model role in a panel."""
+    """Configuration for one model role in a panel.
+
+    A role is single-model by default (``provider``/``model``). It MAY instead declare
+    an ordered ``tiers`` set (reasoner / debater / counterpoint) — see design D1. A
+    single-model role is equivalent to a one-entry reasoner tier, so existing configs
+    keep working unchanged.
+    """
 
     provider: Provider = Provider.MOCK
     model: str = ""
@@ -50,6 +90,57 @@ class RoleConfig(BaseModel):
     # minutes; 120 s is a fail-fast default that surfaces hangs quickly so the
     # activity retries rather than blocking the entire scan.
     turn_timeout_seconds: int = 120
+    # Per-role caps (also settable per tier). Unset = bounded only by global caps.
+    tool_call_cap: int | None = None
+    thinking_budget_tokens: int | None = None
+    # Optional ordered tier set. Empty = single-model role (implicit reasoner tier).
+    tiers: list[ModelTier] = Field(default_factory=_empty_tiers)
+
+
+def resolve_tier(role: RoleConfig, kind: TierKind) -> ModelTier | None:
+    """Return the ``ModelTier`` serving *kind* for *role*, or ``None`` if unconfigured.
+
+    A tiered role returns its matching tier entry. A single-model role has an implicit
+    reasoner tier synthesised from its top-level fields (backward compatible) and no
+    debater / counterpoint tier.
+    """
+    if role.tiers:
+        return next((t for t in role.tiers if t.kind == kind), None)
+    if kind is TierKind.REASONER:
+        return ModelTier(
+            kind=TierKind.REASONER,
+            provider=role.provider,
+            model=role.model,
+            rpm=role.rpm,
+            turn_timeout_seconds=role.turn_timeout_seconds,
+            tool_call_cap=role.tool_call_cap,
+            thinking_budget_tokens=role.thinking_budget_tokens,
+        )
+    return None
+
+
+def enforce_vendor_allowlist(panel: dict[str, RoleConfig], allowlist: list[str]) -> None:
+    """Fail fast if any panel model's vendor is outside *allowlist* (design D6).
+
+    Checks every role — its top-level provider and each of its ``tiers`` — before
+    any model call. An empty *allowlist* imposes no restriction (backward
+    compatible). Raises ``ValueError`` naming the offending vendor and role so the
+    scan fails up front rather than mid-run, consistent with ``resolve_focus`` /
+    ``resolve_dynamic``.
+    """
+    if not allowlist:
+        return
+    allowed = set(allowlist)
+    for role, cfg in panel.items():
+        vendors = [t.provider.value for t in cfg.tiers] if cfg.tiers else [cfg.provider.value]
+        for vendor in vendors:
+            if vendor not in allowed:
+                msg = (
+                    f"Role '{role}' uses vendor '{vendor}', which is not in the "
+                    f"vendor_allowlist {sorted(allowed)}. Add it to the allowlist or "
+                    "change the panel before starting the scan."
+                )
+                raise ValueError(msg)
 
 
 # The default built-in panel.  All roles fall back here if not overridden.
@@ -64,6 +155,10 @@ DEFAULT_PANEL: dict[str, RoleConfig] = {
     # dynamic_validate: live corroboration role (ADR-017). Separate from static
     # validate to keep the network-free adversarial-review boundary intact.
     "dynamic_validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    # live_recon / exploit: app-centric live-exploitation track (Shannon pillar).
+    # live_recon builds a live attack map; exploit chains stateful exploitation.
+    "live_recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    "exploit": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
 }
 
 
@@ -90,6 +185,17 @@ class ScanDefaultsConfig(BaseModel):
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40
     dedup_max_iterations: int = 8
+    # Cap on iterative-coverage-loop rounds (ADR-022). Each round re-runs
+    # hunt -> validate -> (prove) -> trace; the loop halts sooner on
+    # convergence (no new tasks) or budget exhaustion. Default 3 per ADR-022.
+    max_coverage_rounds: int = 3
+    # Rising-bar early-stop: a round must add at least
+    # ``max(1, ceil(f * cumulative_findings))`` new distinct findings to justify
+    # another round, so the bar climbs as the scan accumulates findings. Trades
+    # recall for cost by design — lower it for a more patient (higher-recall)
+    # scan, and set it to 0.0 to disable the rule entirely (exhaustive audit),
+    # leaving only convergence / round-cap / budget as stop criteria.
+    coverage_yield_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
     # Optional fixed seed. When None, each scan derives a deterministic seed
     # from its scan_id UUID so runs are reproducible without pinning a global value.
     seed: int | None = None
@@ -97,6 +203,10 @@ class ScanDefaultsConfig(BaseModel):
     # for scans using this profile. Empty by default — plugins are disabled
     # unless explicitly named here, per the disabled-by-default invariant.
     plugins_active: list[str] = Field(default_factory=list)
+    # Allowed model vendors for the panel (design D6). Empty = unrestricted.
+    # When set, every panel role's vendor is validated at scan start via
+    # ``enforce_vendor_allowlist`` — a fail-fast before any model call.
+    vendor_allowlist: list[str] = Field(default_factory=list)
 
 
 class RetryConfig(BaseModel):

@@ -7,13 +7,27 @@ lives in ``quarry.schemas.ModelInvocation``; these types feed that record.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
 from quarry.schemas import RedactionStatus
 
-Role = Literal["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+Role = Literal[
+    "recon",
+    "hunt",
+    "validate",
+    "dynamic_validate",
+    "live_recon",
+    "exploit",
+    "gapfill",
+    "prove",
+    "trace",
+    "report",
+]
 MessageRole = Literal["system", "user", "assistant"]
 
 
@@ -22,6 +36,50 @@ class PromptRetention(StrEnum):
     METADATA_ONLY = "metadata_only"
     REDACTED_PROMPTS = "redacted_prompts"
     FULL_PROMPTS_LOCAL_ONLY = "full_prompts_local_only"
+
+
+class _RenderedPromptLike(Protocol):
+    """Structural view of RenderedPrompt (defined in quarry_prompts).
+
+    Typed here so ``PromptProvenance.from_rendered`` can accept a RenderedPrompt
+    without ``quarry_models`` importing ``quarry_prompts`` (which would be a
+    circular import — quarry_prompts imports quarry_models).
+    """
+
+    @property
+    def ref(self) -> object: ...
+    @property
+    def part_hashes(self) -> Mapping[str, str]: ...
+    @property
+    def evidence_hashes(self) -> Sequence[str]: ...
+
+
+class PromptProvenance(BaseModel):
+    """Immutable carrier of a rendered prompt's ADR-019 per-part provenance.
+
+    Lets an activity hand ``run_agent_loop`` the hashes it already computed via
+    ``build_prompt`` so loop-minted ``ModelInvocation``s are verifiable, without a
+    circular import of ``RenderedPrompt``. Constant across the loop's turns.
+    """
+
+    model_config = {"frozen": True}
+
+    template_id: str
+    template_version: str
+    template_sha256: str
+    part_hashes: dict[str, str] = Field(default_factory=dict)
+    evidence_hashes: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_rendered(cls, rendered: _RenderedPromptLike) -> PromptProvenance:
+        ref = rendered.ref
+        return cls(
+            template_id=ref.id,  # type: ignore[attr-defined]
+            template_version=ref.version,  # type: ignore[attr-defined]
+            template_sha256=ref.sha256,  # type: ignore[attr-defined]
+            part_hashes=dict(rendered.part_hashes),
+            evidence_hashes=list(rendered.evidence_hashes),
+        )
 
 
 class ModelMessage(BaseModel):
@@ -73,7 +131,10 @@ class ModelRequest(BaseModel):
     prompt_hash: str = ""
     scrubber_hits: int = 0
     # Per-part prompt provenance hashes (ADR-019 provenance addendum).
-    # Populated from RenderedPrompt.part_hashes + ref.sha256 by the activity.
+    # Populated from RenderedPrompt.part_hashes + ref.sha256 by the activity, or
+    # from a PromptProvenance bundle by run_agent_loop.
+    prompt_template_id: str = ""
+    prompt_template_version: str = ""
     template_sha256: str = ""
     system_prompt_hash: str = ""
     developer_prompt_hash: str | None = None

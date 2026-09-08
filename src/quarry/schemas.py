@@ -58,11 +58,35 @@ class Confidence(StrEnum):
     HIGH = "high"
 
 
+class CredibilityLevel(StrEnum):
+    """Ordinal ensemble credibility posterior for a finding (MDASH, design D3).
+
+    Ordinal-first by design — a small, explicit, auditable set rather than a
+    numeric score, so the rule stays legible and a finding is never silently
+    dropped on credibility alone.
+
+    - ``refuted``: a debater tier argued the candidate away from the code.
+    - ``contested``: independent models disagree about the candidate.
+    - ``unrefuted``: a debater tried and *failed* to refute it → credibility up.
+
+    Ordered least-to-most credible: refuted < contested < unrefuted.
+    """
+
+    REFUTED = "refuted"
+    CONTESTED = "contested"
+    UNREFUTED = "unrefuted"
+
+
 class Provider(StrEnum):
     """Model provider identifiers.  Add new vendors as new members."""
 
     MOCK = "mock"
     LITELLM = "litellm"
+    # Bedrock routes through LiteLLM (``bedrock/<model>``) but is a distinct vendor
+    # so a panel can span genuinely different vendors and cross-vendor disagreement
+    # reflects real independence (MDASH ensemble, design D4). AWS credentials are
+    # only needed at call time, not at client construction.
+    BEDROCK = "bedrock"
 
 
 class VulnerabilityClass(StrEnum):
@@ -97,7 +121,6 @@ class TriageLabel(StrEnum):
 class ArtifactKind(StrEnum):
     REPO_MANIFEST = "repo_manifest"
     CODE_SNIPPET = "code_snippet"
-    ATTACK_SURFACE = "attack_surface"
     TOOL_STDOUT = "tool_stdout"
     TOOL_STDERR = "tool_stderr"
     HTTP_REQUEST = "http_request"
@@ -217,20 +240,6 @@ class CodeIndex(BaseModel):
     created_at: datetime
 
 
-class AttackSurfaceItem(BaseModel):
-    id: str
-    scan_id: str
-    route: str
-    method: str
-    handler_file: str
-    handler_symbol: str | None = None
-    params: list[str] = Field(default_factory=_empty_strings)
-    auth_required: bool | None = None
-    auth_hint: str | None = None
-    source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class Workspace(BaseModel):
     id: str
     name: str
@@ -272,6 +281,10 @@ class TargetAuthorization(BaseModel):
     created_at: datetime
 
 
+def _empty_tier_dicts() -> list[dict[str, Any]]:
+    return []
+
+
 class ModelPanelEntry(BaseModel):
     id: str
     scan_id: str
@@ -280,6 +293,11 @@ class ModelPanelEntry(BaseModel):
     model: str
     rate_limit_rpm: int = 30
     turn_timeout_seconds: int = 120
+    # Serialised ModelTier dicts (MDASH ensemble). Stored as plain dicts to keep
+    # schemas.py free of a panel_config import (panel_config already imports this
+    # module, so the reverse would be circular). Reconstructed into ModelTier by
+    # panel_json_for_role when building the per-role RoleConfig for the worker.
+    tiers: list[dict[str, Any]] = Field(default_factory=_empty_tier_dicts)
 
 
 class ScopeExclusion(BaseModel):
@@ -355,6 +373,27 @@ class ScanSummary(BaseModel):
     error: str | None = None
 
 
+class EnsembleJudgement(BaseModel):
+    """One model's contribution to a finding's ensemble credibility (design D3).
+
+    Each judgement is a retained credibility *input* — not a discarded boolean —
+    and links to the ``ModelInvocation`` that produced it so the report can trace
+    the credibility posterior back to provenance-tracked model calls.
+    """
+
+    role: str
+    tier: str  # TierKind value: "reasoner" / "debater" / "counterpoint"
+    provider: str
+    model: str
+    verdict: str  # e.g. "validated" / "rejected" / "refuted" / "unrefuted"
+    refuted: bool | None = None  # set only for debater judgements
+    model_invocation_id: str | None = None
+
+
+def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
+    return []
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
@@ -373,6 +412,11 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    # Ensemble credibility posterior (MDASH, design D3). ``None`` when the finding
+    # was not reviewed by a debater/counterpoint ensemble. ``ensemble`` retains
+    # each contributing judgement (provenance-linked) so the report is auditable.
+    credibility: CredibilityLevel | None = None
+    ensemble: list[EnsembleJudgement] = Field(default_factory=_empty_ensemble_judgements)
     hunter_provider: str | None = None
     trigger_input: str | None = None
     scrubber_hits: int = 0
@@ -475,6 +519,10 @@ class AgentTask(BaseModel):
     domain_context_sources: list[str] = Field(default_factory=_empty_strings)
     source: Literal["recon", "gapfill", "feedback"] = "recon"
     gapfill_pass: int = 0
+    # The iterative-coverage-loop round (0-based) in which this task is hunted
+    # (ADR-022). round_index=0 for recon-derived tasks; gapfill/feedback tasks
+    # emitted at the end of round N are stamped round_index=N+1.
+    round_index: int = 0
     input_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     output_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     status: str
@@ -494,6 +542,10 @@ class ValidationResult(BaseModel):
     model_invocation_id: str | None = None
     cross_vendor: bool = False  # deprecated alias; use cross_vendor_disagreement
     cross_vendor_disagreement: bool = False
+    # Ensemble credibility posterior + its contributing judgements (MDASH, D3).
+    # ``credibility`` is None when no debater tier reviewed the candidate.
+    credibility: CredibilityLevel | None = None
+    ensemble: list[EnsembleJudgement] = Field(default_factory=_empty_ensemble_judgements)
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -528,7 +580,7 @@ class GapfillTask(BaseModel):
 class CoverageGap(BaseModel):
     id: str
     scan_id: str
-    attack_surface_item_id: str | None = None
+    scope_unit_id: str | None = None
     vuln_class: VulnerabilityClass | None = None
     reason: str
     recommended_next_task: str | None = None
@@ -555,8 +607,8 @@ class CoverageLedger(BaseModel):
     id: str
     scan_id: str
     workspace_id: str
-    attack_surface_items_total: int
-    attack_surface_items_scanned: int
+    agent_tasks_total: int
+    agent_tasks_scanned: int
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
@@ -960,6 +1012,8 @@ class AgentStep(BaseModel):
         "trace",
         "gapfill",
         "dynamic_validate",
+        "live_recon",
+        "exploit",
     ]
     iteration: int
     tool_calls: list[str] = Field(default_factory=_empty_strings)
@@ -994,6 +1048,8 @@ class AgentLoopResult(BaseModel):
         "reasoning_rejected",
         # All max_parse_retries for a turn consumed (schema/parse failure); loop halted.
         "schema_rejected",
+        # Per-tier tool_call_cap reached; loop stopped issuing tool calls (mdash D1).
+        "tool_call_cap",
     ]
 
 
@@ -1153,6 +1209,60 @@ class DynamicEvidenceLink(BaseModel):
     request_artifact_id: str
     response_artifact_id: str
     candidate_finding_id: str
+
+
+# ---------------------------------------------------------------------------
+# Live exploitation schemas (Shannon pillar — the app-centric track)
+# ---------------------------------------------------------------------------
+
+
+class LiveSessionContext(BaseModel):
+    """Redacted live-session state carried across exploitation turns (design D2).
+
+    Distinct from the LLM message history: holds the session cookies, CSRF/auth
+    tokens, and IDs discovered mid-chain that later requests depend on. Values are
+    redacted references (never raw secrets) — the dispatch/egress path is
+    responsible for scrubbing before anything re-enters a prompt.
+    """
+
+    cookies: dict[str, str] = Field(default_factory=dict)
+    tokens: dict[str, str] = Field(default_factory=dict)
+    discovered_ids: dict[str, str] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=_empty_strings)
+
+
+class ExploitStep(BaseModel):
+    """One request/response round in an exploit chain — an ordered proof unit (D3)."""
+
+    order: int
+    intent: str  # "login" | "enumerate" | "exploit" | ...
+    request_spec: HttpRequestSpec
+    request_artifact_id: str | None = None
+    response_artifact_id: str | None = None
+    status_code: int | None = None
+    dispatched: bool = True  # False when refused by rules-of-engagement before egress
+    confirmed: bool = False  # this step demonstrated the exploit
+    notes: str = ""
+
+
+def _empty_exploit_steps() -> list[ExploitStep]:
+    return []
+
+
+class ExploitChain(BaseModel):
+    """Ordered request/response chain that demonstrates an exploit — the proof (D3).
+
+    The app-centric analogue of Glasswing's compile-and-run PoC: a finding is emitted
+    only when a chain is ``proven`` (at least one confirmed exploit step). The chain
+    is also the persisted provenance artifact for a live-proven finding.
+    """
+
+    scan_id: str
+    workspace_id: str
+    vuln_class: VulnerabilityClass
+    steps: list[ExploitStep] = Field(default_factory=_empty_exploit_steps)
+    proven: bool = False
+    summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1337,12 +1447,51 @@ class LoginStep(BaseModel):
     ttl_seconds: int | None = None  # cache TTL; re-login on expiry or 401
 
 
+class SuccessCheck(BaseModel):
+    """Operator-defined, code-evaluated signal that a login or call succeeded (ADR-023 §3).
+
+    The verdict is decided deterministically in code — never by the model. ``description``
+    is surfaced to the agent for reasoning only.
+    """
+
+    kind: Literal["url_matches", "selector_present", "text_present", "status_ok"]
+    value: str = ""  # url substring | CSS selector | expected text | (status: unused)
+    description: str = ""
+
+
+class BrowserAction(BaseModel):
+    """One step in a browser login's closed action vocabulary (ADR-023 §2 — never raw JS)."""
+
+    action: Literal["click", "fill", "wait_for"]
+    selector: str
+    value: str | None = None  # for fill; supports ${username}/${secret:ENV}/${totp}
+
+
+def _empty_browser_actions() -> list[BrowserAction]:
+    return []
+
+
+class BrowserLoginStep(BaseModel):
+    """Declarative browser-login flow — no secrets, no arbitrary code (ADR-023 §2)."""
+
+    start_url: str  # login page path (host must be in allowed_hosts)
+    username_selector: str
+    password_selector: str
+    submit_selector: str
+    otp_selector: str | None = None  # OTP field selector (when TOTP-gated)
+    extra_steps: list[BrowserAction] = Field(default_factory=_empty_browser_actions)
+    success: SuccessCheck
+    failure_check: SuccessCheck | None = None
+    ttl_seconds: int | None = None
+
+
 class AuthProfileKind(StrEnum):
     BEARER = "bearer"
     BASIC = "basic"
     STATIC_HEADER = "static_header"
     COOKIE = "cookie"
     LOGIN_FLOW = "login_flow"
+    BROWSER_LOGIN = "browser_login"
 
 
 class AuthProfile(BaseModel):
@@ -1359,6 +1508,7 @@ class AuthProfile(BaseModel):
     username: str | None = None  # non-secret (basic auth / login template)
     name_hint: str | None = None  # custom header or cookie name
     login: LoginStep | None = None  # required when kind == login_flow
+    browser_login: BrowserLoginStep | None = None  # required when kind == browser_login
     totp: TotpConfig | None = None  # TOTP when login is OTP-gated
 
     @field_validator("secret_ref")

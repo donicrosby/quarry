@@ -33,10 +33,12 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec, ProviderPolicy
+from quarry_models.rate_limit import get_limiter
+from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_prompts.registry import TemplateNotFoundError
@@ -136,6 +138,9 @@ def hunt_impl(
     provider_policy: ProviderPolicy | None = None,
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
+    tool_call_cap: int | None = None,
+    limiter: Any | None = None,
+    artifact_root: str | None = None,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
@@ -199,8 +204,19 @@ def hunt_impl(
         cost_per_iteration=cost_per_iteration,
         provider_policy=provider_policy,
         event_sink=event_sink,
+        prompt_provenance=PromptProvenance.from_rendered(prompt),
+        scan_id=task.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
+        tool_call_cap=tool_call_cap,
+        limiter=limiter,
     )
+
+    if artifact_root is not None:
+        persist_seed_prompt(
+            artifact_root,
+            rendered_messages=prompt.messages,
+            invocations=client.invocations,
+        )
 
     findings: list[CandidateFinding] = []
     coverage_gaps: list[HunterGap] = []
@@ -231,6 +247,7 @@ def hunt_activity(
     panel_json: str | None = None,
     db_path: str | None = None,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
@@ -264,6 +281,7 @@ def hunt_activity(
             panel_json,
             db_path,
             scan_seed,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -278,6 +296,7 @@ def _hunt_activity_impl(
     panel_json: str | None,
     db_path: str | None = None,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -291,9 +310,11 @@ def _hunt_activity_impl(
     if role_cfg.provider == Provider.MOCK:
         client: Any = MockModelClient(default=_HuntResponse())
         policy: ProviderPolicy | None = None
+        limiter: Any | None = None
     else:
         client = build_model_client(role_cfg.provider, seed=scan_seed)
         policy = ProviderPolicy(provider=role_cfg.provider.value, model=role_cfg.model)
+        limiter = get_limiter(role_cfg.provider.value, "hunt", role_cfg.rpm)
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
@@ -306,6 +327,9 @@ def _hunt_activity_impl(
         provider_policy=policy,
         event_sink=make_event_sink(db_path, task.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
+        tool_call_cap=role_cfg.tool_call_cap,
+        limiter=limiter,
+        artifact_root=artifact_root,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)
