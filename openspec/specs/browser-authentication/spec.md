@@ -1,0 +1,51 @@
+# browser-authentication Specification
+
+## Purpose
+Some targets can only be authenticated through a real browser login (dynamic forms, multi-step or MFA flows). This capability drives a headless browser to establish an authenticated session, reused by the live path, while treating the resulting session strictly as a credential - scrubbed, in-memory, never shown to the agent.
+
+## Requirements
+### Requirement: Browser-based login establishes an authenticated session
+
+A `BrowserLoginResolver` SHALL establish an authenticated session against the target
+by driving a real browser through a configured login flow (finishing ADR-023), for
+applications whose authentication cannot be reproduced with raw HTTP. The resulting
+session (cookies/tokens) SHALL be made available to the exploitation loop so it can
+act as an authenticated user.
+
+#### Scenario: Authenticated session is reused by exploitation
+
+- **WHEN** an auth profile specifies a browser login flow
+- **THEN** the resolver drives the browser to authenticate
+- **AND** the exploitation loop reuses the established session for subsequent requests
+
+#### Scenario: MFA/TOTP step is handled when configured
+
+- **WHEN** the configured login flow includes a TOTP step
+- **THEN** the resolver completes it using the configured secret from the credential
+  cache
+
+### Requirement: Browser auth never leaks credentials and is scope-bound
+
+The browser login resolver SHALL source secrets only from the credential cache
+(never from prompts or logs), SHALL record only a name-level reference to the auth
+profile used on persisted records, and SHALL authenticate only against the authorized
+target.
+
+#### Scenario: Credentials do not appear in artifacts
+
+- **WHEN** a browser login runs
+- **THEN** no credential value appears in any stored prompt, log, or artifact
+- **AND** persisted records reference the auth profile by name only
+
+### Requirement: Browser dependency is optional and gated
+
+Browser automation (Playwright) SHALL be an optional dependency; a scan that does not
+use browser login SHALL not require it to be installed, and requesting a browser login
+flow without the dependency SHALL fail with a clear, actionable error.
+
+#### Scenario: Missing browser dependency fails clearly
+
+- **WHEN** a browser login flow is requested but Playwright is not installed
+- **THEN** the scan fails with an actionable error naming the missing optional
+  dependency, not an opaque import error
+

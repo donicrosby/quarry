@@ -1,0 +1,36 @@
+# live-recon Specification
+
+## Purpose
+Before exploitation, an agent explores the authorized running target to build a live attack map correlated with the code. This capability defines that live reconnaissance: it feeds the exploitation loop and only runs when live traffic is authorized; unexploited surface is not itself a finding. Live reconnaissance mirrors the recon phase of the Shannon reference pentester.
+
+## Requirements
+### Requirement: Agentic live reconnaissance of the running target
+
+An agent SHALL explore the authorized running target and produce a live attack map —
+reachable endpoints, observed behaviors, parameters, and authentication surface —
+correlating live responses with the code context that code recon already produced
+(grey/white-box). Live recon SHALL run only when live traffic is authorized and SHALL
+send requests solely through the guarded `http_request` path.
+
+#### Scenario: Live attack map correlated with code
+
+- **WHEN** live recon runs against an authorized target
+- **THEN** it emits a live attack map of reachable endpoints and behaviors
+- **AND** entries are correlated with the corresponding code entry points where known
+
+#### Scenario: No live recon without authorization
+
+- **WHEN** live traffic is not authorized (no `--dynamic-validation`/target)
+- **THEN** live recon does not run and no `http_request` is sent
+
+### Requirement: Live recon feeds exploitation, not the report directly
+
+The live attack map SHALL be input to the exploitation loop, not a finding source on
+its own; unexploited surface is reconnaissance, not a vulnerability.
+
+#### Scenario: Map drives exploitation
+
+- **WHEN** live recon produces an attack map
+- **THEN** the exploitation loop consumes it to select and attempt exploits
+- **AND** map entries with no confirmed exploit do not appear as findings
+
