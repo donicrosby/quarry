@@ -1,0 +1,32 @@
+schema: spec-driven
+
+# Project context shown to AI when creating artifacts.
+context: |
+  Quarry is a local-first, vendor-agnostic, Temporal-orchestrated agentic
+  vulnerability-research harness written in Python (managed with uv). It maps a
+  repository's architecture with a recon agent, hunts for vulnerabilities with
+  parallel role-based agents, validates each candidate with adversarial cross-model
+  review, optionally proves findings against a live target, and writes a Markdown
+  report with full provenance and a coverage ledger.
+
+  Stack: Python 3.12+, Temporal (temporalio), Typer CLI, Textual TUI, FastAPI server,
+  SQLAlchemy 2.0 + SQLite, Pydantic v2, Jinja2 prompts, LiteLLM model routing.
+  Packages live under src/ (quarry, quarry_cli, quarry_server, quarry_worker,
+  quarry_workflows, quarry_activities, quarry_models, quarry_persistence,
+  quarry_artifacts, quarry_prompts, quarry_plugins, quarry_tools, quarry_tui,
+  quarry_client, quarry_integrations).
+
+  Specs are the source of truth for this project (superseding the earlier ADR + plan
+  docs). Each spec describes one capability and must match shipped behavior in src/
+  and the behavior locked in tests/. Capabilities that are designed but not yet built
+  are specced with a Purpose that opens "Status: planned."
+
+# Per-artifact rules.
+rules:
+  specs:
+    - Use SHALL / SHALL NOT (RFC 2119) in requirement prose; keep each requirement under ~500 characters.
+    - Every safety requirement pairs a positive scenario with a fail-closed / negative scenario.
+    - Reference concrete code symbols in backticks; verify each requirement against src/ and tests/ before writing it.
+    - Strip only dbt-proprietary/internal content: no dbt product names, teams (e.g. SecEng), private-repo layouts, internal endpoints, or internal target conventions.
+    - Name the reference designs and models the project builds on - Cloudflare Glasswing, Microsoft MDASH, Keygraph Shannon, the CyberGym benchmark, and open models (Qwen, DeepSeek, Kimi via Chutes). These attributions are vital and must be preserved.
+    - Keep legitimate technical dependency names (Temporal, FastAPI, SQLite, LiteLLM, AWS Bedrock, Playwright, SCIP, ast-grep).
