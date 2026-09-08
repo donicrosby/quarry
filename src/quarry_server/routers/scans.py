@@ -68,6 +68,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             model=cfg.model,
             rate_limit_rpm=cfg.rpm,
             turn_timeout_seconds=cfg.turn_timeout_seconds,
+            tiers=[t.model_dump(mode="json") for t in cfg.tiers],
         )
         for role, cfg in resolved.items()
     ]

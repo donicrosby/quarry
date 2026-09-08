@@ -19,6 +19,7 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
 from quarry.schemas import (
     AgentTask,
@@ -2524,11 +2525,13 @@ def panel_json_for_role(scan: Scan, role: str) -> str | None:
         provider = _Provider(entry.provider)
     except ValueError:
         return None
+    tiers = [_ModelTier.model_validate(t) for t in entry.tiers]
     return _RoleConfig(
         provider=provider,
         model=entry.model,
         rpm=entry.rate_limit_rpm,
         turn_timeout_seconds=entry.turn_timeout_seconds,
+        tiers=tiers,
     ).model_dump_json()
 
 

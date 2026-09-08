@@ -281,6 +281,10 @@ class TargetAuthorization(BaseModel):
     created_at: datetime
 
 
+def _empty_tier_dicts() -> list[dict[str, Any]]:
+    return []
+
+
 class ModelPanelEntry(BaseModel):
     id: str
     scan_id: str
@@ -289,6 +293,11 @@ class ModelPanelEntry(BaseModel):
     model: str
     rate_limit_rpm: int = 30
     turn_timeout_seconds: int = 120
+    # Serialised ModelTier dicts (MDASH ensemble). Stored as plain dicts to keep
+    # schemas.py free of a panel_config import (panel_config already imports this
+    # module, so the reverse would be circular). Reconstructed into ModelTier by
+    # panel_json_for_role when building the per-role RoleConfig for the worker.
+    tiers: list[dict[str, Any]] = Field(default_factory=_empty_tier_dicts)
 
 
 class ScopeExclusion(BaseModel):
