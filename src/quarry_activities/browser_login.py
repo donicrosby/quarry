@@ -65,7 +65,14 @@ def _playwright_browser_factory(**_: Any) -> BrowserSession:
         raise BrowserLoginUnavailableError(msg) from exc
     # A real Playwright-backed BrowserSession is provided by the sandbox worker image
     # (ADR-023 §5). It is not constructed in-process here.
-    msg = "In-process Playwright driver is provided by the quarry-dynamic worker image."
+    msg = (
+        "In-process Playwright browser driver is not available: Playwright is "
+        "installed but the browser session must be provided by the quarry-dynamic "
+        "worker image (ADR-023 §5). To drive a browser locally, install the "
+        "optional browser extra (`uv sync --extra browser` / `pip install "
+        "'quarry[browser]'`) and run `playwright install chromium`, then run the "
+        "scan through the dynamic worker."
+    )
     raise BrowserLoginUnavailableError(msg)  # pragma: no cover
 
 

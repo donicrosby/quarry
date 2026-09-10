@@ -65,6 +65,26 @@ jobs:
       - name: pytest
         run: uv run pytest tests/unit tests/integration tests/golden
 
+  test-browser:
+    name: tests (browser extra)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      # Install the browser extra so the playwright codepath in
+      # browser_login.py is exercised (the default `tests` job runs without it,
+      # covering only the playwright-absent branch). Chromium is not installed
+      # — these are unit tests that stub the browser or assert actionable
+      # unavailability, not live browser automation.
+      - run: uv sync --group dev --extra browser --frozen
+      - name: pytest (browser login resolver)
+        run: uv run pytest tests/unit/test_browser_login_resolver.py -v
+
   hadolint:
     name: hadolint (Dockerfile)
     runs-on: ubuntu-latest
