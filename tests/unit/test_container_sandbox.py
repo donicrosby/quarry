@@ -319,14 +319,22 @@ class TestContainerSandboxResult:
 
 
 def _docker_available() -> bool:
-    return shutil.which("docker") is not None and (
-        subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            timeout=5,
-        ).returncode
-        == 0
-    )
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return (
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            == 0
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Slow/unresponsive daemon (loaded DinD on a CI runner) or a docker
+        # binary that fails to exec: treat as unavailable so the skipif skips
+        # the class instead of erroring at collection time.
+        return False
 
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker daemon not available")

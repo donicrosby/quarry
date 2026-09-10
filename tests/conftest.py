@@ -2,10 +2,13 @@
 
 import gc
 import os
+import subprocess
+import tempfile
 import warnings
 from collections.abc import AsyncGenerator, Generator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -52,6 +55,54 @@ from tests.ping_workflow import PingInput, PingWorkflow
 
 # Re-exported so existing imports (`from tests.conftest import PingWorkflow`) keep working.
 __all__ = ["PingInput", "PingWorkflow"]
+
+
+def _fs_is_noexec(path: Path) -> bool:
+    """True if `path`'s filesystem is mounted noexec (best-effort).
+
+    Returns False on any detection failure so we only reroute when we
+    positively confirm noexec — never on a guess.
+    """
+    try:
+        out = subprocess.run(
+            ["findmnt", "-no", "OPTIONS", "--target", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    if out.returncode != 0:
+        return False
+    return "noexec" in out.stdout.split(",")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Give pytest (and subprocesses) an exec-capable temp dir when the default is noexec.
+
+    Integration tests stage and execute built binaries (vulnerable-cli) from
+    ``tmp_path``, and the Temporal dev server execs a bundled binary from its
+    runtime dir. Containers/CI frequently mount /tmp as a ``noexec`` tmpfs, so
+    the kernel refuses exec (exit 126 / os error 13) despite a correct chmod.
+    xdist derives each worker's basetemp under /tmp, so overriding fixtures is
+    not enough — the temp root must live on an exec-capable mount. When the
+    default temp dir is noexec, repoint both pytest's basetemp and TMPDIR (for
+    the Temporal bridge, which reads TMPDIR at init) to a dir under the repo
+    root (exec-capable overlay mount). No-op when the default already execs.
+    """
+    existing = config.option.basetemp
+    if existing is not None and not _fs_is_noexec(Path(str(existing))):
+        return  # caller passed an exec-capable basetemp; respect it
+    if existing is None and not _fs_is_noexec(Path(tempfile.gettempdir())):
+        return  # default temp dir is exec-capable; nothing to do
+    repo_tmp = Path(__file__).resolve().parent.parent / ".pytest-tmp-exec"
+    # Do NOT pre-create repo_tmp: pytest's TempPathFactory.getbasetemp() calls
+    # mkdir() itself, and under xdist every worker does so — a pre-existing dir
+    # makes all but one raise FileExistsError. Set the path and let pytest
+    # create it. TMPDIR must exist for the Temporal bridge's tempfile calls, so
+    # point it at the same path (pytest creates it before any test runs).
+    config.option.basetemp = str(repo_tmp)
+    os.environ["TMPDIR"] = str(repo_tmp)
 
 
 @pytest_asyncio.fixture

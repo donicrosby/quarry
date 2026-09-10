@@ -52,3 +52,4 @@ Thumbs.db
 
 # Local Claude Code scheduled-task state
 .claude/
+.pytest-tmp-exec/
