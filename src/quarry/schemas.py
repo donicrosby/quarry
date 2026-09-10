@@ -857,6 +857,10 @@ class EntryPoint(BaseModel):
         "message_handler",
         "unknown",
     ]
+    # ADR-024 §C.2: how a CLI/binary entry point is invoked, so the prove stage
+    # runs the target without guessing. Empty/absent for non-CLI kinds.
+    invocation: list[str] = []
+    attacker_controlled_input: Literal["args", "stdin", "env", "config_file", "none"] = "none"
 
 
 # AgentTask references EntryPoint in a forward annotation but is defined above
