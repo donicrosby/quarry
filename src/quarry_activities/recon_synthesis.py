@@ -13,7 +13,51 @@ from typing import Any
 
 from temporalio import activity
 
-from quarry.schemas import ArchitectureDoc, EntryPoint, Subsystem, TrustBoundary
+from quarry.schemas import (
+    ArchitectureDoc,
+    BuildCommand,
+    EntryPoint,
+    Subsystem,
+    TrustBoundary,
+)
+
+
+def detect_build_commands(repo_root: Path | str) -> list[BuildCommand]:
+    """Detect the target's build system and return the commands to build/run it.
+
+    ADR-024 §C.1: the prove sandbox needs BuildCommand populated generically so
+    it can build targets from source, not just run pre-built binaries. Detection
+    is purely static (manifest presence at the repo root) — recon does not
+    execute anything. Unknown or absent build systems yield an empty list so the
+    caller can record an explicit skip rather than fail.
+    """
+    root = Path(repo_root)
+    if not root.is_dir():
+        return []
+
+    def has(*names: str) -> bool:
+        return any((root / n).exists() for n in names)
+
+    wd = "."
+    cmds: list[BuildCommand] = []
+    # Order matters: first match wins for ecosystems that share files.
+    if has("Cargo.toml"):
+        cmds.append(BuildCommand(purpose="build", command="cargo build --release", working_dir=wd))
+    if has("go.mod"):
+        cmds.append(BuildCommand(purpose="build", command="go build ./...", working_dir=wd))
+    if has("package.json"):
+        cmds.append(BuildCommand(purpose="install", command="npm ci", working_dir=wd))
+        cmds.append(BuildCommand(purpose="build", command="npm run build", working_dir=wd))
+    if has("pyproject.toml", "setup.py"):
+        # A Python service/CLI: no compile step; the run command is the entry.
+        cmds.append(BuildCommand(purpose="install", command="pip install .", working_dir=wd))
+        cmds.append(BuildCommand(purpose="run", command="python -m app", working_dir=wd))
+    if has("Makefile"):
+        cmds.append(BuildCommand(purpose="build", command="make", working_dir=wd))
+    if has("CMakeLists.txt"):
+        cmds.append(BuildCommand(purpose="build", command="cmake -S . -B build", working_dir=wd))
+        cmds.append(BuildCommand(purpose="build", command="cmake --build build", working_dir=wd))
+    return cmds
 
 
 def _infer_repo_type(entry_points: list[EntryPoint]) -> str:
@@ -155,7 +199,7 @@ def recon_synthesis_activity(
         subsystems=subsystems,
         entry_points=all_entry_points,
         trust_boundaries=trust_boundaries,
-        build_commands=[],
+        build_commands=detect_build_commands(repo_root),
         attack_surface_summary=attack_surface_summary,
         transcript_refs=[scan_id],
     )
