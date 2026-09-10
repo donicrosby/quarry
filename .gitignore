@@ -53,3 +53,6 @@ Thumbs.db
 # Local Claude Code scheduled-task state
 .claude/
 .pytest-tmp-exec/
+
+# Lock file generated when launching the FastAPI example via `uv run`
+examples/vulnerable-fastapi/uv.lock

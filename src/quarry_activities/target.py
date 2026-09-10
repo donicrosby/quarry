@@ -162,7 +162,6 @@ def start_local_target(
 
     process = subprocess.Popen(
         cmd,
-        cwd=app_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
