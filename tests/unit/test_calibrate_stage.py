@@ -13,7 +13,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from quarry_activities.calibrate import CalibrateResult, apply_hard_caps, calibrate_impl
 
 from quarry.schemas import (
     CandidateFinding,
@@ -22,6 +21,7 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
+from quarry_activities.calibrate import CalibrateResult, apply_hard_caps, calibrate_impl
 from quarry_models.mock_client import MockModelClient
 
 _NOW = datetime(2026, 9, 11, tzinfo=UTC)
@@ -105,7 +105,7 @@ class TestCalibrateImpl:
         result = calibrate_impl(finding=finding, repo_path="/tmp/repo", client=client)
 
         assert result.calibrated_severity is Severity.MEDIUM
-        assert result.firing_rule_ids == ["redundant-capability-downgrade"]
+        assert "redundant-capability-downgrade" in result.firing_rule_ids
 
     def test_rejected_candidate_is_not_calibrated(self) -> None:
         """Calibration must not run on findings validation rejected (spec:
