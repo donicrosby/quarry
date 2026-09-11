@@ -118,6 +118,8 @@ def _build_worker(
     task_queue: str,
     calibrate_activity_fn: Callable[..., dict[str, object]],
     executor: ThreadPoolExecutor,
+    *,
+    validator_activity: Callable[..., dict[str, object]] | None = None,
 ) -> Worker:
     from quarry_activities.coverage import build_coverage_ledger_activity
     from quarry_activities.dedup import deduplicate_activity
@@ -145,7 +147,7 @@ def _build_worker(
             emit_agent_tasks,
             _one_finding_hunt_activity,
             validate_secret_candidate,
-            _validating_validator_activity,
+            validator_activity or _validating_validator_activity,
             calibrate_activity_fn,
             deduplicate_activity,
             build_coverage_ledger_activity,
@@ -281,6 +283,9 @@ async def _run_scan(
     tmp_path: Path,
     scan_id: str,
     task_queue: str,
+    *,
+    calibrate_activity_fn: Callable[..., dict[str, object]] | None = None,
+    validator_activity: Callable[..., dict[str, object]] | None = None,
 ) -> Path:
     db_path = tmp_path / "quarry.db"
     output_dir = tmp_path / "output"
@@ -290,8 +295,11 @@ async def _run_scan(
     worker = _build_worker(
         temporal_client,
         task_queue,
-        _capping_calibrate_activity_fn(),
+        calibrate_activity_fn
+        if calibrate_activity_fn is not None
+        else _capping_calibrate_activity_fn(),
         executor,
+        validator_activity=validator_activity,
     )
     try:
         async with worker:
@@ -371,3 +379,101 @@ async def test_calibrate_stage_registered_on_worker_and_server() -> None:
         assert "calibrate_activity" in source, (
             f"{rel} must register the calibrate activity (worker/server/test parity)"
         )
+
+
+def _rejecting_validator_activity_fn() -> Callable[..., dict[str, object]]:
+    """A validate-candidate-finding mock that always rejects."""
+
+    @activity.defn(name="validate-candidate-finding")
+    def _reject(
+        finding: object,
+        repo_path: str | None = None,
+        panel: object = None,
+        budget_cap_usd: float | None = None,
+        panel_json: str | None = None,
+        db_path: str | None = None,
+        max_iterations: int = 20,
+        scan_seed: int | None = None,
+        artifact_root: str | None = None,
+    ) -> dict[str, object]:
+        finding_dict: dict[str, Any] = (
+            cast("dict[str, Any]", finding) if isinstance(finding, dict) else {}
+        )
+        scan_id = str(finding_dict.get("scan_id") or "scan-cal-rejected")
+        return {
+            "id": f"{scan_id}-validation",
+            "candidate_finding_id": str(finding_dict.get("id") or "cf"),
+            "scan_id": scan_id,
+            "verdict": "rejected",
+            "reasons": ["defense present at the sink"],
+            "cross_vendor": False,
+            "cross_vendor_disagreement": False,
+            "ensemble": [],
+            "created_at": _NOW.isoformat(),
+        }
+
+    return _reject
+
+
+@pytest.mark.skipif(not FIXTURE_REPO.exists(), reason=_SKIP_REASON)
+async def test_rejected_candidate_is_not_calibrated_and_not_reported(
+    temporal_client: Client,
+    tmp_path: Path,
+) -> None:
+    """severity-calibration spec: a rejected candidate is not calibrated, and it
+    is not reported (no FinalFinding, no report entry)."""
+    scan_id = "scan-cal-rejected"
+    calls: list[str] = []
+
+    def _tracking_calibrate(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append("calibrate")
+        return {
+            "calibrated_severity": "high",
+            "calibrated_priority": 2,
+            "firing_rule_ids": [],
+            "reproduced": "no",
+            "blast_radius": "unknown",
+            "vector": "deterministic",
+            "reasons": [],
+            "tool_calls": [],
+        }
+
+    tracking = activity.defn(name="calibrate-finding")(_tracking_calibrate)
+
+    db_path = await _run_scan(
+        temporal_client,
+        tmp_path,
+        scan_id,
+        "quarry-cal-rejected",
+        calibrate_activity_fn=tracking,
+        validator_activity=_rejecting_validator_activity_fn(),
+    )
+
+    repo = QuarryRepository(db_path)
+
+    # Not reported: no final findings and no calibrated candidate.
+    finals = repo.load_final_findings(scan_id)
+    assert finals == [], f"rejected candidate must not be reported, got {finals}"
+
+    candidates = repo.load_candidate_findings(scan_id)
+    assert len(candidates) == 1
+    rejected = candidates[0]
+    assert rejected.calibrated_severity is None, (
+        "a rejected candidate must never carry calibrated severity"
+    )
+    assert rejected.calibrated_priority is None
+    assert rejected.firing_rule_ids == []
+
+    # Calibration never ran for the rejected finding: no event, no activity call.
+    events = repo.load_events(scan_id)
+    types = [e.event_type for e in events]
+    assert "finding.calibrated" not in types
+    assert "finding.validated" not in types
+    assert "finding.rejected" in types
+    assert calls == [], "calibrate-finding must not be invoked for a rejected candidate"
+
+    # And the report exists but reports zero final findings.
+    report_path = tmp_path / "output" / "reports" / f"{scan_id}.md"
+    assert report_path.exists()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "Unsanitized exec" not in report_text.split("## Candidate findings")[0]

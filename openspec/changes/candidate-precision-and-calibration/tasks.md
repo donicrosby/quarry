@@ -25,7 +25,7 @@
 - [x] 4.2 Add the calibration rule-catalogue prompt under `prompts/calibrate/` with Mantis/Shannon attribution header, and verify render tests
 - [x] 4.3 Implement code-side hard caps that must not depend on model compliance (e.g. not-reproduced ⇒ never CRITICAL; self-contained blast radius ⇒ cap MEDIUM) with unit tests
 - [x] 4.4 Implement the calibrate activity, register in server + worker + tests, wire it after validation in `run_scan.py`, and verify 4.1 passes
-- [ ] 4.5 Add a test that a rejected candidate is not calibrated and not reported
+- [x] 4.5 Add a test that a rejected candidate is not calibrated and not reported
 
 ## 5. Adversarial-validation checklist verdict
 
