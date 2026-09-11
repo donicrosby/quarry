@@ -29,9 +29,9 @@
 
 ## 5. Adversarial-validation checklist verdict
 
-- [ ] 5.1 Write failing tests for the checklist verdict: default-false-positive stance, one outcome per constraint, source-coherence rejects nonexistent cited locations, trust-boundary rejects unreached sinks
-- [ ] 5.2 Expand `prompts/validate/refute` into the negative-constraint checklist (default-FP, ignore finder reasoning, itemized constraints) with attribution header; keep neutral-claim-only input; verify render tests
-- [ ] 5.3 Implement boundary enforcement of checklist invariants (a FAIL requires a rejecting verdict; non-rejecting verdicts carry no FAIL) that refuses invalid verdicts with an actionable error, and verify 5.1 passes
+- [x] 5.1 Write failing tests for the checklist verdict: default-false-positive stance, one outcome per constraint, source-coherence rejects nonexistent cited locations, trust-boundary rejects unreached sinks
+- [x] 5.2 Expand `prompts/validate/refute` into the negative-constraint checklist (default-FP, ignore finder reasoning, itemized constraints) with attribution header; keep neutral-claim-only input; verify render tests
+- [x] 5.3 Implement boundary enforcement of checklist invariants (a FAIL requires a rejecting verdict; non-rejecting verdicts carry no FAIL) that refuses invalid verdicts with an actionable error, and verify 5.1 passes
 - [ ] 5.4 Add a feature flag so the validator falls back to the current binary refuter when the checklist is disabled, with a test covering both paths
 
 ## 6. Coverage guarantee + exploratory injection
