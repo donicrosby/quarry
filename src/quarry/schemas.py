@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -199,6 +199,9 @@ class ArtifactKind(StrEnum):
     REPORT = "report"
     INTEGRATION_PAYLOAD = "integration_payload"
     COVERAGE_LEDGER = "coverage_ledger"
+    # candidate-precision-and-calibration: durable Knowledge Base recon artifact set
+    # (component entities, vuln-class notes, dependency graph, root index).
+    KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
 
@@ -318,6 +321,71 @@ class EvidencePathElement(BaseModel):
 
 def _empty_evidence_path() -> list[EvidencePathElement]:
     return []
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base recon records (candidate-precision-and-calibration, D3)
+# ---------------------------------------------------------------------------
+
+
+class KBComponentEntity(BaseModel):
+    """One security-relevant component record in the Knowledge Base.
+
+    Frozen: KB records are write-once artifacts. Every assertion in
+    ``security_relevance`` / ``constraints`` must be backed by a cited
+    ``path:line`` in ``source_locations`` — the harness's grounding pass
+    omits or corrects any record whose citations don't resolve to real
+    locations in the audited repository (spec: "Entity records cite source").
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    path: str
+    line: int
+    security_relevance: str = ""
+    constraints: list[str] = Field(default_factory=_empty_strings)
+    source_locations: list[str] = Field(default_factory=_empty_strings)
+
+
+class KBVulnClassNote(BaseModel):
+    """A note on one vulnerability class's relevance to the audited codebase.
+
+    Same grounding rule as ``KBComponentEntity``: every claim is cited via
+    ``source_locations``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    vuln_class: VulnerabilityClass
+    relevance: str = ""
+    relevant_paths: list[str] = Field(default_factory=_empty_strings)
+    source_locations: list[str] = Field(default_factory=_empty_strings)
+
+
+class KBDependencyGraph(BaseModel):
+    """Import/dependency graph keyed by repo-relative source paths.
+
+    Derived code-side from the audited source (never model-reported). When no
+    import structure parses, ``edges`` is empty — the artifact is present and
+    empty, not omitted (spec: "Empty dependency graph is explicit").
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    edges: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class KBRootIndex(BaseModel):
+    """Root index cataloguing every record in the Knowledge Base artifact set."""
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    entity_keys: list[str] = Field(default_factory=_empty_strings)
+    vuln_class_note_keys: list[str] = Field(default_factory=_empty_strings)
+    dependency_graph_key: str | None = None
 
 
 class ArtifactRef(BaseModel):
@@ -1178,6 +1246,7 @@ class AgentStep(BaseModel):
         "synthesis",
         "hunt",
         "validate",
+        "calibrate",
         "prove",
         "trace",
         "gapfill",

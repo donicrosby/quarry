@@ -148,6 +148,10 @@ DEFAULT_PANEL: dict[str, RoleConfig] = {
     "recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     "hunt": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     "validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    # calibrate: post-validation severity calibration (severity-calibration
+    # capability). Separate from validate to keep the adversarial-review
+    # boundary intact — calibration never judges validity, only severity.
+    "calibrate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     "gapfill": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     "prove": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     "trace": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),

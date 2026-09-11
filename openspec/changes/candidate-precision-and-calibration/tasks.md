@@ -9,10 +9,10 @@
 
 ## 2. Knowledge Base recon activity
 
-- [ ] 2.1 Write failing tests that a KB artifact set (entities, vuln-class notes, dependency graph, root index) is produced before hunt and persisted to the artifact store; empty dependency graph is present-not-missing when no imports parse
-- [ ] 2.2 Add the KB recon prompt template under `prompts/` (read/find/grep only; agent returns structured output, harness writes files) with the Mantis (Apache-2.0, via Shannon) attribution header, and verify render tests
-- [ ] 2.3 Implement the KB recon activity (structured output → artifacts), register it in server + worker + tests per the sandboxed-runner rules, and verify 2.1 passes
-- [ ] 2.4 Write and pass a test that a KB assertion lacking a cited source location is corrected/omitted rather than asserted (grounding spot-check)
+- [x] 2.1 Write failing tests that a KB artifact set (entities, vuln-class notes, dependency graph, root index) is produced before hunt and persisted to the artifact store; empty dependency graph is present-not-missing when no imports parse
+- [x] 2.2 Add the KB recon prompt template under `prompts/` (read/find/grep only; agent returns structured output, harness writes files) with the Mantis (Apache-2.0, via Shannon) attribution header, and verify render tests
+- [x] 2.3 Implement the KB recon activity (structured output → artifacts), register it in server + worker + tests per the sandboxed-runner rules, and verify 2.1 passes
+- [x] 2.4 Write and pass a test that a KB assertion lacking a cited source location is corrected/omitted rather than asserted (grounding spot-check)
 
 ## 3. KB consumption by reference (context injector)
 
@@ -21,11 +21,11 @@
 
 ## 4. Calibration stage
 
-- [ ] 4.1 Write failing tests for the calibrate stage: runs only on validated candidates, emits calibrated severity/priority + firing-rule ids, retains raw severity
-- [ ] 4.2 Add the calibration rule-catalogue prompt under `prompts/calibrate/` with Mantis/Shannon attribution header, and verify render tests
-- [ ] 4.3 Implement code-side hard caps that must not depend on model compliance (e.g. not-reproduced ⇒ never CRITICAL; self-contained blast radius ⇒ cap MEDIUM) with unit tests
-- [ ] 4.4 Implement the calibrate activity, register in server + worker + tests, wire it after validation in `run_scan.py`, and verify 4.1 passes
-- [ ] 4.5 Add a test that a rejected candidate is not calibrated and not reported
+- [x] 4.1 Write failing tests for the calibrate stage: runs only on validated candidates, emits calibrated severity/priority + firing-rule ids, retains raw severity
+- [x] 4.2 Add the calibration rule-catalogue prompt under `prompts/calibrate/` with Mantis/Shannon attribution header, and verify render tests
+- [x] 4.3 Implement code-side hard caps that must not depend on model compliance (e.g. not-reproduced ⇒ never CRITICAL; self-contained blast radius ⇒ cap MEDIUM) with unit tests
+- [x] 4.4 Implement the calibrate activity, register in server + worker + tests, wire it after validation in `run_scan.py`, and verify 4.1 passes
+- [x] 4.5 Add a test that a rejected candidate is not calibrated and not reported
 
 ## 5. Adversarial-validation checklist verdict
 
