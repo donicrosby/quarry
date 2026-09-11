@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -118,6 +118,74 @@ class TriageLabel(StrEnum):
     OOS = "oos"
 
 
+class DeploymentIntent(StrEnum):
+    """Deployment-intent judgement for a finding's cited code.
+
+    Fail-safe default is ``PRODUCTION``: intent is non-production only when
+    every production-signal check is affirmatively false.
+    """
+
+    PRODUCTION = "production"
+    SAMPLE = "sample"
+    TEST = "test"
+    EXAMPLE = "example"
+
+
+class ReVerificationOutcome(StrEnum):
+    """Outcome of a re-verification pass over a finding's cited location.
+
+    Fail-safe default is ``RETAIN``: when re-verification cannot run (missing
+    file, out-of-range line) the finding is retained under the conservative
+    verdict rather than discarded.
+    """
+
+    RAN = "ran"
+    RETAIN = "retain"
+    DISCARD = "discard"
+
+
+class VerdictDefaults:
+    """Fail-safe verdict defaults (candidate-precision-and-calibration).
+
+    Verdict-producing stages bias toward never silently dropping a finding.
+    """
+
+    @staticmethod
+    def deployment_intent(
+        *,
+        serves_traffic: bool | None = None,
+        sample_data: bool | None = None,
+    ) -> DeploymentIntent:
+        """Default ``PRODUCTION`` unless every production signal is false.
+
+        ``None`` (unknown) is not evidence of non-production. A non-production
+        intent requires ``serves_traffic`` affirmatively false; ``sample_data``
+        true then marks deliberately non-production sample code.
+        """
+        if serves_traffic is True:
+            return DeploymentIntent.PRODUCTION
+        if serves_traffic is None or sample_data is None:
+            # Any unknown signal: bias to production.
+            return DeploymentIntent.PRODUCTION
+        # serves_traffic affirmatively False — every production signal failed.
+        return DeploymentIntent.SAMPLE if sample_data else DeploymentIntent.EXAMPLE
+
+    @staticmethod
+    def reverification_outcome(
+        *,
+        file_exists: bool,
+        line_in_range: bool | None,
+    ) -> ReVerificationOutcome:
+        """Default ``RETAIN`` when re-verification cannot run.
+
+        A missing cited file or out-of-range cited line must not silently drop
+        the finding — the conservative default retains it.
+        """
+        if not file_exists or line_in_range is not True:
+            return ReVerificationOutcome.RETAIN
+        return ReVerificationOutcome.RAN
+
+
 class ArtifactKind(StrEnum):
     REPO_MANIFEST = "repo_manifest"
     CODE_SNIPPET = "code_snippet"
@@ -185,6 +253,35 @@ class SourceRef(BaseModel):
     end_line: int | None = None
     symbol: str | None = None
     snippet_hash: str | None = None
+
+
+class EvidencePathElement(BaseModel):
+    """One step in a finding's ordered, sink-first evidence path.
+
+    Elements are repo-relative ``path:line`` locators. On a finding,
+    ``evidence_path[0]`` is always the sink (the flaw's primary location),
+    followed by the steps back toward the source — the ordering is part of
+    the contract downstream dedup/correlation rely on.
+    """
+
+    path: str
+    line: int
+
+    @field_validator("path")
+    @classmethod
+    def _require_repo_relative(cls, v: str) -> str:
+        if v.startswith("/") or v.startswith(".."):
+            msg = f"evidence-path element must be repo-relative, got: {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @property
+    def locator(self) -> str:
+        return f"{self.path}:{self.line}"
+
+
+def _empty_evidence_path() -> list[EvidencePathElement]:
+    return []
 
 
 class ArtifactRef(BaseModel):
@@ -406,9 +503,20 @@ class CandidateFinding(BaseModel):
     attack_surface_item_id: str | None = None
     source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    # Ordered sink-first evidence path (sink at index 0). ``source_refs`` is
+    # retained for back-compat during the migration.
+    evidence_path: list[EvidencePathElement] = Field(default_factory=_empty_evidence_path)
     confidence: Confidence = Confidence.LOW
     severity: Severity = Severity.MEDIUM
     severity_adjusted: Severity | None = None
+    # Calibration fields (candidate-precision-and-calibration). ``raw_severity``
+    # is the hunter's severity and is never overwritten by calibration;
+    # ``calibrated_severity``/``calibrated_priority`` are None until the
+    # calibrate stage runs, and ``firing_rule_ids`` records which rules fired.
+    raw_severity: Severity | None = None
+    calibrated_severity: Severity | None = None
+    calibrated_priority: int | None = None
+    firing_rule_ids: list[str] = Field(default_factory=_empty_strings)
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
@@ -428,6 +536,14 @@ class CandidateFinding(BaseModel):
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _backfill_raw_severity(self) -> CandidateFinding:
+        # Pre-calibration findings only set ``severity``; mirror it into
+        # ``raw_severity`` so the raw value is always exposed.
+        if self.raw_severity is None:
+            self.raw_severity = self.severity
+        return self
+
 
 class FinalFinding(BaseModel):
     id: str
@@ -437,17 +553,28 @@ class FinalFinding(BaseModel):
     vuln_class: VulnerabilityClass
     severity: Severity
     severity_adjusted: Severity | None = None
+    raw_severity: Severity | None = None
+    calibrated_severity: Severity | None = None
+    calibrated_priority: int | None = None
+    firing_rule_ids: list[str] = Field(default_factory=_empty_strings)
     title: str
     summary: str
     affected_component: str | None = None
     attack_surface_item_id: str | None = None
     source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
+    evidence_path: list[EvidencePathElement] = Field(default_factory=_empty_evidence_path)
     validation_result_id: str
     proof_artifact_ids: list[str] = Field(default_factory=_empty_strings)
     trace_id: str | None = None
     triage_label: TriageLabel | None = None
     remediation: str | None = None
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _backfill_raw_severity(self) -> FinalFinding:
+        if self.raw_severity is None:
+            self.raw_severity = self.severity
+        return self
 
 
 class Report(BaseModel):
