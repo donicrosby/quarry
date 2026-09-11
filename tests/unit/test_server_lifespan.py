@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from quarry.config import QuarrySettings
+from quarry_activities.calibrate import calibrate_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.dynamic_validate import dynamic_validate_activity
@@ -84,12 +85,14 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert len(worker.workflows) == 4
             assert RunDiffScanWorkflow in worker.workflows
             assert (
-                len(worker.activities) == 30
+                len(worker.activities) == 31
             )  # +4 for http_request, sandbox_exec, prove, tracer (ADR-017); +1 build_call_graph;
             # +1 dispatch_lifecycle_hooks_activity; -2 orphaned per-class validators removed;
             # +1 dynamic_validate_activity (agentic dynamic_validate stage, ADR-017);
             # +1 live_recon_activity + +1 exploit_turn_activity (live-exploitation track);
-            # +1 kb_recon_activity (knowledge-base recon, candidate-precision-and-calibration)
+            # +1 kb_recon_activity (knowledge-base recon, candidate-precision-and-calibration);
+            # +1 calibrate_activity (severity calibration, candidate-precision-and-calibration)
+            assert calibrate_activity in worker.activities
             assert dynamic_validate_activity in worker.activities
             assert live_recon_activity in worker.activities
             assert exploit_turn_activity in worker.activities
