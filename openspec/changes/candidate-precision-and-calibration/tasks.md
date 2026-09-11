@@ -12,7 +12,7 @@
 - [x] 2.1 Write failing tests that a KB artifact set (entities, vuln-class notes, dependency graph, root index) is produced before hunt and persisted to the artifact store; empty dependency graph is present-not-missing when no imports parse
 - [x] 2.2 Add the KB recon prompt template under `prompts/` (read/find/grep only; agent returns structured output, harness writes files) with the Mantis (Apache-2.0, via Shannon) attribution header, and verify render tests
 - [x] 2.3 Implement the KB recon activity (structured output → artifacts), register it in server + worker + tests per the sandboxed-runner rules, and verify 2.1 passes
-- [ ] 2.4 Write and pass a test that a KB assertion lacking a cited source location is corrected/omitted rather than asserted (grounding spot-check)
+- [x] 2.4 Write and pass a test that a KB assertion lacking a cited source location is corrected/omitted rather than asserted (grounding spot-check)
 
 ## 3. KB consumption by reference (context injector)
 
