@@ -20,10 +20,14 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from quarry.panel_config import DEFAULT_PANEL, ModelTier, Provider, TierKind
+from quarry.panel_config import DEFAULT_PANEL, ModelTier, Provider, RoleConfig, TierKind
 from quarry.schemas import (
     CandidateFinding,
+    ChecklistConstraint,
+    ChecklistItem,
+    ChecklistOutcome,
     CredibilityLevel,
+    ValidationResult,
     VulnerabilityClass,
 )
 from quarry_activities.validate import ChecklistRefuteResponse, validate_impl
@@ -71,10 +75,8 @@ def _debater_tier() -> ModelTier:
     )
 
 
-def _panel() -> dict[str, object]:
-    panel = dict(DEFAULT_PANEL)
-    panel["validate"] = DEFAULT_PANEL["validate"]
-    return panel
+def _panel() -> dict[str, RoleConfig]:
+    return dict(DEFAULT_PANEL)
 
 
 def _validate(
@@ -100,7 +102,6 @@ def _validate(
 
 class TestChecklistCatalogue:
     def test_catalogue_lists_the_fixed_constraints(self) -> None:
-        from quarry.schemas import ChecklistConstraint
 
         assert [c.value for c in ChecklistConstraint] == [
             "hypothetical_misuse",
@@ -112,7 +113,6 @@ class TestChecklistCatalogue:
         ]
 
     def test_outcomes_are_pass_fail_na_unresolved(self) -> None:
-        from quarry.schemas import ChecklistOutcome
 
         assert [o.value for o in ChecklistOutcome] == [
             "pass",
@@ -130,7 +130,6 @@ class TestChecklistCatalogue:
 class TestOneOutcomePerConstraint:
     def test_recorded_checklist_has_one_outcome_per_constraint(self) -> None:
         """A partial model checklist is normalized: one entry per constraint."""
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         result = _validate(
             ChecklistRefuteResponse(
@@ -147,13 +146,9 @@ class TestOneOutcomePerConstraint:
         by_constraint = {item.constraint: item.outcome for item in result.checklist}
         assert by_constraint[ChecklistConstraint.TRUST_BOUNDARY] is ChecklistOutcome.PASS
         # Constraints the model omitted default to unresolved (stance preserved).
-        assert (
-            by_constraint[ChecklistConstraint.HYPOTHETICAL_MISUSE]
-            is ChecklistOutcome.UNRESOLVED
-        )
+        assert by_constraint[ChecklistConstraint.HYPOTHETICAL_MISUSE] is ChecklistOutcome.UNRESOLVED
 
     def test_duplicate_constraint_entries_are_refused(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         with pytest.raises(ChecklistInvariantError, match="hypothetical_misuse"):
             normalize_checklist(
@@ -164,11 +159,8 @@ class TestOneOutcomePerConstraint:
             )
 
     def test_checklist_round_trips_through_the_result_payload(self) -> None:
-        from quarry.schemas import ValidationResult
 
-        result = _validate(
-            ChecklistRefuteResponse(refuted=False, checklist=discharged_checklist())
-        )
+        result = _validate(ChecklistRefuteResponse(refuted=False, checklist=discharged_checklist()))
         reloaded = ValidationResult.model_validate_json(result.model_dump_json())
         assert [i.outcome for i in reloaded.checklist] == [i.outcome for i in result.checklist]
 
@@ -180,7 +172,6 @@ class TestOneOutcomePerConstraint:
 
 class TestSourceCoherence:
     def test_nonexistent_cited_location_fails_coherence_and_rejects(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         result = _validate(
             ChecklistRefuteResponse(
@@ -209,7 +200,6 @@ class TestSourceCoherence:
 
 class TestTrustBoundary:
     def test_unreached_sink_fails_trust_boundary_and_rejects(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         result = _validate(
             ChecklistRefuteResponse(
@@ -251,23 +241,18 @@ class TestDefaultFalsePositiveStance:
         assert result.credibility is CredibilityLevel.REFUTED
 
     def test_unresolved_constraint_does_not_discharge(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         result = _validate(
             ChecklistRefuteResponse(
                 refuted=True,
-                checklist=[
-                    _item(ChecklistConstraint.TRUST_BOUNDARY, ChecklistOutcome.UNRESOLVED)
-                ],
+                checklist=[_item(ChecklistConstraint.TRUST_BOUNDARY, ChecklistOutcome.UNRESOLVED)],
             )
         )
 
         assert result.verdict == "needs_proof"
 
     def test_discharged_checklist_lets_validated_stand(self) -> None:
-        result = _validate(
-            ChecklistRefuteResponse(refuted=False, checklist=discharged_checklist())
-        )
+        result = _validate(ChecklistRefuteResponse(refuted=False, checklist=discharged_checklist()))
 
         assert result.verdict == "validated"
         assert result.credibility is CredibilityLevel.UNREFUTED
@@ -278,7 +263,6 @@ class TestDefaultFalsePositiveStance:
         assert response.refuted is True
 
     def test_fail_with_non_rejecting_model_stance_is_refused_at_parse(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         with pytest.raises(ValidationError, match="source_coherence"):
             ChecklistRefuteResponse(
@@ -300,7 +284,6 @@ class TestDefaultFalsePositiveStance:
 
 class TestInvariantEnforcement:
     def test_fail_on_non_rejecting_verdict_is_refused(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         with pytest.raises(ChecklistInvariantError) as excinfo:
             enforce_checklist_invariants(
@@ -320,7 +303,6 @@ class TestInvariantEnforcement:
         assert "re-record" in message or "re-emit" in message or "correct" in message
 
     def test_needs_proof_is_a_non_rejecting_verdict(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         with pytest.raises(ChecklistInvariantError):
             enforce_checklist_invariants(
@@ -329,7 +311,6 @@ class TestInvariantEnforcement:
             )
 
     def test_non_rejecting_verdict_with_no_fail_is_accepted(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         normalized = enforce_checklist_invariants(
             verdict="validated",
@@ -342,7 +323,6 @@ class TestInvariantEnforcement:
         assert len(normalized) == len(ChecklistConstraint)
 
     def test_rejecting_verdict_may_carry_a_fail(self) -> None:
-        from quarry.schemas import ChecklistConstraint, ChecklistOutcome
 
         normalized = enforce_checklist_invariants(
             verdict="rejected",
@@ -356,7 +336,9 @@ class TestInvariantEnforcement:
 # ---------------------------------------------------------------------------
 
 
-def _item(constraint, outcome, evidence: str = ""):  # noqa: ANN001, ANN202
-    from quarry.schemas import ChecklistItem
-
+def _item(
+    constraint: ChecklistConstraint,
+    outcome: ChecklistOutcome,
+    evidence: str = "",
+) -> ChecklistItem:
     return ChecklistItem(constraint=constraint, outcome=outcome, evidence=evidence)
