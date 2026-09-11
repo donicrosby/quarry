@@ -9,15 +9,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from pydantic import BaseModel
 
 from quarry.config import QuarrySettings
 from quarry.panel_config import DEFAULT_PANEL, ModelTier, Provider, RoleConfig, TierKind
 from quarry.schemas import (
+    CandidateFinding,
     ChecklistConstraint,
     ChecklistItem,
     ChecklistOutcome,
-    CandidateFinding,
     VulnerabilityClass,
 )
 from quarry_activities.validate import (
@@ -70,7 +71,7 @@ class TestChecklistFlagDefault:
     def test_flag_defaults_on(self) -> None:
         assert QuarrySettings().validate_checklist_enabled is True
 
-    def test_flag_reads_env_off(self, monkeypatch) -> None:  # noqa: ANN001
+    def test_flag_reads_env_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("QUARRY_VALIDATE_CHECKLIST_ENABLED", "false")
         assert QuarrySettings().validate_checklist_enabled is False
 
