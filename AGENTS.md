@@ -7,7 +7,7 @@
 uv run ruff check .          # lint
 uv run ruff format --check . # format check
 uv run pyright               # strict type checking
-uv run pytest -x -q          # tests (325)
+uv run pytest -x -q          # full test suite
 
 # Single test file
 uv run pytest tests/unit/test_client.py -v
@@ -88,7 +88,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - **pytest-asyncio** in `auto` mode — async tests just work, no decorators needed.
 - **Temporal integration tests** use `temporal_env`, `temporal_client`, `temporal_worker` fixtures from `tests/conftest.py`. These start a `WorkflowEnvironment` with the test server and register all activities + all three workflows (`RunScanWorkflow`, `RunDiffScanWorkflow`, `ReconWorkflow`).
 - Integration tests create real git repos via `subprocess.run(["git", ...])` in `tmp_path`.
-- 400 tests total (~358 unit, ~26 integration, ~18 golden), 2 skipped (missing-binary guards for `rg`/`ast-grep`).
+- ~1700 tests across unit/integration/golden; some are skipped (missing-binary guards for `rg`/`ast-grep`). Do not hard-code test counts here — check `pytest --collect-only -q`.
 
 ## Environment
 
@@ -100,7 +100,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 ## Key Schemas
 
-- `src/quarry/schemas.py` — `Scan`, `CandidateFinding`, `FinalFinding`, `GitDiff`, `ChangedFile`, `ImpactedCodeRegion`, `DiffLabel`, `ScanStatus`, `ArchitectureDoc`, `Subsystem`, `TrustBoundary`, `BuildCommand`, `AgentStep`, `AgentLoopResult`, `ScopeExclusion`, `SubsystemAssignment`, etc.
+- `src/quarry/schemas.py` — `Scan`, `CandidateFinding`, `FinalFinding`, `EvidencePathElement`, `DeploymentIntent`, `ReVerificationOutcome`, `VerdictDefaults`, `GitDiff`, `ChangedFile`, `ImpactedCodeRegion`, `DiffLabel`, `ScanStatus`, `ArchitectureDoc`, `Subsystem`, `TrustBoundary`, `BuildCommand`, `AgentStep`, `AgentLoopResult`, `ScopeExclusion`, `SubsystemAssignment`, etc.
 - `src/quarry/panel_config.py` — `QuarryConfig`, `load_quarry_config`, `resolve_panel`, `resolve_focus`.
 - `src/quarry_activities/inputs.py` — All Pydantic BaseModel activity input classes.
 - `src/quarry_server/schemas.py` — FastAPI request/response models.
