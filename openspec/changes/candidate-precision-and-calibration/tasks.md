@@ -1,11 +1,11 @@
 ## 1. Schema foundation (finding model)
 
-- [ ] 1.1 Write failing tests for an ordered sink-first evidence path on the finding schema (sink at index 0, repo-relative `path:line`, order preserved through persist/re-read) and verify they fail (Red)
-- [ ] 1.2 Add the ordered evidence-path field to `src/quarry/schemas.py`, keeping `source_refs` for back-compat, and verify 1.1 passes (Green)
-- [ ] 1.3 Write failing tests for calibrated-severity fields (raw severity retained, calibrated severity/priority, firing-rule ids) and verify they fail
-- [ ] 1.4 Add the calibrated-severity fields to the finding schema and verify 1.3 passes
-- [ ] 1.5 Write failing tests for fail-safe verdict defaults (deployment intent defaults to production unless all signals false; missing-file/out-of-range re-verification defaults to retain) and verify they fail
-- [ ] 1.6 Add verdict-default semantics/types to the schema and verify 1.5 passes, then `ruff format` before staging
+- [x] 1.1 Write failing tests for an ordered sink-first evidence path on the finding schema (sink at index 0, repo-relative `path:line`, order preserved through persist/re-read) and verify they fail (Red)
+- [x] 1.2 Add the ordered evidence-path field to `src/quarry/schemas.py`, keeping `source_refs` for back-compat, and verify 1.1 passes (Green)
+- [x] 1.3 Write failing tests for calibrated-severity fields (raw severity retained, calibrated severity/priority, firing-rule ids) and verify they fail
+- [x] 1.4 Add the calibrated-severity fields to the finding schema and verify 1.3 passes
+- [x] 1.5 Write failing tests for fail-safe verdict defaults (deployment intent defaults to production unless all signals false; missing-file/out-of-range re-verification defaults to retain) and verify they fail
+- [x] 1.6 Add verdict-default semantics/types to the schema and verify 1.5 passes, then `ruff format` before staging
 
 ## 2. Knowledge Base recon activity
 
