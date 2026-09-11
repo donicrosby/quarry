@@ -9,6 +9,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from quarry.config import QuarrySettings
+from quarry_activities.calibrate import calibrate_activity
 from quarry_activities.call_graph import build_call_graph_activity
 from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
@@ -76,6 +77,7 @@ async def run_worker() -> None:
             hunt_activity,
             kb_recon_activity,
             validate_candidate_finding_activity,
+            calibrate_activity,
             dynamic_validate_activity,
             live_recon_activity,
             exploit_turn_activity,

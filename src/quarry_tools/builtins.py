@@ -37,7 +37,7 @@ class _ReadFile:
         },
         "required": ["path"],
     }
-    roles = ["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+    roles = ["recon", "hunt", "validate", "calibrate", "gapfill", "prove", "trace", "report"]
 
     def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
         resolved = _safe_resolve(str(inputs["path"]), repo_root)
@@ -56,7 +56,7 @@ class _ListDir:
         },
         "required": ["path"],
     }
-    roles = ["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+    roles = ["recon", "hunt", "validate", "calibrate", "gapfill", "prove", "trace", "report"]
 
     def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
         resolved = _safe_resolve(str(inputs["path"]), repo_root)
@@ -77,7 +77,7 @@ class _Grep:
         },
         "required": ["pattern", "scope"],
     }
-    roles = ["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+    roles = ["recon", "hunt", "validate", "calibrate", "gapfill", "prove", "trace", "report"]
 
     def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
         scope_path = _safe_resolve(str(inputs.get("scope", ".")), repo_root)
@@ -123,7 +123,7 @@ class _SearchCode:
         },
         "required": ["pattern", "lang"],
     }
-    roles = ["recon", "hunt", "validate", "gapfill", "prove", "trace", "report"]
+    roles = ["recon", "hunt", "validate", "calibrate", "gapfill", "prove", "trace", "report"]
 
     def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
         scope = str(inputs.get("scope", "."))

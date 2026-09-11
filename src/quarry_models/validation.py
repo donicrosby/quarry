@@ -34,6 +34,10 @@ ROLE_ALLOWED_ACTION_KINDS: dict[str, frozenset[str]] = {
     "hunt": frozenset({"read", "cite", "hypothesize"}),
     "gapfill": frozenset({"read", "hypothesize"}),
     "validate": frozenset({"read", "request_check"}),
+    # calibrate: read-only severity calibration (severity-calibration capability).
+    # The calibrator reads code to judge marginal capability; it never re-judges
+    # validity and never requests new checks.
+    "calibrate": frozenset({"read"}),
     # prove: transport-agnostic proof collection (ADR-017 §5).
     # run_in_sandbox — CLI/binary execution in an isolated sandbox.
     # http_request — live HTTP proof against a target endpoint.

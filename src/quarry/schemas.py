@@ -1207,6 +1207,7 @@ class AgentStep(BaseModel):
         "synthesis",
         "hunt",
         "validate",
+        "calibrate",
         "prove",
         "trace",
         "gapfill",

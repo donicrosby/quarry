@@ -20,6 +20,7 @@ Role = Literal[
     "recon",
     "hunt",
     "validate",
+    "calibrate",
     "dynamic_validate",
     "live_recon",
     "exploit",
