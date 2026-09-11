@@ -38,6 +38,7 @@ from quarry.schemas import (
     IntegrationConfig,
     IntegrationRun,
     IntegrationStatus,
+    KBRootIndex,
     ModelPanelEntry,
     ProofArtifact,
     ReachabilityVerdict,
@@ -536,6 +537,58 @@ class RunScanWorkflow:
                 "save_architecture_doc",
                 {"scan_id": scan.id, "doc": _model_json_dict(arch_doc)},
             )
+
+            # ── Knowledge Base recon (candidate-precision-and-calibration, D3) ──
+            # Built ONCE per scan, inside RECON, BEFORE the hunt stage. The KB
+            # artifact set (component entities, vuln-class notes, dependency
+            # graph, root index) is persisted to the artifact store; later
+            # stages consume it by reference. Best-effort: a KB failure never
+            # blocks the scan — the workflow records the failure and proceeds.
+            kb_root_index_key: str | None = None
+            try:
+                kb_payload = await workflow.execute_activity(
+                    "kb-recon",
+                    args=[
+                        repo_path,
+                        scan.id,
+                        arch_doc.model_dump_json(),
+                        recon_panel_json,
+                        None,  # budget_cap_usd — KB runs under the scan budget
+                        scan_input.db_path,
+                        scan_input.recon_max_iterations,
+                        scan_input.scan_seed,
+                        artifact_root,
+                    ],
+                    start_to_close_timeout=timedelta(hours=1),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                kb_root_index_key = _kb_root_index_key_from_activity(kb_payload)
+                if kb_root_index_key is not None:
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "update_scan_metadata",
+                        {
+                            "scan_id": scan.id,
+                            "metadata": {
+                                "kb_root_index_key": kb_root_index_key,
+                                "kb_recon_completed_at": workflow.now().isoformat(),
+                            },
+                        },
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "kb.recon.completed",
+                        {"index_key": kb_root_index_key},
+                    )
+            except Exception as exc:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "kb.recon.failed",
+                    {"error": _describe_failure(exc)},
+                )
 
             # Emit one AgentTask per (vuln_class, scope)
             emit_payload = await workflow.execute_activity(
@@ -3075,6 +3128,25 @@ def _architecture_doc_from_activity(payload: object) -> ArchitectureDoc:
         return ArchitectureDoc.model_validate(cast(dict[str, Any], payload))
     msg = f"Unexpected ArchitectureDoc payload: {type(payload).__name__}"
     raise TypeError(msg)
+
+
+def _kb_root_index_key_from_activity(payload: object) -> str | None:
+    """Extract the KB root-index artifact key from the kb-recon activity payload.
+
+    Returns None when the payload carries no index (e.g. the activity returned
+    records without persisting), so the workflow records nothing on the scan.
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = cast(dict[str, Any], payload)
+    index_json = data.get("index_json")
+    if not isinstance(index_json, str) or not index_json:
+        return None
+    try:
+        index = KBRootIndex.model_validate_json(index_json)
+    except Exception:
+        return None
+    return "kb/index.json" if index.entity_keys or index.dependency_graph_key else None
 
 
 def _agent_tasks_from_activity(payload: object) -> list[AgentTask]:

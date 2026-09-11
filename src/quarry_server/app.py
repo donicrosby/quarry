@@ -27,6 +27,7 @@ from quarry_activities.exploit import exploit_turn_activity
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.integrations import deliver_integrations_activity
+from quarry_activities.kb_recon import kb_recon_activity
 from quarry_activities.lifecycle_hooks import dispatch_lifecycle_hooks_activity
 from quarry_activities.live_recon import live_recon_activity
 from quarry_activities.mapper import map_impacted_regions
@@ -100,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
                 recon_synthesis_activity,
                 emit_agent_tasks,
                 hunt_activity,
+                kb_recon_activity,
                 validate_candidate_finding_activity,
                 calibrate_activity,
                 dynamic_validate_activity,
