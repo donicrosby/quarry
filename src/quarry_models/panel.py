@@ -22,6 +22,7 @@ DEFAULT_PANEL: dict[str, PanelSlot] = {
     "recon": PanelSlot("anthropic", "claude-sonnet-4-6", 60),
     "hunt": PanelSlot("anthropic", "claude-opus-4-8", 30),
     "validate": PanelSlot("openai", "gpt-4.1-mini", 200),
+    "calibrate": PanelSlot("openai", "gpt-4.1-mini", 200),
     "dynamic_validate": PanelSlot("anthropic", "claude-opus-4-8", 20),
     "live_recon": PanelSlot("anthropic", "claude-sonnet-4-6", 30),
     "exploit": PanelSlot("anthropic", "claude-opus-4-8", 20),
