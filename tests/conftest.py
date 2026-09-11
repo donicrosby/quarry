@@ -25,6 +25,7 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
+from quarry_activities.calibrate import calibrate_activity
 from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
@@ -167,6 +168,7 @@ async def temporal_worker(
             emit_agent_tasks,
             hunt_activity,
             validate_activity,
+            calibrate_activity,
             gapfill_activity,
             deduplicate_activity,
         ],

@@ -1400,6 +1400,22 @@ class RunScanWorkflow:
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
                     final = final_from_candidate(candidate, scan.id, workflow.now())
+                    # ── CALIBRATE stage (severity-calibration capability) ──────
+                    # Runs only on validated candidates, before the finding is
+                    # reported: the calibrate activity bounds the finding's
+                    # severity/priority by marginal attacker capability and
+                    # records which catalogue rules fired. Raw severity is
+                    # retained on the finding; calibration never overwrites it.
+                    final, candidate = await self._calibrate_validated_finding(
+                        scan_input, scan, repo_path, artifact_root, final, candidate
+                    )
+                    # Keep the accumulator in sync so later stages (TRACER,
+                    # report) persist the calibrated candidate, not the stale
+                    # pre-calibration object.
+                    for idx, existing in enumerate(candidate_findings):
+                        if existing.id == candidate.id:
+                            candidate_findings[idx] = candidate
+                            break
                     # Live-prove path: supplement confirmed findings with HTTP evidence.
                     if (
                         scan_input.live_prove_enabled
@@ -1967,6 +1983,105 @@ class RunScanWorkflow:
             )
 
         return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
+
+    async def _calibrate_validated_finding(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        final: FinalFinding,
+        candidate: CandidateFinding,
+    ) -> tuple[FinalFinding, CandidateFinding]:
+        """Calibrate a freshly validated finding (severity-calibration capability).
+
+        Dispatches the ``calibrate-finding`` activity and mirrors its calibrated
+        severity/priority + firing-rule ids onto BOTH the FinalFinding that is
+        reported and the CandidateFinding that is persisted. The hunter's raw
+        severity is never modified. Best-effort: on activity failure the
+        finding keeps its raw severity (a calibration outage must never drop or
+        block a validated finding — rollback note in the change design).
+        """
+        calibrate_panel_json = panel_json_for_role(scan, "calibrate")
+        try:
+            calibrate_raw = await workflow.execute_activity(
+                "calibrate-finding",
+                args=[
+                    candidate.model_dump(mode="json"),
+                    repo_path,
+                    None,
+                    None,
+                    calibrate_panel_json,
+                    scan_input.db_path,
+                    10,
+                    scan_input.scan_seed,
+                    None,
+                    artifact_root,
+                ],
+                start_to_close_timeout=timedelta(hours=1),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+        except Exception as exc:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "calibrate.failed",
+                {"finding_id": final.id, "error": _describe_failure(exc)},
+            )
+            return (final, candidate)
+
+        if not isinstance(calibrate_raw, dict):
+            return (final, candidate)
+        payload = cast("dict[str, Any]", calibrate_raw)
+
+        calibrated = _severity_from_activity(payload.get("calibrated_severity"))
+        if calibrated is None:
+            return (final, candidate)
+
+        priority_raw = payload.get("calibrated_priority")
+        priority = int(priority_raw) if isinstance(priority_raw, (int, str)) else None
+        rules_raw: object = payload.get("firing_rule_ids")
+        firing_rule_ids: list[str] = []
+        if isinstance(rules_raw, (list, tuple)):
+            firing_rule_ids = [
+                str(rule_id)
+                for rule_id in cast("list[object]", rules_raw)
+                if isinstance(rule_id, str)
+            ]
+
+        # Mirror the calibration onto both the reported final and the persisted
+        # candidate; raw severity stays untouched on each.
+        final = final.model_copy(
+            update={
+                "calibrated_severity": calibrated,
+                "calibrated_priority": priority,
+                "firing_rule_ids": firing_rule_ids,
+            }
+        )
+        candidate = candidate.model_copy(
+            update={
+                "calibrated_severity": calibrated,
+                "calibrated_priority": priority,
+                "firing_rule_ids": firing_rule_ids,
+            }
+        )
+        await _persist_scan_state(
+            scan_input.db_path,
+            "save_candidate_finding",
+            {"finding": _model_json_dict(candidate)},
+        )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "finding.calibrated",
+            {
+                "finding_id": final.id,
+                "calibrated_severity": calibrated.value,
+                "firing_rule_ids": ",".join(firing_rule_ids),
+            },
+        )
+        return (final, candidate)
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
@@ -2580,6 +2695,18 @@ def _model_json_dict(model: BaseModel) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
+def _severity_from_activity(raw: object) -> Severity | None:
+    """Coerce an activity payload's severity field into a ``Severity`` (or None)."""
+    if isinstance(raw, Severity):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return Severity(raw)
+        except ValueError:
+            return None
+    return None
+
+
 def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -> FinalFinding:
     """Build a FinalFinding from a validated CandidateFinding.
 
@@ -2593,6 +2720,13 @@ def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) ->
         fingerprint=candidate.metadata.get("fingerprint", candidate.id),
         vuln_class=candidate.vuln_class,
         severity=candidate.severity,
+        # Calibration mirror (severity-calibration capability): a candidate
+        # already calibrated upstream keeps its calibrated fields on promotion;
+        # the workflow's CALIBRATE stage stamps them post-validation too.
+        raw_severity=candidate.raw_severity,
+        calibrated_severity=candidate.calibrated_severity,
+        calibrated_priority=candidate.calibrated_priority,
+        firing_rule_ids=list(candidate.firing_rule_ids),
         title=candidate.title,
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,
