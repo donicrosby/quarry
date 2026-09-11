@@ -37,8 +37,7 @@ def test_kb_recon_registered_in_server_worker() -> None:
 
     source = inspect.getsource(server_app)
     assert "kb_recon_activity" in source, (
-        "kb_recon_activity must be registered in the in-process worker in "
-        "quarry_server/app.py"
+        "kb_recon_activity must be registered in the in-process worker in quarry_server/app.py"
     )
 
 

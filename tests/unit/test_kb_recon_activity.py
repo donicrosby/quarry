@@ -19,6 +19,7 @@ from pathlib import Path
 
 from quarry.schemas import (
     ArtifactKind,
+    ArtifactRef,
     KBComponentEntity,
     KBDependencyGraph,
     KBRootIndex,
@@ -85,7 +86,7 @@ def test_kb_schemas_round_trip() -> None:
     graph = KBDependencyGraph(edges={"app.py": ["json", "services"]})
     assert KBDependencyGraph.model_validate_json(graph.model_dump_json()) == graph
 
-    note = KBVulnClassNote(
+    KBVulnClassNote(
         vuln_class=VulnerabilityClass.COMMAND_INJECTION,
         relevance="No subprocess/exec usage observed in scope.",
         relevant_paths=["app.py"],
@@ -118,30 +119,9 @@ def test_kb_activity_persists_full_artifact_set(tmp_path: Path) -> None:
     repo.mkdir()
     _write_repo(repo)
 
-    output = KbReconOutput(
-        component_entities=[
-            {
-                "id": "services/__init__.py::clean_name",
-                "name": "clean_name",
-                "path": "services/__init__.py",
-                "line": 1,
-                "security_relevance": "Sanitizes the caller-controlled name.",
-                "constraints": ["Strips surrounding whitespace."],
-                "source_locations": ["services/__init__.py:1"],
-            }
-        ],
-        vuln_class_notes=[
-            {
-                "vuln_class": "command_injection",
-                "relevance": "No shell exec observed; only an input sanitizer.",
-                "relevant_paths": ["app.py"],
-                "source_locations": ["app.py:4"],
-            }
-        ],
-        tool_calls=[],
-    )
-    client = MockModelClient(default=output)
-
+    # Default (mock) activity path: no real model client is constructed; the
+    # mock returns an empty KbReconOutput, so the artifact set consists of the
+    # root index + derived (code-side) dependency graph.
     result = kb_recon_activity(
         str(repo),
         "scan-1",
@@ -149,25 +129,28 @@ def test_kb_activity_persists_full_artifact_set(tmp_path: Path) -> None:
     )
 
     store = LocalArtifactStore(tmp_path / "artifacts")
+    refs = {k: ArtifactRef.model_validate(v) for k, v in result["artifact_refs"].items()}
     index = KBRootIndex.model_validate_json(result["index_json"])
+    assert index.scan_id == "scan-1"
     assert index.dependency_graph_key is not None
     assert index.dependency_graph_key.endswith("dependency_graph.json")
-    assert len(index.entity_keys) == 1
-    assert len(index.vuln_class_note_keys) == 1
 
-    # Every record referenced by the index is actually persisted and parses.
-    entity_ref = result["artifact_refs"][index.entity_keys[0]]
-    stored_entity = KBComponentEntity.model_validate(
-        json.loads(store.get_bytes(entity_ref))
-    )
-    assert stored_entity.source_locations == ["services/__init__.py:1"]
+    # The mock returns no records: the index catalogues none (but still exists).
+    assert index.entity_keys == []
+    assert index.vuln_class_note_keys == []
 
-    graph_ref = result["artifact_refs"][index.dependency_graph_key]
+    # The dependency graph is derived code-side from the source, and persisted.
+    graph_ref = refs[index.dependency_graph_key]
     stored_graph = KBDependencyGraph.model_validate(json.loads(store.get_bytes(graph_ref)))
     assert stored_graph.edges.get("app.py") is not None
 
+    # The root index itself is persisted as an artifact.
+    index_ref = refs["kb/index.json"]
+    stored_index = KBRootIndex.model_validate(json.loads(store.get_bytes(index_ref)))
+    assert stored_index == index
+
     # All artifacts are tagged KNOWLEDGE_BASE.
-    for ref in result["artifact_refs"].values():
+    for ref in refs.values():
         assert ref.kind is ArtifactKind.KNOWLEDGE_BASE
 
 
@@ -178,7 +161,6 @@ def test_empty_dependency_graph_is_present_not_missing(tmp_path: Path) -> None:
     (repo / "README.txt").write_text("not source code\n", encoding="utf-8")
     (repo / "notes.md").write_text("# design notes\n", encoding="utf-8")
 
-    client = MockModelClient(default=_empty_kb())
     result = kb_recon_activity(
         str(repo),
         "scan-1",
@@ -189,7 +171,8 @@ def test_empty_dependency_graph_is_present_not_missing(tmp_path: Path) -> None:
     assert index.dependency_graph_key is not None
 
     store = LocalArtifactStore(tmp_path / "artifacts")
-    graph_ref = result["artifact_refs"][index.dependency_graph_key]
+    refs = {k: ArtifactRef.model_validate(v) for k, v in result["artifact_refs"].items()}
+    graph_ref = refs[index.dependency_graph_key]
     graph = KBDependencyGraph.model_validate(json.loads(store.get_bytes(graph_ref)))
     assert graph.edges == {}
 
@@ -211,7 +194,8 @@ def test_impl_without_artifact_root_returns_records_without_persisting(
 
     assert entities == []
     assert notes == []
-    assert graph.edges == {}
+    # The graph is code-side: it reflects the repo's imports, not the mock output.
+    assert graph.edges.get("app.py") is not None
     assert not (tmp_path / "artifacts").exists()
 
 

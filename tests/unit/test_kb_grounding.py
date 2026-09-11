@@ -71,10 +71,12 @@ def test_grounding_drops_uncited_assertions(tmp_path: Path) -> None:
     repo.mkdir()
     _write_repo(repo)
 
-    grounded = ground_kb_assertions(repo_root=repo, output=_uncited_output())
+    grounded_entities, grounded_notes = ground_kb_assertions(
+        repo_root=repo, output=_uncited_output()
+    )
 
-    entity_paths = {(e.path, e.name) for e in grounded.component_entities}
-    note_classes = {n.vuln_class for n in grounded.vuln_class_notes}
+    entity_paths = {(e.path, e.name) for e in grounded_entities}
+    note_classes = {n.vuln_class for n in grounded_notes}
 
     # The hallucinated/uncited records are gone.
     assert ("app.py", "authorize") not in entity_paths
@@ -87,12 +89,11 @@ def test_grounding_corrects_citable_assertions(tmp_path: Path) -> None:
     repo.mkdir()
     _write_repo(repo)
 
-    grounded = ground_kb_assertions(repo_root=repo, output=_uncited_output())
-
-    handler = next(
-        (e for e in grounded.component_entities if e.name == "handler"),
-        None,
+    grounded_entities, _grounded_notes = ground_kb_assertions(
+        repo_root=repo, output=_uncited_output()
     )
+
+    handler = next((e for e in grounded_entities if e.name == "handler"), None)
     # Corrected: the cited location now points at the real symbol.
     assert handler is not None
     assert handler.source_locations, "corrected assertion must carry a citation"
