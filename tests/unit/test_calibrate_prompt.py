@@ -10,12 +10,15 @@ catalogue plus the finding under calibration.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 
 _ROLE = "calibrate"
 _NAME = "calibrate"
 _VERSION = "1.0.0"
+_TEMPLATE = Path(__file__).parent.parent.parent / "prompts" / _ROLE / f"{_NAME}.{_VERSION}.j2"
 
 
 def _variables() -> dict[str, object]:
@@ -60,12 +63,11 @@ def test_calibrate_prompt_renders_rule_catalogue() -> None:
 
 def test_calibrate_prompt_carries_mantis_shannon_attribution() -> None:
     """Lifted prompt content names Mantis (Apache-2.0) via Shannon (D6)."""
-    registry = get_registry()
-    template = registry.load(_ROLE, _NAME, _VERSION)
+    source = _TEMPLATE.read_text(encoding="utf-8")
 
-    assert "Mantis" in template._source
-    assert "Apache-2.0" in template._source
-    assert "Shannon" in template._source
+    assert "Mantis" in source
+    assert "Apache-2.0" in source
+    assert "Shannon" in source
 
 
 def test_calibrate_prompt_renders_finding_context() -> None:
