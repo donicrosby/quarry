@@ -118,8 +118,8 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - `GET /scans` — list scans
 - `GET /scans/{id}` — get scan
 - `GET /scans/{id}/findings` — get findings
-- `GET /scans/{id}/attack-surface` — get attack surface
 - `GET /scans/{id}/status` — SSE stream
+- `GET /scans/{id}/events` — event stream (SSE variant)
 - `POST /scans/{id}/cancel` — cancel scan (409 if already ended)
 - `POST /scans/{id}/resume` — resume from checkpoint
 - `POST /scans/{id}/replay` — re-render report from stored findings (no new model calls)

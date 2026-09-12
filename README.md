@@ -1,10 +1,14 @@
 # Quarry
 
-Quarry is a local-first, Temporal-orchestrated agentic vulnerability research harness. It
-maps the architecture of any repository with a recon agent, then scans for secrets, IDOR
-patterns, and command-injection sinks, validates each candidate finding against a live
-target, produces a safe local proof, and writes a Markdown report with provenance and a
-coverage ledger.
+Quarry is a local-first, Temporal-orchestrated agentic vulnerability research harness. A
+recon agent maps the architecture of any repository (languages, subsystems, entry points,
+trust boundaries), then hunter agents investigate across 18 vulnerability classes, an
+adversarial validation stage (negative-constraint checklist refuter + optional tiered
+debater ensemble) tries to refute each candidate from the code, validated findings get a
+severity calibration pass and — for findings that warrant it — a safe local proof
+(exploit chain) and a reachability trace, and the scan closes with a production-file
+coverage ledger (covered / intentionally-excluded / gap), exploratory gapfill injection,
+and a Markdown report with full provenance.
 
 ## Quickstart
 
@@ -53,11 +57,18 @@ prerequisite is down it prints the exact commands to start it.
 After a successful scan:
 
 - **Architecture doc** — `ArchitectureDoc` with detected languages, subsystems, entry
-  points, trust boundaries, and build commands, produced by the recon agent.
-- **Attack surface** — FastAPI routes extracted from the repo source.
-- **Findings** — secrets, IDOR, and command-injection findings, each with a fingerprint
-  and a safe local proof artifact.
-- **Coverage ledger** — which files and regions were scanned and which were skipped.
+  points, trust boundaries, and build commands, produced by the recon agent, plus a
+  rendered attack-surface summary (`reports/<scan_id>-architecture.md`).
+- **Findings** — candidates across 18 vulnerability classes (secrets, IDOR,
+  command-injection, SSRF, SQLi, XSS, path traversal, SSTI, insecure deserialization,
+  auth, security misconfiguration, and more), each validated by an adversarial
+  checklist-refuter pass, severity-calibrated, and carrying a fingerprint and — where
+  warranted — a safe local proof artifact and reachability trace.
+- **Knowledge base** — a per-scan KB root index (`kb-recon`) whose referenced records
+  inject as context into hunt/gapfill/validate prompts.
+- **Coverage ledger** — which production files were covered, intentionally excluded
+  (tests / vendored / generated / out-of-scope, each with a recorded reason), or left as
+  honest gaps, plus exploratory gapfill injection against uncovered areas.
 - **Markdown report** — `.quarry/reports/<scan_id>.md` with findings, provenance, and
   coverage summary.
 - **Dry-run integrations** — Jira and Slack delivery payloads written to
@@ -134,7 +145,4 @@ uv run pre-commit install --hook-type commit-msg
 
 ## Deferred
 
-- Live model calls in the scan path (currently uses `MockModelClient`; real provider
-  wiring is later milestones).
-- Automatic target launching.
 - Kubernetes deployment (see `docs/kubernetes-scale-plan.md`).
