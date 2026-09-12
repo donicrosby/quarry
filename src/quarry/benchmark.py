@@ -97,6 +97,11 @@ def _final_finding_key(item: FinalFinding) -> str:
 
 
 def _finding_file_path(item: FinalFinding) -> str:
+    # Prefer the ordered sink (evidence_path[0]) — the flaw's primary location
+    # — over the unordered source_refs list (cpc task 7.2); fall back for
+    # findings that never got an ordered path.
+    if item.evidence_path:
+        return item.evidence_path[0].path
     if item.source_refs:
         return item.source_refs[0].file_path
     return item.affected_component or ""

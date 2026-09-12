@@ -22,6 +22,7 @@ from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
+    EvidencePathElement,
     SourceRef,
     VulnerabilityClass,
     utc_now,
@@ -185,6 +186,7 @@ def secret_match_to_candidate_finding(
                 symbol=match.key_name,
             )
         ],
+        evidence_path=[EvidencePathElement(path=match.file_path, line=match.line_number)],
         confidence=Confidence.MEDIUM,
         created_by=created_by,
         created_at=created_at or utc_now(),

@@ -127,6 +127,9 @@ Return a JSON object with these keys:
   - affected_component: file path and function/line (e.g. "app.py:84")
   - confidence: "low", "medium", or "high"
   - severity: "low", "medium", "high", or "critical"
+  - evidence_path: ORDERED list of {path, line} objects, sink first — the FIRST element MUST be the flaw's primary location (the sink),
+    followed by the steps back toward the attacker-controlled source. path is repo-relative, line an integer. Cite only code you read;
+    if you cannot read a file you would need to cite, emit no evidence_path rather than inventing a locator.
   - source_refs: list of {file_path, start_line, end_line, snippet} objects (file_path REQUIRED, repo-relative, no line numbers in it)
 
 "coverage_gaps": list of {area, reason} objects naming any path/dir/file/input vector you

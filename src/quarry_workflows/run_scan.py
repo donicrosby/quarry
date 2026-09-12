@@ -2814,6 +2814,7 @@ def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) ->
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,
         source_refs=candidate.source_refs,
+        evidence_path=candidate.evidence_path,
         validation_result_id=f"{candidate.id}-validation",
         created_at=now,
     )
@@ -2955,9 +2956,14 @@ def promote_with_dynamic_evidence(
 
     proof_ids = [r for r in [req_ref, resp_ref] if r]
 
-    # Use the first source_ref if available; fall back to a minimal placeholder.
+    # Prefer the ordered sink (evidence_path[0]) for the evidence link; fall
+    # back to the first unordered source_ref only for findings that never got
+    # an ordered path (cpc task 7.2 — retire source_refs ordering reliance).
     source_ref: SourceRef
-    if candidate.source_refs:
+    if candidate.evidence_path:
+        sink = candidate.evidence_path[0]
+        source_ref = SourceRef(file_path=sink.path, start_line=sink.line, end_line=sink.line)
+    elif candidate.source_refs:
         source_ref = candidate.source_refs[0]
     else:
         source_ref = SourceRef(
@@ -2982,6 +2988,7 @@ def promote_with_dynamic_evidence(
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,
         source_refs=candidate.source_refs,
+        evidence_path=candidate.evidence_path,
         validation_result_id=f"{candidate.id}-dynamic-validation",
         proof_artifact_ids=proof_ids,
         created_at=now,
