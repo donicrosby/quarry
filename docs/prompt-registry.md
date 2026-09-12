@@ -4,7 +4,10 @@ The prompt registry (ADR-019) is the single chokepoint for assembling model
 prompts. `build_prompt` renders a template into a `RenderedPrompt` — a message
 list plus per-part hashes, evidence hashes, and a YAML provenance header
 prepended to the system message. Every `ModelInvocation` persists those
-provenance hashes, so a prompt's *identity* is always recorded.
+provenance hashes, so a prompt's *identity* is always recorded. Templates live
+under `prompts/` grouped by stage (`hunt/`, `validate/`, `calibrate/`, `gapfill/`,
+`prove/`, `trace/`, `recon/`, `task/`, `dynamic_validate/`, `exploit/`,
+`live_recon/`, plus `_envelope`/`_feedback` partials).
 
 This document covers the **retention-gated storage of the rendered prompt bytes
 themselves** (change: `model-prompt-artifact-storage`). Storing the bytes turns
