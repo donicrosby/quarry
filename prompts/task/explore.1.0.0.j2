@@ -1,0 +1,25 @@
+{#
+  Task-prompt partial for unconstrained exploratory investigations
+  (candidate-precision-and-calibration, cpc slice 6).
+
+  Prompt provenance (attribution header, per openspec/config.yaml attribution
+  rules): the unconstrained-exploration pattern — deliberately spending a
+  bounded fraction of investigations on open-ended, no-context sweeps that
+  ignore the current threat model — is adapted from the Mantis
+  security-review skills (Apache-2.0), via Keygraph Shannon 3.0's static
+  engine. The attribution travels with the content.
+#}
+<!-- QUARRY:PART:developer -->
+Unconstrained exploratory investigation of **{{ area }}**.
+
+You have NO vulnerability class, NO entry points, NO recon notes, and NO
+threat model context for this task. That is deliberate: the current threat
+model may mark this area safe or low-risk, and this investigation exists to
+check that assumption.
+
+- Treat every input, boundary, and assumption in **{{ area }}** as UNTRUSTED.
+  Do not import any prior judgement that this area is safe.
+- Audit the area fresh: read what it does, who calls it, what it consumes,
+  and where its outputs go.
+- Report anything an attacker could do here that the class-driven hunters
+  would not have looked for.

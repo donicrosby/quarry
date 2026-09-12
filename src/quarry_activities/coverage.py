@@ -9,7 +9,7 @@ surfaced in the report so coverage gaps are never hidden.
 import json
 from datetime import datetime
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from uuid import uuid4
 
@@ -20,22 +20,203 @@ from quarry.schemas import (
     ArtifactRef,
     CoverageGap,
     CoverageLedger,
+    FileManifestEntry,
+    ProductionFileAccounting,
+    ProductionFileStatus,
     RedactionStatus,
     VulnerabilityClass,
     utc_now,
 )
 from quarry_activities.inputs import BuildCoverageLedgerInput, BuildCoverageLedgerOutput
 
+# ---------------------------------------------------------------------------
+# Proactive production-file accounting (candidate-precision-and-calibration).
+#
+# The production-code boundary classifies every manifest file. Files outside
+# the boundary (tests, vendored, generated, build/config/data) are recorded as
+# INTENTIONALLY_EXCLUDED with the boundary reason — never silently omitted.
+# Everything inside the boundary is a first-party production source file and
+# MUST be accounted for as COVERED or surfaced as a GAP.
+# ---------------------------------------------------------------------------
+
+TEST_DIR_PARTS = frozenset({"test", "tests", "spec", "specs", "__tests__", "testing"})
+TEST_FILE_MARKERS = ("test_", "tests_", "spec_", "conftest")
+TEST_FILE_SUFFIXES = (
+    "_test.go",
+    ".test.js",
+    ".test.jsx",
+    ".test.ts",
+    ".test.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    ".spec.ts",
+    ".spec.tsx",
+    "_spec.rb",
+)
+VENDORED_PARTS = frozenset({"vendor", "vendors", "node_modules", "third_party", "external"})
+GENERATED_NAME_SUFFIXES = (
+    ".min.js",
+    ".min.css",
+    ".map",
+    ".lock",
+    ".pb.go",
+    ".pb.cc",
+    ".pb.h",
+)
+GENERATED_NAME_MARKERS = (".generated.", "_generated.", ".gen.")
+PRODUCTION_SOURCE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".go",
+        ".rs",
+        ".rb",
+        ".java",
+        ".kt",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".hpp",
+        ".cs",
+        ".php",
+    }
+)
+
+REASON_TEST_CODE = "test code"
+REASON_VENDORED = "vendored"
+REASON_GENERATED = "generated or build artifact"
+REASON_BUILD_CONFIG = "build, config, or data"
+
+
+def _file_stem(path: PurePosixPath) -> str:
+    name = path.name
+    for suffix in PRODUCTION_SOURCE_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return path.stem
+
+
+def production_file_classification(path: str) -> ProductionFileAccounting | None:
+    """Classify *path* against the production-code boundary.
+
+    Returns ``None`` when the file is a first-party production source file in
+    scope (it must then be accounted for as COVERED or GAP), or an
+    ``INTENTIONALLY_EXCLUDED`` accounting with the boundary reason when the
+    file is excluded (tests, vendored, generated, build/config/data).
+    """
+    normalized = PurePosixPath(path.replace("\\", "/"))
+    name = normalized.name
+    name_lower = name.lower()
+    stem_lower = _file_stem(normalized).lower()
+    parts_lower = frozenset(part.lower() for part in normalized.parts[:-1])
+
+    if (
+        parts_lower & TEST_DIR_PARTS
+        or stem_lower.startswith(TEST_FILE_MARKERS)
+        or stem_lower.endswith(("_test", "_tests", "_spec"))
+        or (name_lower.endswith(TEST_FILE_SUFFIXES))
+    ):
+        return ProductionFileAccounting(
+            path=normalized.as_posix(),
+            status=ProductionFileStatus.INTENTIONALLY_EXCLUDED,
+            reason=REASON_TEST_CODE,
+        )
+    if parts_lower & VENDORED_PARTS:
+        return ProductionFileAccounting(
+            path=normalized.as_posix(),
+            status=ProductionFileStatus.INTENTIONALLY_EXCLUDED,
+            reason=REASON_VENDORED,
+        )
+    if name_lower.endswith(GENERATED_NAME_SUFFIXES) or any(
+        marker in name_lower for marker in GENERATED_NAME_MARKERS
+    ):
+        return ProductionFileAccounting(
+            path=normalized.as_posix(),
+            status=ProductionFileStatus.INTENTIONALLY_EXCLUDED,
+            reason=REASON_GENERATED,
+        )
+    if normalized.suffix.lower() not in PRODUCTION_SOURCE_SUFFIXES:
+        return ProductionFileAccounting(
+            path=normalized.as_posix(),
+            status=ProductionFileStatus.INTENTIONALLY_EXCLUDED,
+            reason=REASON_BUILD_CONFIG,
+        )
+    return None
+
+
+def compute_file_coverage(
+    file_manifest: list[FileManifestEntry],
+    *,
+    covered_files: list[str] | None = None,
+    scope_excluded_files: list[tuple[str, str]] | None = None,
+    finding_file_paths: list[str] | None = None,
+) -> list[ProductionFileAccounting]:
+    """Deterministically account for every manifest file exactly once.
+
+    Precedence: scan-scope exclusions (with their recorded reason) win first,
+    then the production-code boundary, then investigations — a file is COVERED
+    when a *covered_files* investigation targets it directly or targets a
+    parent directory, or when a finding cites it (*finding_file_paths* may
+    carry ``path:line`` locators). Anything left over is a GAP. The result is
+    sorted by path so identical inputs always produce identical output.
+    """
+    normalized_scope_exclusions: dict[str, str] = {}
+    for path, reason in scope_excluded_files or []:
+        normalized_scope_exclusions[path.replace("\\", "/").rstrip("/")] = reason
+
+    investigation_paths = [
+        p.replace("\\", "/").strip().rstrip("/") for p in (covered_files or []) if p and p.strip()
+    ]
+    for locator in finding_file_paths or []:
+        path = locator.replace("\\", "/").split(":", 1)[0].strip().rstrip("/")
+        if path:
+            investigation_paths.append(path)
+
+    accounting: list[ProductionFileAccounting] = []
+    for entry in file_manifest:
+        path = entry.path.replace("\\", "/")
+        scope_reason = normalized_scope_exclusions.get(path.rstrip("/"))
+        if scope_reason is not None:
+            accounting.append(
+                ProductionFileAccounting(
+                    path=path,
+                    status=ProductionFileStatus.INTENTIONALLY_EXCLUDED,
+                    reason=scope_reason,
+                )
+            )
+            continue
+        boundary = production_file_classification(path)
+        if boundary is not None:
+            accounting.append(boundary)
+            continue
+        if any(path == target or path.startswith(f"{target}/") for target in investigation_paths):
+            accounting.append(
+                ProductionFileAccounting(path=path, status=ProductionFileStatus.COVERED)
+            )
+            continue
+        accounting.append(ProductionFileAccounting(path=path, status=ProductionFileStatus.GAP))
+
+    accounting.sort(key=lambda item: item.path)
+    return accounting
+
 
 def build_coverage_ledger(
     *,
     scan_id: str,
     workspace_id: str,
-    requested_vuln_classes: list[VulnerabilityClass],
-    completed_vuln_classes: list[VulnerabilityClass],
-    agent_tasks_total: int,
-    agent_tasks_scanned: int,
-    skipped_items: list[CoverageGap],
+    requested_vuln_classes: list[VulnerabilityClass] | None = None,
+    completed_vuln_classes: list[VulnerabilityClass] | None = None,
+    agent_tasks_total: int = 0,
+    agent_tasks_scanned: int = 0,
+    skipped_items: list[CoverageGap] | None = None,
+    file_manifest: list[FileManifestEntry] | None = None,
+    covered_files: list[str] | None = None,
+    scope_excluded_files: list[tuple[str, str]] | None = None,
+    finding_file_paths: list[str] | None = None,
     id: str | None = None,
     created_at: Any = None,
 ) -> CoverageLedger:
@@ -45,16 +226,30 @@ def build_coverage_ledger(
     ``workflow.uuid4()`` / ``workflow.now()``) to stay within the
     Temporal sandbox.  Both default to fresh values when called from
     activity or non-workflow code.
+
+    When *file_manifest* is supplied, the ledger additionally accounts for
+    every first-party file in the snapshot: covered (an investigation or a
+    finding touches it), intentionally excluded (production-code boundary or
+    scan scope, with reason), or gap. See :func:`compute_file_coverage`.
     """
+    file_coverage: list[ProductionFileAccounting] = []
+    if file_manifest is not None:
+        file_coverage = compute_file_coverage(
+            file_manifest,
+            covered_files=covered_files,
+            scope_excluded_files=scope_excluded_files,
+            finding_file_paths=finding_file_paths,
+        )
     return CoverageLedger(
         id=id if id is not None else str(uuid4()),
         scan_id=scan_id,
         workspace_id=workspace_id,
         agent_tasks_total=agent_tasks_total,
         agent_tasks_scanned=agent_tasks_scanned,
-        vuln_classes_requested=requested_vuln_classes,
-        vuln_classes_completed=completed_vuln_classes,
-        skipped_items=skipped_items,
+        vuln_classes_requested=requested_vuln_classes or [],
+        vuln_classes_completed=completed_vuln_classes or [],
+        skipped_items=skipped_items or [],
+        file_coverage=file_coverage,
         created_at=created_at if isinstance(created_at, datetime) else utc_now(),
     )
 

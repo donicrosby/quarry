@@ -96,6 +96,8 @@ def _validating_validator_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: object = None,
 ) -> dict[str, object]:
     """Always promotes the finding (verdict=validated)."""
     finding_dict: dict[str, Any] = (
@@ -235,6 +237,8 @@ def _never_gapfill_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: object = None,
 ) -> list[dict[str, object]]:
     """Never emits anything — forces coverage-loop convergence after round 0."""
     return []
