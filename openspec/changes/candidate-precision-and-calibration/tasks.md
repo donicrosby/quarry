@@ -44,7 +44,7 @@
 
 ## 7. Dedup cutover and integration
 
-- [ ] 7.1 Switch finding-fingerprinting/dedup to key on the sink locator + title, with tests over the sink-first path
-- [ ] 7.2 Retire reliance on unordered `source_refs` once the ordered path is populated end to end, verifying no stage still reads it
-- [ ] 7.3 Update `THIRD_PARTY_NOTICES` and the `openspec/config.yaml` attribution list to name Mantis (Apache-2.0) via Shannon, and verify the governance/attribution test passes
-- [ ] 7.4 Run the full test suite and a benchmark scan; verify calibrated severities, checklist verdicts, KB artifacts, and coverage accounting appear end to end and no regression against the current benchmark
+- [x] 7.1 Switch finding-fingerprinting/dedup to key on the sink locator + title, with tests over the sink-first path
+- [x] 7.2 Retire reliance on unordered `source_refs` once the ordered path is populated end to end, verifying no stage still reads it
+- [x] 7.3 Update `THIRD_PARTY_NOTICES` and the `openspec/config.yaml` attribution list to name Mantis (Apache-2.0) via Shannon, and verify the governance/attribution test passes
+- [x] 7.4 Run the full test suite and a benchmark scan; verify calibrated severities, checklist verdicts, KB artifacts, and coverage accounting appear end to end and no regression against the current benchmark
