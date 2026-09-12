@@ -17,12 +17,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, ModelTier, RoleConfig, TierKind, resolve_tier
 from quarry.schemas import (
     CandidateFinding,
+    ChecklistItem,
+    ChecklistOutcome,
     CredibilityLevel,
     EnsembleJudgement,
     Provider,
@@ -31,6 +33,7 @@ from quarry.schemas import (
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.checklist import enforce_checklist_invariants
 from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -64,6 +67,34 @@ class RefuteResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = []
 
 
+class ChecklistRefuteResponse(RefuteResponse):
+    """Model output schema for the negative-constraint checklist refuter.
+
+    The stance defaults to the false-positive position (``refuted=True``): a
+    finding stands only when the checklist discharges that default from code.
+    A FAIL checklist entry requires a rejecting (``refuted=True``) stance —
+    the model validator enforces that invariant at the boundary.
+    """
+
+    refuted: bool = True
+    checklist: list[ChecklistItem] = []
+    reasons: list[str] = []
+    tool_calls: list[ToolCallRequest] = []
+
+    @model_validator(mode="after")
+    def _fail_requires_rejecting_stance(self) -> ChecklistRefuteResponse:
+        failed = [i for i in self.checklist if i.outcome is ChecklistOutcome.FAIL]
+        if failed and not self.refuted:
+            names = ", ".join(i.constraint.value for i in failed)
+            msg = (
+                f"checklist constraint(s) {names} are FAIL but the stance is "
+                "non-rejecting (refuted=false); a FAIL requires a rejecting stance. "
+                "Re-emit with refuted=true or correct the checklist entry."
+            )
+            raise ValueError(msg)
+        return self
+
+
 def _last_invocation_id(client: Any) -> str | None:
     """Provenance link: id of the model's most recent recorded invocation."""
     invocations = getattr(client, "invocations", None)
@@ -87,11 +118,15 @@ def _run_debater(
     event_sink: Any | None,
     turn_timeout_seconds: int,
     limiter: Any | None,
-) -> RefuteResponse | None:
+    checklist_enabled: bool = False,
+) -> tuple[RefuteResponse | None, list[ChecklistItem]]:
     """Run the independent debater's refute loop over the same claim.
 
     Reuses the ADR-021 independence boundary — the debater sees only the
     ValidatorClaim, never the reasoner's verdict, reasoning, or trace.
+
+    Returns the refute response plus the recorded negative-constraint checklist
+    (empty when the checklist flag is off — the legacy binary refuter path).
     """
     runner = ToolRunner(
         repo_root=Path(repo_path),
@@ -129,7 +164,7 @@ def _run_debater(
         initial_user_message=initial_message,
         runner=runner,
         budget_spec=budget_spec,
-        response_model=RefuteResponse,
+        response_model=ChecklistRefuteResponse if checklist_enabled else RefuteResponse,
         max_iterations=max_iterations,
         cost_per_iteration=cost_per_iteration,
         provider_policy=policy,
@@ -139,9 +174,16 @@ def _run_debater(
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
     )
-    if result.final_answer and isinstance(result.final_answer, RefuteResponse):
-        return result.final_answer
-    return None
+    final = result.final_answer
+    if isinstance(final, ChecklistRefuteResponse):
+        checklist = enforce_checklist_invariants(
+            verdict="rejected" if final.refuted else "validated",
+            checklist=final.checklist,
+        )
+        return final, checklist
+    if isinstance(final, RefuteResponse):
+        return final, []
+    return None, []
 
 
 def validate_impl(
@@ -161,12 +203,17 @@ def validate_impl(
     debater_client: Any | None = None,
     debater_tier: ModelTier | None = None,
     debater_limiter: Any | None = None,
+    checklist_enabled: bool = True,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
     Enforces the ADR-021 independence boundary: only ValidatorClaim fields
     reach the prompt; the full CandidateFinding is never serialised into any
     model message.
+
+    ``checklist_enabled`` selects the adversarial negative-constraint checklist
+    refuter (default). When False the validator falls back to the legacy binary
+    refuter and records no checklist.
     """
     if budget_spec is None:
         budget_spec = BudgetSpec()
@@ -276,8 +323,9 @@ def validate_impl(
         )
     ]
     credibility: CredibilityLevel | None = None
+    recorded_checklist: list[ChecklistItem] = []
     if debater_client is not None and debater_tier is not None:
-        refute = _run_debater(
+        refute, recorded_checklist = _run_debater(
             finding=finding,
             claim=claim,
             repo_path=repo_path,
@@ -289,8 +337,24 @@ def validate_impl(
             event_sink=event_sink,
             turn_timeout_seconds=turn_timeout_seconds,
             limiter=debater_limiter,
+            checklist_enabled=checklist_enabled,
         )
         refuted = refute.refuted if refute is not None else False
+        # Default-false-positive stance: when the checklist refuter keeps the
+        # default (undischarged / refuted), a reasoner "validated" verdict is not
+        # promoted — it is retained as needs_proof, never silently dropped.
+        if checklist_enabled and refuted:
+            has_fail = any(i.outcome is ChecklistOutcome.FAIL for i in recorded_checklist)
+            if has_fail and verdict != "rejected":
+                verdict = "rejected"
+                # The checklist drives the rejection — surface its reasons so the
+                # rejected verdict carries the code-backed explanation.
+                if refute is not None and refute.reasons:
+                    reasons = list(refute.reasons)
+                ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
+            elif verdict == "validated":
+                verdict = "needs_proof"
+                ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
         ensemble.append(
             EnsembleJudgement(
                 role="validate",
@@ -314,6 +378,7 @@ def validate_impl(
         cross_vendor_disagreement=cross_vendor,
         credibility=credibility,
         ensemble=ensemble if debater_client is not None else [],
+        checklist=recorded_checklist if debater_client is not None else [],
         created_at=datetime.now(UTC),
     )
 
@@ -365,6 +430,13 @@ def validate_activity(
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=5)
+
+
+def _checklist_flag() -> bool:
+    """Read the checklist feature flag from settings (env-overridable)."""
+    from quarry.config import QuarrySettings
+
+    return QuarrySettings().validate_checklist_enabled
 
 
 def _validate_activity_impl(
@@ -425,6 +497,7 @@ def _validate_activity_impl(
         debater_client=debater_client,
         debater_tier=debater_tier,
         debater_limiter=debater_limiter,
+        checklist_enabled=_checklist_flag(),
     )
 
     if debater_client is not None:
