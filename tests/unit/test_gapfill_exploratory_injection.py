@@ -31,10 +31,10 @@ from quarry.schemas import (
 from quarry_activities.gapfill import (
     DEFAULT_EXPLORATORY_INJECTION_FRACTION,
     exploratory_injection_count,
+    gapfill_impl,
     inject_exploratory_investigations,
 )
 from quarry_models.mock_client import MockModelClient
-from quarry_activities.gapfill import gapfill_impl
 
 _NOW = datetime(2026, 6, 9, tzinfo=UTC)
 
@@ -88,7 +88,9 @@ def test_default_fraction_lands_in_the_25_to_50_band() -> None:
 
 
 def test_zero_disables_injection() -> None:
-    assert ScanDefaultsConfig(exploratory_injection_fraction=0.0).exploratory_injection_fraction == 0.0
+    assert (
+        ScanDefaultsConfig(exploratory_injection_fraction=0.0).exploratory_injection_fraction == 0.0
+    )
 
 
 def test_out_of_range_fraction_is_rejected() -> None:
@@ -194,9 +196,7 @@ def test_injection_is_deterministic() -> None:
     }
     first = inject_exploratory_investigations(**kwargs)
     second = inject_exploratory_investigations(**kwargs)
-    assert [t.model_dump(mode="json") for t in first] == [
-        t.model_dump(mode="json") for t in second
-    ]
+    assert [t.model_dump(mode="json") for t in first] == [t.model_dump(mode="json") for t in second]
 
 
 def test_gapfill_impl_injects_exploratory_tasks() -> None:
@@ -224,3 +224,15 @@ def test_gapfill_impl_injects_exploratory_tasks() -> None:
     assert all("threat model" in t.task_prompt.lower() for t in exploratory)
     # Gap re-hunt tasks are still present.
     assert any(t.vuln_class == VulnerabilityClass.XSS for t in result)
+
+
+def test_explore_template_carries_mantis_shannon_attribution() -> None:
+    """The exploratory task prompt names Mantis (Apache-2.0) via Shannon."""
+    from pathlib import Path
+
+    template = Path(__file__).parent.parent.parent / "prompts" / "task" / "explore.1.0.0.j2"
+    source = template.read_text(encoding="utf-8")
+
+    assert "Mantis" in source
+    assert "Apache-2.0" in source
+    assert "Shannon" in source

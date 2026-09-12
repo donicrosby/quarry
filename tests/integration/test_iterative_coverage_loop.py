@@ -106,6 +106,8 @@ def _make_always_new_gapfill_activity() -> Callable[..., list[dict[str, Any]]]:
         max_iterations: int = 20,
         scan_seed: int | None = None,
         artifact_root: str | None = None,
+        exploratory_injection_fraction: float = 0.0,
+        exploratory_gap_paths: object = None,
     ) -> list[dict[str, Any]]:
         with _lock:
             counter[0] += 1
@@ -142,6 +144,8 @@ def _never_gapfill_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: object = None,
 ) -> list[dict[str, object]]:
     """A gapfill-coverage mock that never emits anything (forces convergence)."""
     return []
@@ -372,6 +376,8 @@ def _validated_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: object = None,
 ) -> dict[str, object]:
     return {"verdict": "validated"}
 
