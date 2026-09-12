@@ -27,6 +27,12 @@ class QuarrySettings(BaseSettings):
     prompt_retention: str = "metadata_only"
     redaction_enabled: bool = True
 
+    # Adversarial-validation checklist (candidate-precision-and-calibration).
+    # When true the validate role's debater runs the negative-constraint
+    # checklist refuter; when false it falls back to the legacy binary refuter.
+    # env: QUARRY_VALIDATE_CHECKLIST_ENABLED
+    validate_checklist_enabled: bool = True
+
     # quarry.toml panel config
     config_file: str = "quarry.toml"
     panel: str = ""
