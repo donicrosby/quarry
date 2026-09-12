@@ -24,7 +24,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from quarry.schemas import AgentTask, VulnerabilityClass
-from quarry_activities.hunt import _hunt_activity_impl, hunt_impl
+from quarry_activities.hunt import hunt_activity, hunt_impl
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.mock_client import MockModelClient
 from quarry_models.types import BudgetSpec
@@ -168,7 +168,7 @@ def test_hunt_activity_returns_resolved_kb_provenance(tmp_path: Path):
     _write_kb_artifacts(artifact_root)
     task = _make_task(kb_root_index_key="kb/index.json")
 
-    result = _hunt_activity_impl(
+    result = hunt_activity(
         task,
         str(tmp_path / "repo"),
         12,
@@ -192,7 +192,7 @@ def test_kb_context_lands_on_task_input_refs_not_only_prompt(tmp_path: Path):
     _write_kb_artifacts(artifact_root)
     task = _make_task(kb_root_index_key="kb/index.json")
 
-    result = _hunt_activity_impl(
+    result = hunt_activity(
         task,
         str(tmp_path / "repo"),
         12,
@@ -225,7 +225,7 @@ def test_resolver_reads_through_local_artifact_store(tmp_path: Path):
 def test_hunt_activity_fallback_returns_no_kb_provenance(tmp_path: Path):
     task = _make_task(kb_root_index_key=None)
 
-    result = _hunt_activity_impl(
+    result = hunt_activity(
         task,
         str(tmp_path / "repo"),
         12,

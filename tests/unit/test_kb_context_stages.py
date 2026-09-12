@@ -33,7 +33,6 @@ from quarry.schemas import (
     VulnerabilityClass,
 )
 from quarry_models.mock_client import MockModelClient
-from quarry_models.types import BudgetSpec
 
 _NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
@@ -69,11 +68,13 @@ def _write_kb_artifacts(artifact_root: Path, scan_id: str = "scan-1") -> None:
 
 def _capturing_mock(default: BaseModel) -> Any:
     class _CapturingMock(MockModelClient):
+        captured: list[Any] = []  # noqa: RUF012 - per-instance below
+
         def complete_structured(self, request: Any, response_model: Any) -> Any:  # type: ignore[override]
             self.captured.append(request)
             return super().complete_structured(request, response_model)
 
-    client = _CapturingMock(default=default)
+    client: Any = _CapturingMock(default=default)
     client.captured = []
     return client
 

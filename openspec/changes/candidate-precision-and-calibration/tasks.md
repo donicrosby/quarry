@@ -16,8 +16,8 @@
 
 ## 3. KB consumption by reference (context injector)
 
-- [ ] 3.1 Write failing tests that hunt/gapfill/validate invoked with KB references receive the referenced record content as context
-- [ ] 3.2 Extend the context injector to resolve KB references into rendered prompts, with inline-context fallback when references are absent, and verify 3.1 passes
+- [x] 3.1 Write failing tests that hunt/gapfill/validate invoked with KB references receive the referenced record content as context
+- [x] 3.2 Extend the context injector to resolve KB references into rendered prompts, with inline-context fallback when references are absent, and verify 3.1 passes
 
 ## 4. Calibration stage
 

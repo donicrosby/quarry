@@ -7,16 +7,17 @@ the KB root-index key recorded on the scan metadata plus a record-fetching
 callable, so the filesystem read lives in the activity/injector layer, never in
 workflow code.
 
-Fallback is explicit: no KB root-index reference, an unreadable index, or zero
-resolvable records all yield ``resolved=False, text=""`` — the caller keeps its
-existing inline-context behaviour (no crash, no empty-scan).
+Fallback is explicit: no KB root-index reference, no artifact root, an
+unreadable index, or zero resolvable records all yield ``resolved=False,
+text=""`` — the caller keeps its existing inline-context behaviour (no crash,
+no empty-scan).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 from quarry.schemas import KBRootIndex
 
@@ -26,16 +27,18 @@ _KB_CONTEXT_HEADER = (
 )
 
 
-def _extract_scan_id(artifact_root: str) -> str:
-    """The KB artifact root is ``{output_dir}/artifacts/{scan_id}`` — the scan_id
-    is the final path segment, needed to address the record keys recorded in the
-    root index."""
-    return artifact_root.rstrip("/").rsplit("/", 1)[-1]
+class KBResolution(NamedTuple):
+    """Outcome of resolving KB references for one stage invocation."""
+
+    text: str
+    resolved: bool
+    record_keys: list[str]
 
 
 def _str_list(value: Any) -> list[str]:
     if isinstance(value, list):
-        return [str(v) for v in value]
+        items = cast("list[Any]", value)
+        return [str(item) for item in items]
     return []
 
 
@@ -74,65 +77,82 @@ def _format_graph_block(edges: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
-def _load_index_record(read_artifact: Callable[[str], str | None], key: str) -> dict[str, Any] | None:
+def _load_index_record(
+    read_artifact: Callable[[str], str | None], key: str
+) -> dict[str, Any] | None:
     raw = read_artifact(key)
     if raw is None:
         return None
     try:
-        record: Any = json.loads(raw)
+        parsed: Any = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(record, dict):
+    if not isinstance(parsed, dict):
         return None
-    return record
+    return cast("dict[str, Any]", parsed)
+
+
+def _unresolved() -> KBResolution:
+    return KBResolution(text="", resolved=False, record_keys=[])
 
 
 def resolve_kb_context(
     *,
     kb_root_index_key: str | None,
+    scan_id: str,
     artifact_root: str | None,
     read_artifact: Callable[[str], str | None],
-) -> tuple[str, bool]:
+) -> KBResolution:
     """Resolve KB artifact references into rendered prompt context.
 
-    Returns ``(context_text, resolved)``. ``resolved`` is True only when the
-    root index resolved AND at least one referenced record rendered; otherwise
-    the caller falls back to inline-context behaviour.
-    """
-    if not kb_root_index_key or artifact_root is None:
-        return "", False
+    KB artifacts live under ``{artifact_root}/{scan_id}/{key}`` — the artifact
+    root is the scan-wide store; the scan_id namespace is supplied by the caller
+    (the task/finding/ledger already carries it).
 
-    scan_id = _extract_scan_id(artifact_root)
+    ``resolved`` is True only when the root index resolved AND at least one
+    referenced record rendered; otherwise the caller falls back to its
+    inline-context behaviour. ``record_keys`` lists the artifact keys that were
+    actually supplied (audit provenance; empty on fallback).
+    """
+    if not kb_root_index_key or artifact_root is None or not scan_id:
+        return _unresolved()
+
     index_record = _load_index_record(read_artifact, f"{scan_id}/{kb_root_index_key}")
     if index_record is None:
-        return "", False
+        return _unresolved()
 
     try:
         index = KBRootIndex.model_validate(index_record)
     except Exception:
-        return "", False
+        return _unresolved()
 
     blocks: list[str] = []
+    resolved_keys: list[str] = []
 
     for key in index.entity_keys:
         record = _load_index_record(read_artifact, f"{scan_id}/{key}")
         if record is not None:
             blocks.append(_format_entity_block(key, record))
+            resolved_keys.append(key)
 
     for key in index.vuln_class_note_keys:
         record = _load_index_record(read_artifact, f"{scan_id}/{key}")
         if record is not None:
             blocks.append(_format_note_block(record))
+            resolved_keys.append(key)
 
     if index.dependency_graph_key:
         graph_record = _load_index_record(read_artifact, f"{scan_id}/{index.dependency_graph_key}")
         if graph_record is not None:
             raw_edges: Any = graph_record.get("edges")
             if isinstance(raw_edges, dict) and raw_edges:
-                edges = {str(k): _str_list(v) for k, v in raw_edges.items()}
+                edge_map = cast("dict[str, list[Any]]", raw_edges)
+                edges = {source: _str_list(imports) for source, imports in edge_map.items()}
                 blocks.append(_format_graph_block(edges))
+                resolved_keys.append(index.dependency_graph_key)
 
     if not blocks:
-        return "", False
+        return _unresolved()
 
-    return f"## {_KB_CONTEXT_HEADER}\n\n" + "\n\n".join(blocks), True
+    text = f"## {_KB_CONTEXT_HEADER}\n\n" + "\n\n".join(blocks)
+    return KBResolution(text=text, resolved=True, record_keys=resolved_keys)

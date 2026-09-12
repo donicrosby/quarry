@@ -352,6 +352,24 @@ class KBRootIndex(BaseModel):
     dependency_graph_key: str | None = None
 
 
+class KBContextProvenance(BaseModel):
+    """Provenance of the KB records resolved into a stage's prompt context.
+
+    Written by the consuming activity (hunt/gapfill/validate) when it resolves
+    KB references: which root-index key was resolved, whether any referenced
+    record actually rendered, and the artifact keys supplied to the prompt.
+    ``resolved=False`` is the explicit fallback signal — the stage kept its
+    inline-context behaviour.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kb_root_index_key: str
+    resolved: bool = False
+    records_supplied: int = 0
+    record_keys: list[str] = Field(default_factory=_empty_strings)
+
+
 class ArtifactRef(BaseModel):
     id: str
     uri: str
@@ -712,6 +730,11 @@ class AgentTask(BaseModel):
     # (provenance — empty when no plugin matched, even if plugins_active was
     # non-empty).
     domain_context_sources: list[str] = Field(default_factory=_empty_strings)
+    # Knowledge Base consumption by reference (cpc slice 3): the KB root-index
+    # artifact key recorded on the scan metadata by the kb-recon stage. The
+    # consuming activity resolves it via the kb_context injector at execution
+    # time — the task itself carries only the reference, never the content.
+    kb_root_index_key: str | None = None
     source: Literal["recon", "gapfill", "feedback"] = "recon"
     gapfill_pass: int = 0
     # The iterative-coverage-loop round (0-based) in which this task is hunted

@@ -81,20 +81,23 @@ class TestKbContextResolver:
     def test_resolves_entity_note_and_graph_records_into_labeled_context(self, tmp_path: Path):
         from quarry_plugins.context.kb_resolver import resolve_kb_context
 
+        # tmp_path doubles as the shared artifact store root; the scan_id
+        # namespace is supplied to the resolver explicitly.
         _write_kb_artifacts(tmp_path, "scan-1")
-        artifact_root = tmp_path / "artifacts" / "scan-1"
-        # Map relative keys back into the real store for this test.
-        base = tmp_path / "scan-1"
+        artifact_root = tmp_path
+        base = tmp_path
 
         def read_artifact(relative_key: str) -> str | None:
             path = base / relative_key
             return path.read_text(encoding="utf-8") if path.exists() else None
 
-        text, resolved = resolve_kb_context(
+        resolution = resolve_kb_context(
             kb_root_index_key="kb/index.json",
+            scan_id="scan-1",
             artifact_root=str(artifact_root),
             read_artifact=read_artifact,
         )
+        text, resolved = resolution.text, resolution.resolved
 
         assert resolved is True
         assert "## Knowledge Base" in text
@@ -113,11 +116,13 @@ class TestKbContextResolver:
         def read_artifact(relative_key: str) -> str | None:  # pragma: no cover
             raise AssertionError("no reference means the resolver must not read anything")
 
-        text, resolved = resolve_kb_context(
+        resolution = resolve_kb_context(
             kb_root_index_key=None,
+            scan_id="scan-1",
             artifact_root=str(tmp_path / "artifacts" / "scan-1"),
             read_artifact=read_artifact,
         )
+        text, resolved = resolution.text, resolution.resolved
 
         assert resolved is False
         assert text == ""
@@ -125,11 +130,13 @@ class TestKbContextResolver:
     def test_falls_back_when_index_unreadable(self, tmp_path: Path):
         from quarry_plugins.context.kb_resolver import resolve_kb_context
 
-        text, resolved = resolve_kb_context(
+        resolution = resolve_kb_context(
             kb_root_index_key="kb/index.json",
+            scan_id="scan-1",
             artifact_root=str(tmp_path / "artifacts" / "scan-1"),
             read_artifact=lambda _key: None,
         )
+        text, resolved = resolution.text, resolution.resolved
 
         assert resolved is False
         assert text == ""
@@ -143,11 +150,13 @@ class TestKbContextResolver:
                 return json.dumps(_INDEX)
             return None
 
-        text, resolved = resolve_kb_context(
+        resolution = resolve_kb_context(
             kb_root_index_key="kb/index.json",
+            scan_id="scan-1",
             artifact_root=str(tmp_path / "artifacts" / "scan-1"),
             read_artifact=read_artifact,
         )
+        text, resolved = resolution.text, resolution.resolved
 
         assert resolved is False
         assert text == ""
@@ -165,6 +174,7 @@ class TestKbContextInjectorPlugin:
         _write_kb_artifacts(tmp_path, "scan-1")
         task = _make_task(kb_root_index_key="kb/index.json")
 
+        # The plugin takes the SHARED store root; the task's scan_id namespaces it.
         plugin = self._plugin(str(tmp_path))
         text = plugin.inject_context(  # type: ignore[attr-defined]
             VulnerabilityClass.COMMAND_INJECTION, task, "web_service"

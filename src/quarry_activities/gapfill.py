@@ -40,6 +40,7 @@ from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
@@ -167,6 +168,7 @@ def gapfill_impl(
     turn_timeout_seconds: int = 120,
     limiter: Any | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -181,6 +183,12 @@ def gapfill_impl(
     are shown to the gapfill agent so it does not re-hunt vectors already found, and
     are used as a dedup backstop: a gap whose (vuln_class, scope) is already covered
     by a finding is dropped rather than re-hunted.
+
+    KB consumption by reference (cpc slice 3): *kb_root_index_key* is the KB
+    root-index reference recorded on the scan metadata; the kb_context
+    injector resolves the referenced records from the artifact store and the
+    rendered text rides in the planner prompt. Absent/unresolvable references
+    fall back to the existing prompt — no crash, no empty task list.
     """
     if budget_spec is None:
         budget_spec = BudgetSpec()
@@ -203,6 +211,27 @@ def gapfill_impl(
 
     completed = [vc.value for vc in (ledger.vuln_classes_completed or [])]
     registry = get_registry()
+
+    # KB consumption by reference (cpc slice 3): resolve the referenced records
+    # through the kb_context injector (activity-side I/O; the workflow passes
+    # only the reference) and ride them in the developer part of the prompt.
+    kb_injector = KbContextInjectorPlugin(artifact_root=artifact_root)
+    kb_probe_task = AgentTask(
+        id="kb-probe",
+        scan_id=scan_id,
+        role="hunt",
+        task_name="gapfill-kb-probe",
+        status="pending",
+        created_at=datetime.now(UTC),
+        kb_root_index_key=kb_root_index_key,
+    )
+    kb_text = kb_injector.inject_context(
+        vuln_classes[0] if vuln_classes else VulnerabilityClass.SECRETS,
+        kb_probe_task,
+        "",
+    )
+    kb_context = kb_text or ""
+
     prompt = build_prompt(
         registry=registry,
         role="gapfill",
@@ -221,6 +250,7 @@ def gapfill_impl(
                 }
                 for f in (existing_findings or [])
             ],
+            "kb_context": kb_context,
             "evidence_chunks": [],
         },
     )
@@ -296,6 +326,7 @@ def gapfill_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -305,6 +336,10 @@ def gapfill_activity(
 
     *existing_findings* are compact summaries of findings already discovered, so
     gapfill avoids re-hunting (and re-reporting) vectors that are already covered.
+
+    *kb_root_index_key* is the KB root-index reference recorded on the scan
+    metadata by the kb-recon stage; the referenced records are resolved into the
+    planner prompt at execution time (cpc slice 3).
 
     Returns a list of AgentTask dicts (JSON-serialisable at the Temporal boundary).
     """
@@ -333,6 +368,7 @@ def gapfill_activity(
             max_iterations,
             scan_seed,
             artifact_root,
+            kb_root_index_key,
         )
     finally:
         stop_heartbeat.set()
@@ -353,6 +389,7 @@ def _gapfill_activity_impl(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -407,6 +444,7 @@ def _gapfill_activity_impl(
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
         limiter=limiter,
         artifact_root=artifact_root,
+        kb_root_index_key=kb_root_index_key,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

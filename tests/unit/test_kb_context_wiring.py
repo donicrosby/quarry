@@ -36,7 +36,9 @@ def _arch_doc_json() -> str:
                 languages=["python"],
                 responsibility="handler",
                 entry_points=[
-                    EntryPoint(repo="repo-1", file="app.py", function="handler", kind="http_handler")
+                    EntryPoint(
+                        repo="repo-1", file="app.py", function="handler", kind="http_handler"
+                    )
                 ],
                 notes="",
             )
@@ -104,17 +106,26 @@ class TestWorkflowKbThreading:
     """The workflow records and forwards KB references; it never resolves them."""
 
     def test_kb_recon_records_root_index_key_on_scan_metadata(self) -> None:
-        from quarry_workflows import run_scan
+        from importlib import import_module
 
-        source = inspect.getsource(run_scan)
+        run_scan_module = import_module("quarry_workflows.run_scan")
+
+        source = inspect.getsource(run_scan_module)
         assert '"kb_root_index_key"' in source or "'kb_root_index_key'" in source
 
     def test_workflow_threads_reference_into_emit_hunt_gapfill_validate(self) -> None:
-        from quarry_workflows import run_scan
+        from importlib import import_module
 
-        source = inspect.getsource(run_scan)
+        run_scan_module = import_module("quarry_workflows.run_scan")
+
+        source = inspect.getsource(run_scan_module)
         # Every KB-consuming activity call receives the reference + root.
-        for activity_name in ("emit-agent-tasks", "hunt-vuln-class", "gapfill-coverage", "validate-candidate-finding"):
+        for activity_name in (
+            "emit-agent-tasks",
+            "hunt-vuln-class",
+            "gapfill-coverage",
+            "validate-candidate-finding",
+        ):
             assert activity_name in source
         assert source.count("kb_root_index_key") >= 4, (
             "the KB root-index key must be threaded to emit/hunt/gapfill/validate"
