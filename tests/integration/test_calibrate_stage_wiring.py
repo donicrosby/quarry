@@ -74,6 +74,7 @@ def _one_finding_hunt_activity(
     db_path: str | None = None,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     with _lock:
         scan_id = _current_scan_id[0]
@@ -94,6 +95,7 @@ def _validating_validator_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, object]:
     """Always promotes the finding (verdict=validated)."""
     finding_dict: dict[str, Any] = (
@@ -125,6 +127,7 @@ def _build_worker(
     from quarry_activities.dedup import deduplicate_activity
     from quarry_activities.emit_agent_tasks import emit_agent_tasks
     from quarry_activities.integrations import deliver_integrations_activity
+    from quarry_activities.kb_recon import kb_recon_activity
     from quarry_activities.provenance import build_scan_manifest_activity
     from quarry_activities.recon_orchestrator import recon_orchestrator_activity
     from quarry_activities.recon_synthesis import recon_synthesis_activity
@@ -145,6 +148,7 @@ def _build_worker(
             _passthrough_recon_subsystem,
             recon_synthesis_activity,
             emit_agent_tasks,
+            kb_recon_activity,
             _one_finding_hunt_activity,
             validate_secret_candidate,
             validator_activity or _validating_validator_activity,
@@ -230,6 +234,7 @@ def _never_gapfill_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[dict[str, object]]:
     """Never emits anything — forces coverage-loop convergence after round 0."""
     return []
@@ -395,6 +400,7 @@ def _rejecting_validator_activity_fn() -> Callable[..., dict[str, object]]:
         max_iterations: int = 20,
         scan_seed: int | None = None,
         artifact_root: str | None = None,
+        kb_root_index_key: str | None = None,
     ) -> dict[str, object]:
         finding_dict: dict[str, Any] = (
             cast("dict[str, Any]", finding) if isinstance(finding, dict) else {}
