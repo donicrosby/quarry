@@ -245,6 +245,42 @@ def _empty_coverage_gaps() -> list[CoverageGap]:
     return []
 
 
+class ChecklistConstraint(StrEnum):
+    """The fixed negative-constraint checklist catalogue (cpc slice 5).
+
+    One outcome is recorded per constraint; the order here is the canonical
+    catalogue order a recorded checklist follows.
+    """
+
+    HYPOTHETICAL_MISUSE = "hypothetical_misuse"
+    DEFENSE_IN_DEPTH_ONLY = "defense_in_depth_only"
+    PEDANTIC_LINTING = "pedantic_linting"
+    MITIGATION_STRETCHING = "mitigation_stretching"
+    SOURCE_COHERENCE = "source_coherence"
+    TRUST_BOUNDARY = "trust_boundary"
+
+
+class ChecklistOutcome(StrEnum):
+    """The outcome recorded for a single checklist constraint."""
+
+    PASS = "pass"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
+    UNRESOLVED = "unresolved"
+
+
+class ChecklistItem(BaseModel):
+    """One recorded outcome for a negative-constraint checklist entry."""
+
+    constraint: ChecklistConstraint
+    outcome: ChecklistOutcome
+    evidence: str = ""
+
+
+def _empty_checklist() -> list[ChecklistItem]:
+    return []
+
+
 def _empty_entry_points() -> list[EntryPoint]:
     return []
 
@@ -764,6 +800,9 @@ class ValidationResult(BaseModel):
     # ``credibility`` is None when no debater tier reviewed the candidate.
     credibility: CredibilityLevel | None = None
     ensemble: list[EnsembleJudgement] = Field(default_factory=_empty_ensemble_judgements)
+    # The recorded negative-constraint checklist (cpc slice 5). Populated when the
+    # debater runs the checklist refute regime; empty for the legacy binary refuter.
+    checklist: list[ChecklistItem] = Field(default_factory=_empty_checklist)
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
