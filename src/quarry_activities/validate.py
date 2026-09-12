@@ -22,6 +22,7 @@ from temporalio import activity
 
 from quarry.panel_config import DEFAULT_PANEL, ModelTier, RoleConfig, TierKind, resolve_tier
 from quarry.schemas import (
+    AgentTask,
     CandidateFinding,
     ChecklistItem,
     ChecklistOutcome,
@@ -29,6 +30,7 @@ from quarry.schemas import (
     EnsembleJudgement,
     Provider,
     ValidationResult,
+    VulnerabilityClass,
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
@@ -41,6 +43,7 @@ from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_models.validation import validate_claim_from_finding
+from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_tools.registry import load_registry
@@ -186,6 +189,36 @@ def _run_debater(
     return None, []
 
 
+def _resolve_kb_context(
+    *,
+    finding: CandidateFinding,
+    vuln_class: VulnerabilityClass,
+    artifact_root: str | None,
+    kb_root_index_key: str | None,
+) -> str:
+    """Resolve the scan's KB references into validator context (cpc slice 3).
+
+    The validator's independence boundary is untouched: the KB is first-party
+    recon output about the CODEBASE (not finder reasoning), and the rendered
+    records ride alongside the neutral claim — never inside <target_content>.
+    Absent/unresolvable references return "" (inline behaviour unchanged).
+    """
+    if not kb_root_index_key or artifact_root is None:
+        return ""
+    probe_task = AgentTask(
+        id="kb-probe",
+        scan_id=finding.scan_id,
+        role="hunt",
+        task_name="validate-kb-probe",
+        status="pending",
+        created_at=datetime.now(UTC),
+        kb_root_index_key=kb_root_index_key,
+    )
+    injector = KbContextInjectorPlugin(artifact_root=artifact_root)
+    text = injector.inject_context(vuln_class, probe_task, "")
+    return text or ""
+
+
 def validate_impl(
     *,
     finding: CandidateFinding,
@@ -203,6 +236,7 @@ def validate_impl(
     debater_client: Any | None = None,
     debater_tier: ModelTier | None = None,
     debater_limiter: Any | None = None,
+    kb_root_index_key: str | None = None,
     checklist_enabled: bool = True,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
@@ -210,6 +244,11 @@ def validate_impl(
     Enforces the ADR-021 independence boundary: only ValidatorClaim fields
     reach the prompt; the full CandidateFinding is never serialised into any
     model message.
+
+    KB consumption by reference (cpc slice 3): *kb_root_index_key* is the KB
+    root-index reference recorded on the scan metadata; the kb_context injector
+    resolves the referenced records and the rendered text composes WITH the
+    neutral claim (and any later checklist expansion) — it never replaces it.
 
     ``checklist_enabled`` selects the adversarial negative-constraint checklist
     refuter (default). When False the validator falls back to the legacy binary
@@ -221,6 +260,13 @@ def validate_impl(
     # Build the claim — the ONLY permitted source of finding data for the prompt.
     # This enforces the independence boundary: no hunter reasoning/provider/trace.
     claim = validate_claim_from_finding(finding)
+
+    kb_context = _resolve_kb_context(
+        finding=finding,
+        vuln_class=claim.vuln_class,
+        artifact_root=artifact_root,
+        kb_root_index_key=kb_root_index_key,
+    )
 
     runner = ToolRunner(
         repo_root=Path(repo_path),
@@ -242,6 +288,7 @@ def validate_impl(
             "line_end": claim.line_end,
             "description": claim.description,
             "affected_code_snippet": claim.affected_code_snippet,
+            "kb_context": kb_context,
         },
     )
 
@@ -394,6 +441,7 @@ def validate_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
@@ -426,6 +474,7 @@ def validate_activity(
             max_iterations,
             scan_seed,
             artifact_root,
+            kb_root_index_key,
         )
     finally:
         stop_heartbeat.set()
@@ -449,6 +498,7 @@ def _validate_activity_impl(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -490,6 +540,7 @@ def _validate_activity_impl(
         max_iterations=max_iterations,
         budget_spec=budget_spec,
         provider_policy=policy,
+        kb_root_index_key=kb_root_index_key,
         event_sink=make_event_sink(db_path, finding.scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
         limiter=limiter,

@@ -56,6 +56,7 @@ def emit_agent_tasks(
     arch_doc_json: str | None = None,
     vuln_classes: list[str] | None = None,
     plugins_active: list[str] | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """Produce one AgentTask per (vuln_class, scope) from the ArchitectureDoc.
 
@@ -65,6 +66,11 @@ def emit_agent_tasks(
     plugins_active names the context-injector plugins active for this scan
     (see ScanProfile.plugins_active). Plugin loading is I/O (entry-points
     lookup), so it happens here, in the activity — never in workflow code.
+
+    kb_root_index_key is the Knowledge Base root-index reference recorded on
+    the scan metadata by the kb-recon stage (cpc slice 3): it is stamped onto
+    every emitted task so the hunt stage consumes the KB by reference. The
+    task carries only the reference — record content is resolved at hunt time.
     """
     with suppress(RuntimeError):
         activity.heartbeat()
@@ -76,6 +82,8 @@ def emit_agent_tasks(
         arch_doc_json = str(d.get("arch_doc_json", ""))
         vuln_classes = list(d.get("vuln_classes", []))
         plugins_active = list(d.get("plugins_active", []))
+        kb_ref = d.get("kb_root_index_key")
+        kb_root_index_key = str(kb_ref) if isinstance(kb_ref, str) and kb_ref else kb_root_index_key
 
     if not arch_doc_json:
         return []
@@ -124,6 +132,7 @@ def emit_agent_tasks(
                 source="recon",
                 status="pending",
                 created_at=now,
+                kb_root_index_key=kb_root_index_key,
             )
             if context_injectors:
                 domain_context, sources = assemble_domain_context(

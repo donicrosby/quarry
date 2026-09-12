@@ -59,6 +59,7 @@ slack_dry_run = "quarry_integrations.sinks.slack_dry_run:SLACK_DRY_RUN_SINK"
 slack_notify = "quarry_plugins.hooks.slack_notify:SLACK_NOTIFY_HOOK"
 multitenant_isolation = "quarry_plugins.context.multitenant_isolation:MULTITENANT_ISOLATION_PLUGIN"
 template_injection = "quarry_plugins.context.template_injection:TEMPLATE_INJECTION_PLUGIN"
+kb_context = "quarry_plugins.context.kb_context:KB_CONTEXT_PLUGIN"
 
 [tool.uv.build-backend]
 module-name = [

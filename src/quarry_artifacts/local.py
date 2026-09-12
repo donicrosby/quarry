@@ -70,6 +70,19 @@ class LocalArtifactStore:
         path = Path(artifact_ref.uri.removeprefix(uri_prefix))
         return path.read_bytes()
 
+    def get_text(self, key: str) -> str | None:
+        """Read a stored artifact by key, or None when absent/unreadable.
+
+        KB consumption by reference (cpc slice 3) reads record content through
+        this API — the resolution path degrades to a fallback (None) instead of
+        raising when a referenced record cannot be read. Keys that escape the
+        store root never resolve (path-traversal safe via ``_safe_path``).
+        """
+        try:
+            return self._safe_path(key).read_text(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            return None
+
     def _safe_path(self, key: str) -> Path:
         path = (self.root / key).resolve()
         root = self.root.resolve()

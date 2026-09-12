@@ -446,8 +446,14 @@ class RunScanWorkflow:
         # per (vuln_class, scope) for the hunt stage.
         agent_tasks: list[AgentTask] = []
         arch_doc: ArchitectureDoc | None = None
+        # KB root-index reference (cpc slice 3): recorded on the scan metadata by
+        # kb-recon, threaded to every KB-consuming stage — orchestration only;
+        # the referenced records are resolved at execution time in activities.
+        kb_root_index_key: str | None = None
         if _stage_completed(completed_stage, "RECON"):
             agent_tasks = await _load_agent_tasks(scan_input.db_path, scan.id)
+            if persisted_scan is not None:
+                kb_root_index_key = _scan_kb_root_index_key(persisted_scan)
         else:
             self._current_stage = "RECON"
             # Step 1: orchestrate subsystem assignments
@@ -550,7 +556,8 @@ class RunScanWorkflow:
             # graph, root index) is persisted to the artifact store; later
             # stages consume it by reference. Best-effort: a KB failure never
             # blocks the scan — the workflow records the failure and proceeds.
-            kb_root_index_key: str | None = None
+            # (kb_root_index_key is declared before the RECON branch so it
+            # survives into the hunt/validate stages below.)
             try:
                 kb_payload = await workflow.execute_activity(
                     "kb-recon",
@@ -604,6 +611,7 @@ class RunScanWorkflow:
                     arch_doc.model_dump_json(),
                     [vc.value for vc in scan.profile.vuln_classes],
                     scan.profile.plugins_active,
+                    kb_root_index_key,
                 ],
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=self._retry_policy,
@@ -685,6 +693,7 @@ class RunScanWorkflow:
                 repo_path,
                 artifact_root,
                 hunt_panel_json,
+                kb_root_index_key,
                 round_index,
                 round_tasks,
                 round_completed_stage,
@@ -776,6 +785,7 @@ class RunScanWorkflow:
                                 scan_input.gapfill_max_iterations,
                                 scan_input.scan_seed,
                                 artifact_root,
+                                kb_root_index_key,
                                 scan_input.exploratory_injection_fraction,
                                 exploratory_gap_paths_for_pass,
                             ],
@@ -1217,6 +1227,7 @@ class RunScanWorkflow:
         repo_path: str,
         artifact_root: str,
         hunt_panel_json: str | None,
+        kb_root_index_key: str | None,
         round_index: int,
         round_tasks: list[AgentTask],
         completed_stage: str | None,
@@ -1305,6 +1316,7 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan_input.scan_seed,
                             artifact_root,
+                            kb_root_index_key or task.kb_root_index_key,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -1435,6 +1447,7 @@ class RunScanWorkflow:
                             scan_input.validate_max_iterations,
                             scan_input.scan_seed,
                             artifact_root,
+                            kb_root_index_key,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -3164,6 +3177,17 @@ def _kb_root_index_key_from_activity(payload: object) -> str | None:
     except Exception:
         return None
     return "kb/index.json" if index.entity_keys or index.dependency_graph_key else None
+
+
+def _scan_kb_root_index_key(scan: Scan) -> str | None:
+    """The KB root-index reference recorded on the scan metadata (cpc slice 3).
+
+    Pure metadata read — no store access. Returns None when the scan ran before
+    the KB existed or kb-recon failed; consumers then fall back to inline
+    context.
+    """
+    raw = scan.metadata.get("kb_root_index_key")
+    return str(raw) if isinstance(raw, str) and raw else None
 
 
 def _agent_tasks_from_activity(payload: object) -> list[AgentTask]:

@@ -60,6 +60,7 @@ def _empty_hunt_activity(
     db_path: str | None = None,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[object]:
     """Always returns zero findings — keeps AGENTIC_VALIDATE/TRACER inert."""
     return []
@@ -106,6 +107,7 @@ def _make_always_new_gapfill_activity() -> Callable[..., list[dict[str, Any]]]:
         max_iterations: int = 20,
         scan_seed: int | None = None,
         artifact_root: str | None = None,
+        kb_root_index_key: str | None = None,
         exploratory_injection_fraction: float = 0.0,
         exploratory_gap_paths: object = None,
     ) -> list[dict[str, Any]]:
@@ -144,6 +146,7 @@ def _never_gapfill_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: object = None,
 ) -> list[dict[str, object]]:
@@ -376,6 +379,7 @@ def _validated_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: object = None,
 ) -> dict[str, object]:
@@ -453,6 +457,7 @@ def _make_feedback_hunt_activity() -> tuple[Callable[..., list[Any]], list[dict[
         db_path: str | None = None,
         scan_seed: int | None = None,
         artifact_root: str | None = None,
+        kb_root_index_key: str | None = None,
     ) -> list[Any]:
         with _lock:
             calls.append(

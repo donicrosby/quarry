@@ -39,6 +39,7 @@ from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
 from quarry_prompts.registry import TemplateNotFoundError
@@ -141,12 +142,20 @@ def hunt_impl(
     tool_call_cap: int | None = None,
     limiter: Any | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
     Returns ``(findings, coverage_gaps)``. Each ``HunterGap`` carries the area the
     hunter did not fully cover, its reason, and this hunter's ``vuln_class`` — so
     gapfill can turn it straight into a targeted re-hunt task.
+
+    KB consumption by reference (cpc slice 3): when *kb_root_index_key* is
+    supplied (the reference the kb-recon stage recorded on the scan metadata),
+    the kb_context injector resolves the referenced records from the artifact
+    store and the rendered text rides alongside the task's existing inline
+    context. Absent/unresolvable references fall back to the inline-context
+    behaviour — no crash, no empty hunt.
     """
     runner = ToolRunner(
         repo_root=Path(repo_path),
@@ -155,6 +164,22 @@ def hunt_impl(
         budget_spec=budget_spec,
     )
 
+    # Resolve KB references at execution time (activity-side I/O; the workflow
+    # passes only the reference). The injector returns None when nothing
+    # resolves, so domain_context keeps its existing assembled content.
+    effective_kb_key = (
+        kb_root_index_key if kb_root_index_key is not None else task.kb_root_index_key
+    )
+    kb_injector = KbContextInjectorPlugin(artifact_root=artifact_root)
+    kb_text = kb_injector.inject_context(
+        task.vuln_class or VulnerabilityClass.SECRETS,
+        AgentTask.model_validate(task.model_copy(update={"kb_root_index_key": effective_kb_key})),
+        "",
+    )
+    domain_context = task.domain_context
+    if kb_text:
+        domain_context = f"{kb_text}\n\n{domain_context}" if domain_context else kb_text
+
     registry = get_registry()
     vuln_value = task.vuln_class.value if task.vuln_class is not None else ""
     variables = {
@@ -162,7 +187,7 @@ def hunt_impl(
         "scope": task.scope,
         "entry_points": task.entry_points,
         "recon_notes": task.recon_notes,
-        "domain_context": task.domain_context,
+        "domain_context": domain_context,
         "focus_classes": [],
         "scope_exclusions": [],
         "task_prompt": task.task_prompt,
@@ -288,11 +313,13 @@ def hunt_activity(
     db_path: str | None = None,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
-    Returns ``{"findings": [...], "coverage_gaps": [...]}`` (JSON-serializable at
-    the Temporal boundary). The caller (workflow) converts findings back to
+    Returns ``{"findings": [...], "coverage_gaps": [...], "kb_context_resolved":
+    bool, "kb_records_supplied": int, "task": {...}}`` (JSON-serializable at the
+    Temporal boundary). The caller (workflow) converts findings back to
     CandidateFinding objects and feeds coverage_gaps into the gapfill stage.
 
     *panel_json*, if provided, is a serialised ``RoleConfig`` for the hunt role.
@@ -300,6 +327,11 @@ def hunt_activity(
     When provider is LITELLM, a real ``LiteLLMModelClient`` is built and the
     ``provider_policy`` (provider + model) is threaded through the agent loop so
     that ``resolve_provider_model`` picks up the Chutes model string.
+
+    *kb_root_index_key* is the KB root-index reference recorded on the scan
+    metadata by the kb-recon stage; this activity resolves the referenced
+    records from the artifact store at execution time (cpc slice 3). The task's
+    own ``kb_root_index_key`` field is used when the argument is not supplied.
     """
     stop_heartbeat = threading.Event()
     _ctx = contextvars.copy_context()
@@ -322,6 +354,7 @@ def hunt_activity(
             db_path,
             scan_seed,
             artifact_root,
+            kb_root_index_key,
         )
     finally:
         stop_heartbeat.set()
@@ -337,6 +370,7 @@ def _hunt_activity_impl(
     db_path: str | None = None,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -358,6 +392,20 @@ def _hunt_activity_impl(
 
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
 
+    effective_kb_key = (
+        kb_root_index_key if kb_root_index_key is not None else task.kb_root_index_key
+    )
+    if effective_kb_key != task.kb_root_index_key:
+        task = task.model_copy(update={"kb_root_index_key": effective_kb_key})
+
+    kb_injector = KbContextInjectorPlugin(artifact_root=artifact_root)
+    kb_injector.inject_context(
+        task.vuln_class or VulnerabilityClass.SECRETS,
+        task,
+        "",
+    )
+    _, kb_resolved, kb_record_keys = kb_injector.last_resolution
+
     findings, coverage_gaps = hunt_impl(
         task=task,
         repo_path=repo_path,
@@ -370,11 +418,42 @@ def _hunt_activity_impl(
         tool_call_cap=role_cfg.tool_call_cap,
         limiter=limiter,
         artifact_root=artifact_root,
+        kb_root_index_key=effective_kb_key,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)
 
+    # Audit provenance: which KB artifact keys were consumed by reference. The
+    # workflow records input_refs so the consumption boundary is inspectable
+    # after the scan (fallback resolves nothing — empty list, resolved=False).
+    consumed_refs: list[dict[str, Any]] = [
+        {
+            "id": f"kb-{key.replace('/', '-')}",
+            "uri": f"file://{_kb_artifact_path(artifact_root, task.scan_id, key)}",
+            "kind": "knowledge_base",
+            "content_type": "application/json",
+            "sha256": "",
+            "size_bytes": 0,
+            "metadata": {},
+        }
+        for key in kb_record_keys
+    ]
+    task = task.model_copy(update={"input_refs": [*_task_input_refs(task), *consumed_refs]})
+
     return {
         "findings": [f.model_dump(mode="json") for f in findings],
         "coverage_gaps": [g.model_dump(mode="json") for g in coverage_gaps],
+        "kb_context_resolved": kb_resolved,
+        "kb_records_supplied": len(kb_record_keys),
+        "task": task.model_dump(mode="json"),
     }
+
+
+def _task_input_refs(task: AgentTask) -> list[Any]:
+    return list(task.input_refs)
+
+
+def _kb_artifact_path(artifact_root: str | None, scan_id: str, key: str) -> str:
+    if artifact_root is None:
+        return f"{scan_id}/{key}"
+    return f"{artifact_root.rstrip('/')}/{scan_id}/{key}"

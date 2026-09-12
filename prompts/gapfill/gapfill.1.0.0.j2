@@ -36,6 +36,10 @@ Classes already completed:
 
 Attack surface items scanned: {{ items_scanned }} / {{ items_total }}
 
+{% if kb_context | default("") %}
+{{ kb_context }}
+
+{% endif %}
 {% if existing_findings %}
 Findings already reported — do NOT propose re-hunting these exact vectors; only
 fill genuine gaps NOT already covered below:

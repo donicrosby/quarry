@@ -88,6 +88,9 @@ Reported code snippet:
 {{ affected_code_snippet }}
 </target_content>
 {% endif %}
+{% if kb_context | default("") %}
+{{ kb_context }}
+{% endif %}
 
 Assume the claim is a false positive by default. Read the file at the reported
 location and any relevant callees, then record one outcome per constraint in

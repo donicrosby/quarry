@@ -29,6 +29,7 @@ from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.kb_recon import kb_recon_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
@@ -61,6 +62,7 @@ def counting_hunt_activity(
     db_path: str | None = None,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
 ) -> list[object]:
     """Mock hunt activity that tracks peak concurrent execution."""
     with _lock:
@@ -130,6 +132,7 @@ async def test_hunt_fan_out_respects_max_concurrent(
             recon_orchestrator_activity,
             _passthrough_recon_subsystem,
             recon_synthesis_activity,
+            kb_recon_activity,
             emit_agent_tasks,
             counting_hunt_activity,
             validate_secret_candidate,
