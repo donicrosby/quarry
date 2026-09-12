@@ -62,8 +62,19 @@ jobs:
       # Self-contained: conftest spins up an in-process Temporal test env
       # (start_time_skipping), so no external services are needed. pytest config
       # already sets -n auto + 300s per-test timeout + ResourceWarning-as-error.
+      # --dist loadfile keeps each test file on a single xdist worker so the
+      # sandbox-fork tests are not interleaved into the Temporal-heavy files
+      # wherever -n auto happens to schedule them. GitHub runners cap
+      # RLIMIT_NPROC at 64 per real UID (threads count) and two workers each
+      # running a Java Temporal test server peak right at that limit, so any
+      # fork-heavy test scheduled there dies with EAGAIN ("Cannot fork").
+      # Integration tests run sequentially (-n 0): they are the fork-pressure
+      # source (subprocess git/sandbox exec + Temporal servers) and a small
+      # fraction of the suite, so -n 0 there costs little wall-clock.
       - name: pytest
-        run: uv run pytest tests/unit tests/integration tests/golden
+        run: |
+          uv run pytest tests/unit tests/golden --dist loadfile
+          uv run pytest tests/integration -n 0
 
   test-browser:
     name: tests (browser extra)
