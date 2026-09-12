@@ -14,7 +14,7 @@
 ## 3. External benchmark evaluation
 
 - [ ] 3.1 Spike XBEN: enumerate targets, evaluate runner fit (Shannon publishes against it — direct comparability); document per-target bring-up requirements against the generalized target launcher
-- [ ] 3.2 Spike CyberGym: evaluate dataset access and runner fit; document
+- [x] 3.2 Spike CyberGym: evaluate dataset access and runner fit; document (spike-cybergym.md)
 - [ ] 3.3 Pick one external benchmark, implement a runner, record a baseline score with provenance
 
 ## 4. Verify + land
