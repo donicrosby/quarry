@@ -34,8 +34,21 @@ def _entry(path: str) -> FileManifestEntry:
     return FileManifestEntry(path=path, size_bytes=1, sha256="deadbeef", language=None)
 
 
-def _ledger(**overrides: object) -> CoverageLedger:
-    return build_coverage_ledger(scan_id="scan-1", workspace_id="local", **overrides)
+def _ledger(
+    *,
+    file_manifest: list[FileManifestEntry] | None = None,
+    covered_files: list[str] | None = None,
+    finding_file_paths: list[str] | None = None,
+    scope_excluded_files: list[tuple[str, str]] | None = None,
+) -> CoverageLedger:
+    return build_coverage_ledger(
+        scan_id="scan-1",
+        workspace_id="local",
+        file_manifest=file_manifest,
+        covered_files=covered_files,
+        finding_file_paths=finding_file_paths,
+        scope_excluded_files=scope_excluded_files,
+    )
 
 
 # ---------------------------------------------------------------------------
