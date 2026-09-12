@@ -33,13 +33,13 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_cli` | Typer CLI (`quarry scan run/diff/resume/rerun/cancel/list/status`, `quarry benchmark local`) |
 | `quarry_tui` | Textual TUI consuming the HTTP API; includes `ScanLaunchScreen` with focus selection |
 | `quarry_persistence` | SQLite via SQLAlchemy (server + activities only) |
-| `quarry_plugins` | Vulnerability scanners (secrets, IDOR, command-injection) |
-| `quarry_models` | Model layer: redaction scrubber, safe prompt construction, `run_agent_loop`, guards, `ModelClient` (Mock + LiteLLM) |
+| `quarry_plugins` | Vulnerability scanners (secrets, IDOR, command-injection) + context-injector plugins (`context/kb_context.py` resolves KB references into prompt context) |
+| `quarry_models` | Model layer: redaction scrubber, safe prompt construction, `run_agent_loop`, guards, `ModelClient` (Mock + LiteLLM), `checklist.py` (adversarial checklist verdict) |
 | `quarry_tools` | Guarded tool registry — `ToolSpec`, `ToolRunner`, `BUILTIN_REGISTRY` (`read_file`, `list_dir`, `grep`, `search_code`) |
 | `quarry_artifacts` | Artifact storage — `LocalArtifactStore` (filesystem-backed) |
 | `quarry_integrations` | Finding sinks — dry-run Jira/Slack delivery, idempotent per scan |
 
-**Data flow**: CLI/TUI → `QuarryClient` (httpx) → FastAPI server → Temporal workflow → activities → SQLite/filesystem
+**Data flow**: CLI/TUI → `QuarryClient` (httpx) → FastAPI server → Temporal workflow → activities → SQLite/filesystem. A `kb-recon` activity (cpc slice 2) builds a knowledge-base root index per scan; the `kb_context` injector (cpc slice 3) resolves KB references into rendered hunt/gapfill/validate prompt context, with inline fallback when references are absent.
 
 ## Critical Constraints
 
@@ -88,7 +88,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - **pytest-asyncio** in `auto` mode — async tests just work, no decorators needed.
 - **Temporal integration tests** use `temporal_env`, `temporal_client`, `temporal_worker` fixtures from `tests/conftest.py`. These start a `WorkflowEnvironment` with the test server and register all activities + all three workflows (`RunScanWorkflow`, `RunDiffScanWorkflow`, `ReconWorkflow`).
 - Integration tests create real git repos via `subprocess.run(["git", ...])` in `tmp_path`.
-- ~1700 tests across unit/integration/golden; some are skipped (missing-binary guards for `rg`/`ast-grep`). Do not hard-code test counts here — check `pytest --collect-only -q`.
+- ~1850 tests across unit/integration/golden; some are skipped (missing-binary guards for `rg`/`ast-grep`). Do not hard-code test counts here — check `pytest --collect-only -q`.
 
 ## Environment
 
@@ -100,14 +100,14 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 ## Key Schemas
 
-- `src/quarry/schemas.py` — `Scan`, `CandidateFinding`, `FinalFinding`, `EvidencePathElement`, `DeploymentIntent`, `ReVerificationOutcome`, `VerdictDefaults`, `GitDiff`, `ChangedFile`, `ImpactedCodeRegion`, `DiffLabel`, `ScanStatus`, `ArchitectureDoc`, `Subsystem`, `TrustBoundary`, `BuildCommand`, `AgentStep`, `AgentLoopResult`, `ScopeExclusion`, `SubsystemAssignment`, etc.
+- `src/quarry/schemas.py` — `Scan`, `CandidateFinding`, `FinalFinding`, `EvidencePathElement`, `DeploymentIntent`, `ReVerificationOutcome`, `VerdictDefaults`, `GitDiff`, `ChangedFile`, `ImpactedCodeRegion`, `DiffLabel`, `ScanStatus`, `ArchitectureDoc`, `Subsystem`, `TrustBoundary`, `BuildCommand`, `AgentStep`, `AgentLoopResult`, `ScopeExclusion`, `SubsystemAssignment`, `ChecklistConstraint`/`ChecklistOutcome`/`ChecklistItem` (adversarial checklist verdict), `KBRootIndex`/`KBComponentEntity`/`KBVulnClassNote`/`KBDependencyGraph`/`KBContextProvenance` (knowledge base), `ProductionFileStatus`/`ProductionFileAccounting` (coverage file accounting), etc.
 - `src/quarry/panel_config.py` — `QuarryConfig`, `load_quarry_config`, `resolve_panel`, `resolve_focus`.
 - `src/quarry_activities/inputs.py` — All Pydantic BaseModel activity input classes.
 - `src/quarry_server/schemas.py` — FastAPI request/response models.
 
 ## Workflows
 
-- `RunScanWorkflow` — full repo scan (SNAPSHOT → ATTACK_SURFACE → SECRETS_SCAN → VALIDATION → IDOR_SCAN → CMDI_SCAN → COVERAGE → REPORT → INTEGRATING). Supports resume and cancellation. The COVERAGE stage runs the `build-coverage-ledger` activity, persists a coverage-ledger artifact, and feeds the report's `## Coverage` section (scanned vs skipped, honest gaps). INTEGRATING fires dry-run sinks after the report is written.
+- `RunScanWorkflow` — full repo scan (SNAPSHOT → RECON → HUNT → VALIDATION → AGENTIC_VALIDATE → GAPFILL → DEDUP → PROVE → TRACER → COVERAGE → REPORT → INTEGRATING; with a CALIBRATE step post-validation that re-scores each validated finding's severity). Supports resume and cancellation. The COVERAGE stage runs the `build-coverage-ledger` activity (production-file accounting: covered / intentionally-excluded / gap per manifest entry), persists a coverage-ledger artifact, and feeds the report's `## Coverage` section (scanned vs skipped, honest gaps). GAPFILL appends exploratory investigations when `scan_defaults.exploratory_injection_fraction` > 0 (default 0.3, cap 0.5) — class-neutral hunt tasks over ledger gap paths. INTEGRATING fires dry-run sinks after the report is written.
 - `RunDiffScanWorkflow` — commit-to-commit diff scan (GIT_DIFF → MAP_REGIONS → SCAN_REGIONS → VALIDATE → REPORT). Only scans changed regions.
 - `ReconWorkflow` — language-agnostic structural recon (orchestrator → parallel subsystem activities → synthesis → `ArchitectureDoc`). Task queue: `quarry-control`. The orchestrator reads repo layout and manifests with no model call; subsystem activities run `run_agent_loop(role="recon")`; synthesis merges into an `ArchitectureDoc` (primary language, subsystems, entry points, trust boundaries).
 
