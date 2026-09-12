@@ -245,6 +245,10 @@ def _empty_coverage_gaps() -> list[CoverageGap]:
     return []
 
 
+def _empty_production_file_accounting() -> list[ProductionFileAccounting]:
+    return []
+
+
 def _empty_entry_points() -> list[EntryPoint]:
     return []
 
@@ -782,6 +786,29 @@ class CoverageGap(BaseModel):
     severity_hint: str | None = None
 
 
+class ProductionFileStatus(StrEnum):
+    """Coverage status of one first-party file in the snapshot manifest."""
+
+    COVERED = "covered"
+    INTENTIONALLY_EXCLUDED = "intentionally_excluded"
+    GAP = "gap"
+
+
+class ProductionFileAccounting(BaseModel):
+    """The ledger's accounting for one first-party file.
+
+    Every manifest file appears exactly once: ``covered`` (an investigation
+    covers it), ``intentionally_excluded`` (out by scope, focus, or the
+    production-code boundary — ``reason`` is required), or ``gap`` (neither —
+    surfaced for gapfill). Excluded files are recorded, never silently
+    omitted; gap files never carry a reason.
+    """
+
+    path: str
+    status: ProductionFileStatus
+    reason: str | None = None
+
+
 class HunterGap(BaseModel):
     """A coverage gap a hunter self-reports at the end of its pass.
 
@@ -807,7 +834,33 @@ class CoverageLedger(BaseModel):
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
+    # Proactive production-file accounting (candidate-precision-and-calibration).
+    # Every first-party file in the snapshot manifest is accounted for exactly
+    # once: covered by an investigation, intentionally excluded (with reason),
+    # or surfaced as a gap for gapfill to pick up. Empty for ledgers built
+    # without a manifest (pre-guarantee behaviour).
+    file_coverage: list[ProductionFileAccounting] = Field(
+        default_factory=_empty_production_file_accounting
+    )
     created_at: datetime
+
+    def file_gap_paths(self) -> list[str]:
+        """Paths of production files neither covered nor excluded (sorted)."""
+        return [item.path for item in self.file_coverage if item.status is ProductionFileStatus.GAP]
+
+    def file_excluded_paths(self) -> list[str]:
+        """Paths of files recorded as intentionally excluded (sorted)."""
+        return [
+            item.path
+            for item in self.file_coverage
+            if item.status is ProductionFileStatus.INTENTIONALLY_EXCLUDED
+        ]
+
+    def file_covered_paths(self) -> list[str]:
+        """Paths of production files covered by an investigation (sorted)."""
+        return [
+            item.path for item in self.file_coverage if item.status is ProductionFileStatus.COVERED
+        ]
 
 
 class GroundTruthFinding(BaseModel):

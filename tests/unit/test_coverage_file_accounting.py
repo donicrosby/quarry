@@ -20,7 +20,6 @@ from quarry.schemas import (
     CoverageLedger,
     FileManifestEntry,
     ProductionFileStatus,
-    VulnerabilityClass,
 )
 from quarry_activities.coverage import (
     build_coverage_ledger,
@@ -76,6 +75,7 @@ def test_boundary_exclusions_carry_a_reason(path: str, reason: str) -> None:
     classification = production_file_classification(path)
     assert classification is not None, f"{path} should be excluded by the boundary"
     assert classification.reason == reason
+    assert classification.status is ProductionFileStatus.INTENTIONALLY_EXCLUDED
 
 
 # ---------------------------------------------------------------------------
