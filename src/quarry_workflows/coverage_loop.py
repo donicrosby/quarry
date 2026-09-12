@@ -23,8 +23,10 @@ from quarry.schemas import (
     CallGraph,
     CandidateFinding,
     ReachabilityVerdict,
+    ScopeExclusion,
     Trace,
 )
+from quarry_activities.coverage import production_file_classification
 
 CellKey = tuple[str | None, str | None, str]
 
@@ -156,6 +158,54 @@ _NON_WORD = re.compile(r"[^a-zA-Z0-9]+")
 
 def _slug(value: str) -> str:
     return _NON_WORD.sub("-", value).strip("-").lower() or "x"
+
+
+def _scope_of(task: AgentTask) -> str:
+    """The task's scope, normalised to a POSIX path with no trailing slash."""
+    return (task.scope or "").replace("\\", "/").strip().strip("/")
+
+
+def exploratory_gap_paths(
+    *,
+    hunted_tasks: Iterable[AgentTask],
+    finding_paths: Iterable[str],
+    scope_exclusions: Iterable[ScopeExclusion],
+) -> list[str]:
+    """Candidate areas for the exploratory hedge, derived purely in-workflow.
+
+    Walks the distinct scopes of every hunted task plus the files findings
+    cite, drops anything the production-code boundary already excludes
+    (tests, vendored, generated, build/config) or that a scan-scope exclusion
+    removes, and returns the remaining production paths sorted and deduped.
+    These are the areas the scan actually touched that an unconstrained
+    exploratory investigation can re-examine without threat-model context.
+    Deterministic: same inputs, same output.
+    """
+    investigations: list[str] = []
+    for task in hunted_tasks:
+        scope = _scope_of(task)
+        if scope:
+            investigations.append(scope)
+    for locator in finding_paths:
+        path = locator.replace("\\", "/").split(":", 1)[0].strip().strip("/")
+        if path:
+            investigations.append(path)
+
+    excluded_values = {
+        (exc.value or "").replace("\\", "/").strip().strip("/") for exc in scope_exclusions
+    }
+
+    def _is_excluded(path: str) -> bool:
+        return any(path == value or path.startswith(f"{value}/") for value in excluded_values)
+
+    candidates: set[str] = set()
+    for path in investigations:
+        if not path or path == ".":
+            continue
+        if _is_excluded(path) or production_file_classification(path) is not None:
+            continue
+        candidates.add(path)
+    return sorted(candidates)
 
 
 def _sink_file(finding: CandidateFinding) -> str | None:

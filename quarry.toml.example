@@ -33,6 +33,13 @@
 # exhaustive audit, leaving only convergence / round cap / budget as stop
 # criteria. The rule can only ever stop the loop *earlier*, never extend it.
 # coverage_yield_threshold = 0.15
+#
+# Unconstrained exploratory-investigation injection: the fraction of each
+# gapfill pass deliberately spent on open-ended "explore this area"
+# investigations with no vulnerability class and no threat-model context —
+# a hedge against tunnel vision from the threat model. Bounded to the 25–50%
+# band; 0.0 disables the injection entirely.
+# exploratory_injection_fraction = 0.3
 # seed = 42                      # fix model seed for reproducible runs (omit to derive from scan ID)
 #
 # Vendor allowlist (optional). Fail fast before any model call if a panel names a

@@ -42,8 +42,124 @@ from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
+from quarry_prompts.registry import TemplateNotFoundError
 from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
+
+# ---------------------------------------------------------------------------
+# Unconstrained exploratory injection (candidate-precision-and-calibration).
+#
+# Fraction of each gapfill pass deliberately spent on unconstrained
+# "explore this area" investigations that ignore the current threat model,
+# hedging against tunnel vision. Bounded to the 25–50% band by default; 0.0
+# disables the rule (validation lives in ScanDefaultsConfig).
+# ---------------------------------------------------------------------------
+
+DEFAULT_EXPLORATORY_INJECTION_FRACTION = 0.3
+EXPLORATORY_INJECTION_MAX_FRACTION = 0.5
+
+_EXPLORATORY_PROMPT_ROLE = "task"
+_EXPLORATORY_PROMPT_NAME = "explore"
+_EXPLORATORY_PROMPT_VERSION = "1.0.0"
+
+
+def exploratory_injection_count(task_count: int, *, fraction: float) -> int:
+    """Number of unconstrained exploratory investigations for a gapfill pass.
+
+    ``floor(task_count * fraction)`` with a floor of 1 whenever the rule is
+    enabled (a pass where the fraction fires must include at least one
+    unconstrained investigation), clamped to at most half the pass (rounded up
+    for odd counts) — the injection is bounded by construction even when a
+    misconfigured fraction exceeds the band. Deterministic: the same counts
+    always produce the same number.
+    """
+    if fraction <= 0 or task_count <= 0:
+        return 0
+    raw = int(task_count * fraction)
+    return max(0, min(max(1, raw), (task_count + 1) // 2))
+
+
+def _exploratory_prompt(area: str) -> str:
+    """Render the exploratory task prompt, falling back to a built-in stub.
+
+    The template (prompts/task/explore.1.0.0.j2) carries the Mantis
+    (Apache-2.0, via Shannon) attribution header. The fallback text is a
+    last resort so a missing template never disables the injection; it keeps
+    the same contract (open-ended, no threat-model assumptions).
+    """
+    try:
+        prompt = build_prompt(
+            registry=get_registry(),
+            role=_EXPLORATORY_PROMPT_ROLE,
+            name=_EXPLORATORY_PROMPT_NAME,
+            version=_EXPLORATORY_PROMPT_VERSION,
+            variables={"area": area},
+        )
+    except TemplateNotFoundError:
+        return (
+            f"Unconstrained exploratory investigation of {area}: audit it fresh "
+            "with no vulnerability class and no supplied context. Disregard any "
+            "threat-model assumption that this area is safe or low-risk — treat "
+            f"its inputs and boundaries as untrusted. Explore {area}, read what "
+            "it does, and report what an attacker could do here."
+        )
+    # Developer-only partial template: the text lands in the user message.
+    return prompt.messages[1].content.strip() if len(prompt.messages) > 1 else ""
+
+
+def _scope_of_area(area: str) -> str:
+    """Normalise an area to a scope string (POSIX, slash-terminated dirs)."""
+    normalized = area.replace("\\", "/").strip().strip("/")
+    if not normalized:
+        return "."
+    if "." in Path(normalized).name or normalized.endswith("/"):
+        return normalized
+    return f"{normalized}/"
+
+
+def inject_exploratory_investigations(
+    *,
+    base_tasks: list[AgentTask],
+    gap_file_paths: list[str],
+    scan_id: str,
+    fraction: float,
+    now: datetime,
+) -> list[AgentTask]:
+    """Append unconstrained exploratory investigations to a gapfill pass.
+
+    The injected tasks are minimal and open-ended: no vulnerability class, no
+    entry points, no recon notes, no domain context — nothing derived from
+    the threat model. Each targets one coverage-gap path (from the ledger's
+    proactive file accounting), deterministically (gap paths are sorted and
+    taken in order, so the same inputs always inject the same tasks).
+
+    Returns *base_tasks* plus the injected exploratory tasks, in that order.
+    """
+    count = exploratory_injection_count(len(base_tasks), fraction=fraction)
+    if count <= 0:
+        return list(base_tasks)
+
+    areas = sorted({gap.replace("\\", "/").strip() for gap in gap_file_paths if gap.strip()})
+    if not areas:
+        return list(base_tasks)
+
+    injected: list[AgentTask] = []
+    for i, area in enumerate(areas[:count]):
+        injected.append(
+            AgentTask(
+                id=f"exploratory-{scan_id}-{i}",
+                scan_id=scan_id,
+                role="hunt",
+                task_name=f"exploratory-{i}",
+                task_prompt=_exploratory_prompt(area),
+                vuln_class=None,
+                scope=_scope_of_area(area),
+                source="gapfill",
+                status="pending",
+                created_at=now,
+            )
+        )
+    return [*base_tasks, *injected]
 
 
 class GapfillResponse(BaseModel):
@@ -167,6 +283,8 @@ def gapfill_impl(
     turn_timeout_seconds: int = 120,
     limiter: Any | None = None,
     artifact_root: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: list[str] | None = None,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -181,6 +299,11 @@ def gapfill_impl(
     are shown to the gapfill agent so it does not re-hunt vectors already found, and
     are used as a dedup backstop: a gap whose (vuln_class, scope) is already covered
     by a finding is dropped rather than re-hunted.
+
+    When *exploratory_injection_fraction* > 0, a bounded fraction of the pass
+    is appended as unconstrained exploratory investigations targeting
+    *exploratory_gap_paths* (the ledger's proactive coverage gaps) — tasks
+    with no threat-model-derived context, hedging against tunnel vision.
     """
     if budget_spec is None:
         budget_spec = BudgetSpec()
@@ -279,6 +402,15 @@ def gapfill_impl(
                 seen.add(key)
                 extra_tasks.append(task)
 
+    if exploratory_injection_fraction > 0:
+        extra_tasks = inject_exploratory_investigations(
+            base_tasks=extra_tasks,
+            gap_file_paths=exploratory_gap_paths or list(ledger.file_gap_paths()),
+            scan_id=scan_id,
+            fraction=exploratory_injection_fraction,
+            now=datetime.now(UTC),
+        )
+
     return extra_tasks
 
 
@@ -296,6 +428,8 @@ def gapfill_activity(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -333,6 +467,8 @@ def gapfill_activity(
             max_iterations,
             scan_seed,
             artifact_root,
+            exploratory_injection_fraction,
+            exploratory_gap_paths,
         )
     finally:
         stop_heartbeat.set()
@@ -353,6 +489,8 @@ def _gapfill_activity_impl(
     max_iterations: int = 20,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    exploratory_injection_fraction: float = 0.0,
+    exploratory_gap_paths: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -407,6 +545,8 @@ def _gapfill_activity_impl(
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
         limiter=limiter,
         artifact_root=artifact_root,
+        exploratory_injection_fraction=exploratory_injection_fraction,
+        exploratory_gap_paths=exploratory_gap_paths,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

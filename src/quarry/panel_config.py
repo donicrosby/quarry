@@ -36,6 +36,14 @@ def _empty_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
 
+# Upper bound for the exploratory-injection fraction (cpc slice 6). A gapfill
+# pass is always majority threat-model-driven; the exploratory hedge is capped
+# at half the pass by construction (gapfill.exploratory_injection_count clamps
+# independently, so a bad value degrades gracefully rather than corrupting the
+# scan shape).
+EXPLORATORY_INJECTION_MAX_FRACTION = 0.5
+
+
 # Keys matching this pattern in the raw TOML top level are rejected at parse
 # time to prevent secrets from leaking into config files.
 _CREDENTIAL_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL)$")
@@ -200,6 +208,15 @@ class ScanDefaultsConfig(BaseModel):
     # scan, and set it to 0.0 to disable the rule entirely (exhaustive audit),
     # leaving only convergence / round-cap / budget as stop criteria.
     coverage_yield_threshold: float = Field(default=0.15, ge=0.0, le=1.0)
+    # Unconstrained exploratory-investigation injection (cpc slice 6): the
+    # fraction of each gapfill pass deliberately spent on open-ended
+    # "explore this area" investigations that carry no threat-model-derived
+    # context, hedging against tunnel vision. Bounded to the 25–50% band by
+    # default; 0.0 disables the injection entirely (gapfill emits only
+    # threat-model-driven re-hunt tasks, the pre-guarantee behaviour).
+    exploratory_injection_fraction: float = Field(
+        default=0.3, ge=0.0, le=EXPLORATORY_INJECTION_MAX_FRACTION
+    )
     # Optional fixed seed. When None, each scan derives a deterministic seed
     # from its scan_id UUID so runs are reproducible without pinning a global value.
     seed: int | None = None

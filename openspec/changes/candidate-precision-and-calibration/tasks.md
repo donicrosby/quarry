@@ -36,11 +36,11 @@
 
 ## 6. Coverage guarantee + exploratory injection
 
-- [ ] 6.1 Write failing tests that the coverage ledger marks every production file covered / intentionally-excluded / gap, and surfaces an unassigned production file as a gap
-- [ ] 6.2 Implement ledger-side production-file accounting (deterministic gap computation, boundary-based exclusion recording) and verify 6.1 passes
-- [ ] 6.3 Write failing tests that the gapfill planner injects a bounded configurable fraction of unconstrained exploratory investigations (no threat-model context)
-- [ ] 6.4 Add the exploratory-investigation planner behavior + single config knob (default in the 25–50% band) to hunt/gapfill prompts and config, and verify 6.3 passes
-- [ ] 6.5 Add a hunt-stage test that an unconstrained exploratory task treats a low-risk area's inputs as untrusted (ignores safety assumptions)
+- [x] 6.1 Write failing tests that the coverage ledger marks every production file covered / intentionally-excluded / gap, and surfaces an unassigned production file as a gap
+- [x] 6.2 Implement ledger-side production-file accounting (deterministic gap computation, boundary-based exclusion recording) and verify 6.1 passes
+- [x] 6.3 Write failing tests that the gapfill planner injects a bounded configurable fraction of unconstrained exploratory investigations (no threat-model context)
+- [x] 6.4 Add the exploratory-investigation planner behavior + single config knob (default in the 25–50% band) to hunt/gapfill prompts and config, and verify 6.3 passes
+- [x] 6.5 Add a hunt-stage test that an unconstrained exploratory task treats a low-risk area's inputs as untrusted (ignores safety assumptions)
 
 ## 7. Dedup cutover and integration
 

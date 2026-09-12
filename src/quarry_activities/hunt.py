@@ -156,7 +156,7 @@ def hunt_impl(
     )
 
     registry = get_registry()
-    vuln_value = (task.vuln_class or VulnerabilityClass.SECRETS).value
+    vuln_value = task.vuln_class.value if task.vuln_class is not None else ""
     variables = {
         "vuln_class": vuln_value,
         "scope": task.scope,
@@ -170,15 +170,27 @@ def hunt_impl(
     }
     # Prefer the per-class hunt template (prompts/hunt/<vuln_class>.1.0.0.j2);
     # fall back to the generic hunt template for classes without one.
-    try:
-        prompt = build_prompt(
-            registry=registry,
-            role="hunt",
-            name=vuln_value,
-            version="1.0.0",
-            variables=variables,
-        )
-    except TemplateNotFoundError:
+    # An exploratory task (vuln_class=None) must NOT default to a class: it
+    # is unconstrained by contract, so it renders the generic hunt template
+    # with its own exploratory task prompt — no class-driven context.
+    if task.vuln_class is not None:
+        try:
+            prompt = build_prompt(
+                registry=registry,
+                role="hunt",
+                name=vuln_value,
+                version="1.0.0",
+                variables=variables,
+            )
+        except TemplateNotFoundError:
+            prompt = build_prompt(
+                registry=registry,
+                role="hunt",
+                name="hunt",
+                version="1.0.0",
+                variables=variables,
+            )
+    else:
         prompt = build_prompt(
             registry=registry,
             role="hunt",
@@ -221,9 +233,17 @@ def hunt_impl(
     findings: list[CandidateFinding] = []
     coverage_gaps: list[HunterGap] = []
     if result.final_answer and isinstance(result.final_answer, _HuntResponse):
-        hunt_class = task.vuln_class or VulnerabilityClass.SECRETS
+        # An exploratory hunter (vuln_class=None) has no assigned class; its
+        # findings get stamped at parse time only if the model emits a valid
+        # canonical class, otherwise they are dropped rather than silently
+        # misfiled under a class it was never hunting.
+        hunt_class = task.vuln_class
         for raw in result.final_answer.findings:
-            cf = _parse_finding(raw, task.scan_id, "local", hunt_class)
+            cf = (
+                _parse_finding(raw, task.scan_id, "local", hunt_class)
+                if hunt_class is not None
+                else _parse_exploratory_finding(raw, task.scan_id)
+            )
             if cf is not None:
                 findings.append(cf)
         for gap in result.final_answer.coverage_gaps:
@@ -236,6 +256,26 @@ def hunt_impl(
             )
 
     return findings, coverage_gaps
+
+
+def _parse_exploratory_finding(
+    raw: dict[str, Any],
+    scan_id: str,
+) -> CandidateFinding | None:
+    """Parse an exploratory hunter's finding, taking the class from the model.
+
+    The exploratory hunter names the vulnerability class it actually found
+    (there was no assigned one); a non-canonical value drops the finding
+    rather than guessing a class it was never hunting.
+    """
+    raw_class = raw.get("vuln_class")
+    if not isinstance(raw_class, str):
+        return None
+    try:
+        vuln_class = VulnerabilityClass(raw_class)
+    except ValueError:
+        return None
+    return _parse_finding(raw, scan_id, "local", vuln_class)
 
 
 @activity.defn(name="hunt-vuln-class")

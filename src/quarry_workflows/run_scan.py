@@ -91,6 +91,7 @@ from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
     cell_key,
     dedup_new_tasks,
+    exploratory_gap_paths,
     loop_stop_reason,
 )
 from quarry_workflows.exploitation_loop import (
@@ -193,6 +194,11 @@ class RunScanInput(BaseModel):
     # 0.15) so direct/test construction keeps the historical behaviour; the API
     # layer passes the configured quarry.toml value.
     coverage_yield_threshold: float = 0.0
+    # Unconstrained exploratory-investigation injection (cpc slice 6): the
+    # fraction of each gapfill pass spent on open-ended, no-context
+    # investigations that ignore the threat model. 0.0 disables; the
+    # quarry.toml default (0.3) is applied by the API layer.
+    exploratory_injection_fraction: float = 0.0
     panel_entries: list[ModelPanelEntry] = Field(default_factory=_empty_panel_entries)
     # Configurable activity retries (quarry.toml [retry] max_attempts). Default 1
     # preserves the historical fail-fast behaviour for direct/test construction;
@@ -728,6 +734,15 @@ class RunScanWorkflow:
                     created_at=workflow.now(),
                 )
 
+                # Candidate areas for the unconstrained exploratory hedge
+                # (cpc slice 6), computed purely from hunt state in scope —
+                # no I/O, safe inside the sandboxed workflow runner.
+                exploratory_gap_paths_for_pass = exploratory_gap_paths(
+                    hunted_tasks=all_agent_tasks,
+                    finding_paths=[f.affected_component or "" for f in candidate_findings],
+                    scope_exclusions=scan.profile.scope_exclusions,
+                )
+
                 gapfill_panel_json = panel_json_for_role(scan, "gapfill")
                 # Compact summary of findings discovered so far, so gapfill avoids
                 # re-hunting (and re-reporting) vectors that are already covered.
@@ -761,6 +776,8 @@ class RunScanWorkflow:
                                 scan_input.gapfill_max_iterations,
                                 scan_input.scan_seed,
                                 artifact_root,
+                                scan_input.exploratory_injection_fraction,
+                                exploratory_gap_paths_for_pass,
                             ],
                             start_to_close_timeout=timedelta(hours=4),
                             heartbeat_timeout=timedelta(minutes=3),
