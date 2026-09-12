@@ -7,6 +7,7 @@ surfaced in the report so coverage gaps are never hidden.
 """
 
 import json
+from contextlib import suppress
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -313,17 +314,27 @@ def _coverage_gaps_from_json(scan_id: str, payload: str) -> list[CoverageGap]:
                 id=str(uuid4()),
                 scan_id=scan_id,
                 scope_unit_id=_optional_str(values.get("scope_unit_id")),
-                vuln_class=(
-                    VulnerabilityClass(vuln_class_value)
-                    if isinstance(vuln_class_value, str)
-                    else None
-                ),
+                vuln_class=_coerce_vuln_class(vuln_class_value),
                 reason=_required_str(values, "reason"),
                 recommended_next_task=_optional_str(values.get("recommended_next_task")),
                 severity_hint=_optional_str(values.get("severity_hint")),
             )
         )
     return gaps
+
+
+def _coerce_vuln_class(value: Any) -> VulnerabilityClass | None:
+    """Coerce a raw JSON value to VulnerabilityClass, returning None when absent or unknown.
+
+    Skipped-entry payloads may carry an empty string for class-neutral agent tasks
+    (e.g. exploratory gapfill); unknown strings are dropped rather than crashing
+    the activity, keeping model-derived data deny-by-default.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    with suppress(ValueError):
+        return VulnerabilityClass(value)
+    return None
 
 
 def _required_str(values: dict[str, Any], key: str) -> str:

@@ -11,11 +11,28 @@ from quarry.schemas import (
     VulnerabilityClass,
 )
 from quarry_activities.coverage import (
+    _coverage_gaps_from_json,
     build_coverage_ledger,
     build_coverage_ledger_activity,
     write_coverage_artifact,
 )
 from quarry_activities.inputs import BuildCoverageLedgerInput
+
+
+def test_coverage_gaps_from_json_tolerates_empty_and_unknown_vuln_class() -> None:
+    """Regression: class-neutral gapfill tasks emit vuln_class="" and must not crash."""
+    payload = json.dumps(
+        [
+            {"task_id": "t1", "vuln_class": "", "scope": "src/", "reason": "no finding"},
+            {"task_id": "t2", "vuln_class": "not-a-class", "scope": "src/", "reason": "x"},
+            {"task_id": "t3", "vuln_class": "secrets", "scope": "src/", "reason": "no finding"},
+            {"task_id": "t4", "vuln_class": None, "scope": "src/", "reason": "no finding"},
+        ]
+    )
+
+    gaps = _coverage_gaps_from_json("scan-1", payload)
+
+    assert [g.vuln_class for g in gaps] == [None, None, VulnerabilityClass.SECRETS, None]
 
 
 def test_build_coverage_ledger_records_requested_and_completed() -> None:
