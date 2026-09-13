@@ -37,6 +37,7 @@ PER_CLASS = [
     VulnerabilityClass.SECURITY_MISCONFIGURATION,
     VulnerabilityClass.INSECURE_DESIGN,
     VulnerabilityClass.WEAK_CRYPTO,
+    VulnerabilityClass.FILE_UPLOAD,
 ]
 
 
@@ -85,17 +86,28 @@ def test_per_class_templates_have_distinct_hashes() -> None:
     assert len(shas) == len(PER_CLASS)
 
 
-def test_file_upload_has_no_dedicated_template_and_falls_back() -> None:
-    """file_upload is a known class with no per-class template → generic fallback.
+def test_file_upload_resolves_to_its_dedicated_template() -> None:
+    """file_upload now has its own per-class hunt template (added by the
+    per-class-dynamic-validation change; previously it fell back to hunt/hunt).
 
-    Mirrors hunt.py's routing: per-class load raises TemplateNotFoundError, then
-    the generic hunt/hunt template renders.
+    The generic fallback itself is still exercised: a name that has no template
+    raises TemplateNotFoundError and the generic hunt/hunt template renders.
     """
     reg = _registry()
     vc = VulnerabilityClass.FILE_UPLOAD
+    dedicated = build_prompt(
+        registry=reg, role="hunt", name=vc.value, version="1.0.0", variables=_variables(vc)
+    )
+    assert dedicated.ref.id == "hunt/file_upload"
+    assert "<target_content>" in "\n".join(m.content for m in dedicated.messages)
+
     with pytest.raises(TemplateNotFoundError):
         build_prompt(
-            registry=reg, role="hunt", name=vc.value, version="1.0.0", variables=_variables(vc)
+            registry=reg,
+            role="hunt",
+            name="does_not_exist",
+            version="1.0.0",
+            variables=_variables(vc),
         )
 
     fallback = build_prompt(
