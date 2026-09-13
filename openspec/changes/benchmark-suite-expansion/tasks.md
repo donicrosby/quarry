@@ -1,7 +1,7 @@
 ## 1. Metrics + result artifact
 
-- [ ] 1.1 Write failing tests for a benchmark result schema (per-class recall, FP rate, proof rate, token cost per proven finding, wall-clock, model + prompt-hash + config provenance); verify fail (Red)
-- [ ] 1.2 Implement the result schema + artifact persistence; verify 1.1 passes (Green)
+- [x] 1.1 Write failing tests for a benchmark result schema (per-class recall, FP rate, proof rate, token cost per proven finding, wall-clock, model + prompt-hash + config provenance); verify fail (Red)
+- [x] 1.2 Implement the result schema + artifact persistence; verify 1.1 passes (Green)
 - [ ] 1.3 Write failing tests that `quarry benchmark local` emits the result artifact with correct metric computation on a known-fixture run; verify fail
 - [ ] 1.4 Wire metric computation into the benchmark runner; verify 1.3 passes
 
@@ -15,7 +15,7 @@
 
 - [ ] 3.1 Spike XBEN: enumerate targets, evaluate runner fit (Shannon publishes against it — direct comparability); document per-target bring-up requirements against the generalized target launcher
 - [x] 3.2 Spike CyberGym: evaluate dataset access and runner fit; document (spike-cybergym.md)
-- [ ] 3.3 Pick one external benchmark, implement a runner, record a baseline score with provenance
+- [x] 3.3 Pick one external benchmark, implement a runner, record a baseline score with provenance
 
 ## 4. Verify + land
 
