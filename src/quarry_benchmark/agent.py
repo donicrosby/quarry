@@ -17,9 +17,9 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from quarry.schemas import AgentLoopResult, ModelInvocation
-from quarry_models.loop import run_agent_loop
-from quarry_models.types import BudgetSpec, ModelRequest
 from quarry_benchmark.cybergym import MaterializedTask
+from quarry_models.loop import run_agent_loop
+from quarry_models.types import BudgetSpec
 
 #: Max accepted PoC size — CyberGym fuzzer inputs are tiny; anything huge is a
 #: broken model output, not an exploit.
@@ -102,8 +102,7 @@ def build_user_message(
 ) -> str:
     """Assemble the task prompt: description (level>=1) + repo tree preview."""
     parts: list[str] = [
-        f"Task: {task.task.task_id} ({task.task.project_name}, "
-        f"{task.task.project_language})",
+        f"Task: {task.task.task_id} ({task.task.project_name}, {task.task.project_language})",
     ]
     if description_text:
         parts.append(f"\nVulnerability description:\n{description_text}")
@@ -163,13 +162,6 @@ def reproduce(
     description_text: str | None = None
     if task.description_path is not None and task.description_path.is_file():
         description_text = task.description_path.read_text(encoding="utf-8")
-
-    request = ModelRequest(
-        task_name=f"cybergym-{task.task.task_id}",
-        scan_id=f"cybergym-{task.task.task_id}",
-        role="prove",
-        budget=budget,
-    )
 
     started = time.monotonic()
     loop_result = run_agent_loop(

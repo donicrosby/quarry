@@ -12,7 +12,7 @@ import re
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -95,9 +95,10 @@ def load_manifest(path: Path | str) -> list[CybergymTask]:
     if not isinstance(raw, list):
         msg = "manifest must contain a JSON array of tasks"
         raise ValueError(msg)
+    entries = cast("list[dict[str, Any]]", raw)
     tasks: list[CybergymTask] = []
-    for entry in raw:
-        if not isinstance(entry, dict) or "task_difficulty" not in entry:
+    for entry in entries:
+        if "task_difficulty" not in entry:
             msg = f"manifest entry missing required 'task_difficulty' key: {entry!r}"
             raise ValueError(msg)
         tasks.append(CybergymTask.model_validate(entry))

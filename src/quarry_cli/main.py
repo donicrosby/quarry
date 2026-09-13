@@ -19,7 +19,14 @@ from quarry.panel_config import resolve_auth, resolve_focus
 from quarry.schemas import FinalFinding, ScanSummary, Target, VulnerabilityClass
 from quarry_activities.clone import is_git_url
 from quarry_activities.target import start_local_target, terminate_local_target
+from quarry_benchmark import runner as _cybergym_runner
+from quarry_benchmark.cybergym import (
+    OFFICIAL_SUBSET_10 as _CYBERGYM_OFFICIAL_SUBSET_10,
+)
+from quarry_benchmark.cybergym import load_manifest as _load_cybergym_manifest
+from quarry_benchmark.cybergym import select_subset as _select_cybergym_subset
 from quarry_client.client import QuarryClient
+from quarry_models.litellm_client import LiteLLMModelClient
 
 app = typer.Typer(help="Quarry local vulnerability research harness.")
 scan_app = typer.Typer(help="Run scans.")
@@ -493,6 +500,100 @@ def benchmark_local(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     _echo_lines(lines)
+
+
+@benchmark_app.command("cybergym")
+def benchmark_cybergym(
+    manifest: Annotated[
+        str, typer.Option("--manifest", help="Path to cybergym tasks.json")
+    ] = "/root/tasks.json",
+    subset: Annotated[
+        str,
+        typer.Option(
+            "--subset",
+            help="Task selection: 'official10' or comma-separated task ids",
+        ),
+    ] = "official10",
+    level: Annotated[
+        str, typer.Option("--level", help="Task difficulty level (level0..level3)")
+    ] = "level1",
+    work_dir: Annotated[
+        str, typer.Option("--work-dir", help="Working directory for artifacts")
+    ] = "/root/cybergym-bench",
+    budget: Annotated[float, typer.Option("--budget", help="Per-task cost cap in USD")] = 2.0,
+    max_iterations: Annotated[
+        int, typer.Option("--max-iterations", help="Agent loop iteration cap")
+    ] = 40,
+    verify_only: Annotated[
+        bool,
+        typer.Option(
+            "--verify-only/--agent",
+            help="Skip the agent; verify staged reference PoCs instead",
+        ),
+    ] = False,
+    reference_poc_dir: Annotated[
+        str | None,
+        typer.Option(
+            "--reference-poc-dir",
+            help="Directory of staged reference PoCs (<task>_poc.bin) for --verify-only",
+        ),
+    ] = None,
+) -> None:
+    """Run the CyberGym external benchmark (materialize → reproduce → verify)."""
+    from quarry_benchmark.runner import run_cybergym_benchmark
+
+    manifest_path = Path(manifest)
+    if not manifest_path.is_file():
+        typer.echo(f"Error: manifest file not found at {manifest}", err=True)
+        raise typer.Exit(1)
+    if not _cybergym_runner.docker_available():
+        typer.echo("Error: docker daemon not reachable (verifier needs it)", err=True)
+        raise typer.Exit(1)
+
+    try:
+        tasks = _load_cybergym_manifest(manifest_path)
+    except (ValueError, OSError) as exc:
+        typer.echo(f"Error: failed to load manifest: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+    if subset == "official10":
+        ids = list(_CYBERGYM_OFFICIAL_SUBSET_10)
+    else:
+        ids = [s.strip() for s in subset.split(",") if s.strip()]
+    try:
+        selected = _select_cybergym_subset(tasks, ids)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+    if verify_only and reference_poc_dir is None:
+        typer.echo("Error: --verify-only requires --reference-poc-dir", err=True)
+        raise typer.Exit(1)
+
+    def _client_factory(task_id: str) -> object:
+        return LiteLLMModelClient()
+
+    result = run_cybergym_benchmark(
+        selected,
+        level=level,
+        work_dir=Path(work_dir),
+        harness_sha=_cybergym_runner.git_sha(),
+        client_factory=_client_factory,
+        fetch=_cybergym_runner.httpx_fetch,
+        verify_only=verify_only,
+        reference_poc_dir=Path(reference_poc_dir) if reference_poc_dir else None,
+        budget_usd=budget,
+        max_iterations=max_iterations,
+    )
+    artifact = result.save(Path(work_dir))
+    solved = sum(1 for t in result.tasks if t.solved)
+    typer.echo(
+        f"cybergym {result.provenance.config['mode']} level={level}: "
+        f"solved={solved}/{len(result.tasks)} "
+        f"cost=${result.metrics.token_cost_per_proven_finding * solved:.2f} "
+        f"wall={result.metrics.wall_clock_seconds:.0f}s"
+    )
+    typer.echo(f"artifact={artifact}")
 
 
 def ground_truth_is_inside_repo(repo: str, ground_truth: str) -> bool:

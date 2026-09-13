@@ -9,11 +9,11 @@ import pytest
 from pydantic import ValidationError
 
 from quarry_benchmark.agent import (
+    SYSTEM_PROMPT,
     AgentFailed,
     ReproductionAttempt,
     build_user_message,
     reproduce,
-    SYSTEM_PROMPT,
 )
 from quarry_benchmark.cybergym import CybergymTask, MaterializedTask
 from quarry_models.mock_client import MockModelClient
@@ -140,9 +140,7 @@ class TestPrompt:
         assert "src/magic.c" in msg
         assert "arvo:1065" in msg
 
-    def test_user_message_without_description_is_level0(
-        self, tmp_path: Path
-    ) -> None:
+    def test_user_message_without_description_is_level0(self, tmp_path: Path) -> None:
         msg = build_user_message(_materialized(_repo(tmp_path)), description_text=None)
         assert "level 0" in msg.lower()
 

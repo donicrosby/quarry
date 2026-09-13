@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,13 +15,11 @@ from quarry_benchmark.verifier import (
 )
 
 
-class CompletedFake:
+class CompletedFake(subprocess.CompletedProcess[str]):
     """Mimics subprocess.CompletedProcess[bytes | str]."""
 
     def __init__(self, returncode: int, stdout: str, stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+        super().__init__(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 class TestBuildDockerArgs:
@@ -45,7 +44,9 @@ class TestBuildDockerArgs:
         poc = tmp_path / "p"
         poc.write_bytes(b"\x00")
         args = build_docker_args(
-            "cybergym/oss-fuzz:1-vul", poc, ["/usr/local/bin/run_poc"],
+            "cybergym/oss-fuzz:1-vul",
+            poc,
+            ["/usr/local/bin/run_poc"],
             cmd_timeout=30,
         )
         assert "timeout -s SIGKILL 30 /usr/local/bin/run_poc 2>&1" in args
@@ -65,9 +66,7 @@ class TestRunOnce:
             seen.append(args)
             return CompletedFake(139, "Segmentation fault")
 
-        code, out = run_once(
-            "n132/arvo:1065-vul", poc, "arvo:1065", exec_runner=fake_run
-        )
+        code, out = run_once("n132/arvo:1065-vul", poc, "arvo:1065", exec_runner=fake_run)
         assert code == 139
         assert "Segmentation fault" in out
         assert seen[0][0] == "run"
@@ -92,9 +91,7 @@ class TestRunOnce:
         def hang(args: list[str], timeout: float) -> CompletedFake:
             raise subprocess.TimeoutExpired(cmd=args, timeout=timeout)
 
-        code, out = run_once(
-            "n132/arvo:1065-vul", poc, "arvo:1065", exec_runner=hang
-        )
+        code, out = run_once("n132/arvo:1065-vul", poc, "arvo:1065", exec_runner=hang)
         assert code == 300
         assert "timed out" in out.lower()
 
@@ -110,9 +107,7 @@ class TestRunOnce:
         with pytest.raises(VerifierError, match="125"):
             run_once("n132/arvo:404-vul", poc, "arvo:404", exec_runner=no_image)
 
-    def test_docker_not_listening_raises_verifier_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_docker_not_listening_raises_verifier_error(self, tmp_path: Path) -> None:
         poc = tmp_path / "poc"
         poc.write_bytes(b"x")
 
@@ -140,17 +135,13 @@ class TestVerify:
             (139, 300, False),
         ],
     )
-    def test_solved_matrix(
-        self, tmp_path: Path, vul: int, fix: int, solved: bool
-    ) -> None:
+    def test_solved_matrix(self, tmp_path: Path, vul: int, fix: int, solved: bool) -> None:
         results = iter([vul, fix])
 
         def fake_run(args: list[str], timeout: float) -> CompletedFake:
             return CompletedFake(next(results), "")
 
-        verdict = verify(
-            self._poc(tmp_path), "arvo:1065", exec_runner=fake_run
-        )
+        verdict = verify(self._poc(tmp_path), "arvo:1065", exec_runner=fake_run)
         assert verdict.vul_exit_code == vul
         assert verdict.fix_exit_code == fix
         assert verdict.solved is solved
@@ -162,9 +153,7 @@ class TestVerify:
             calls.append(args)
             return CompletedFake(139 if len(calls) == 1 else 0, "")
 
-        verdict = verify(
-            self._poc(tmp_path), "arvo:1065", exec_runner=fake_run
-        )
+        verdict = verify(self._poc(tmp_path), "arvo:1065", exec_runner=fake_run)
         assert verdict.solved is True
         assert "n132/arvo:1065-vul" in calls[0]
         assert "n132/arvo:1065-fix" in calls[1]

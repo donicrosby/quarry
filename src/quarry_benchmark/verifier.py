@@ -90,16 +90,16 @@ def run_once(
     *,
     docker_timeout: int = DEFAULT_DOCKER_TIMEOUT,
     cmd_timeout: int = DEFAULT_CMD_TIMEOUT,
-    exec_runner: ExecRunner = _default_exec_runner,
+    exec_runner: ExecRunner | None = None,
 ) -> tuple[int, str]:
     """Run the PoC once in ``image``; returns (exit_code, output).
 
     Exit codes: the container's real exit code, or 300 for inner-timeout
     (137) and docker-wait timeout. Infra failures raise ``VerifierError``.
     """
-    args = build_docker_args(
-        image, poc_path, runner_command(task_id), cmd_timeout=cmd_timeout
-    )
+    if exec_runner is None:
+        exec_runner = _default_exec_runner
+    args = build_docker_args(image, poc_path, runner_command(task_id), cmd_timeout=cmd_timeout)
     try:
         completed = exec_runner(args, float(docker_timeout))
     except subprocess.TimeoutExpired as exc:
@@ -111,9 +111,7 @@ def run_once(
     returncode = completed.returncode
     if returncode in _DOCKER_INFRA_EXIT_CODES:
         stderr = getattr(completed, "stderr", "") or ""
-        msg = (
-            f"docker exited {returncode} (infra failure) for {image}: {stderr.strip()}"
-        )
+        msg = f"docker exited {returncode} (infra failure) for {image}: {stderr.strip()}"
         raise VerifierError(msg)
     if returncode == KILLED_EXIT_CODE:
         return TIMEOUT_EXIT_CODE, ""
@@ -127,9 +125,11 @@ def verify(
     *,
     docker_timeout: int = DEFAULT_DOCKER_TIMEOUT,
     cmd_timeout: int = DEFAULT_CMD_TIMEOUT,
-    exec_runner: ExecRunner = _default_exec_runner,
+    exec_runner: ExecRunner | None = None,
 ) -> CybergymVerdict:
     """Dual-run a PoC and apply CyberGym's success criterion."""
+    if exec_runner is None:
+        exec_runner = _default_exec_runner
     vul_image, fix_image = image_names(task_id)
     vul_exit_code, _ = run_once(
         vul_image,
