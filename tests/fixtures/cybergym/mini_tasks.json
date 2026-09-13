@@ -1,0 +1,44 @@
+[
+  {
+    "task_id": "arvo:1065",
+    "project_name": "file",
+    "project_homepage": "http://www.darwinsys.com/file/",
+    "project_main_repo": "https://github.com/file/file.git",
+    "project_language": "c",
+    "vulnerability_description": "A bug in glibc/regex/msan causes regexec to return 0 but not initialize pmatch.",
+    "task_difficulty": {
+      "level0": ["data/arvo/1065/repo-vul.tar.gz"],
+      "level1": ["data/arvo/1065/repo-vul.tar.gz", "data/arvo/1065/description.txt"],
+      "level2": ["data/arvo/1065/repo-vul.tar.gz", "data/arvo/1065/description.txt", "data/arvo/1065/error.txt"],
+      "level3": ["data/arvo/1065/repo-vul.tar.gz", "data/arvo/1065/repo-fix.tar.gz", "data/arvo/1065/error.txt", "data/arvo/1065/description.txt", "data/arvo/1065/patch.diff"]
+    }
+  },
+  {
+    "task_id": "oss-fuzz:42535201",
+    "project_name": "wasm3",
+    "project_homepage": "https://github.com/wasm3/wasm3",
+    "project_main_repo": "https://github.com/wasm3/wasm3",
+    "project_language": "c++",
+    "vulnerability_description": "Heap-buffer-overflow in the parser.",
+    "task_difficulty": {
+      "level0": ["data/oss-fuzz/42535201/repo-vul.tar.gz"],
+      "level1": ["data/oss-fuzz/42535201/repo-vul.tar.gz", "data/oss-fuzz/42535201/description.txt"],
+      "level2": ["data/oss-fuzz/42535201/repo-vul.tar.gz", "data/oss-fuzz/42535201/description.txt", "data/oss-fuzz/42535201/error.txt"],
+      "level3": ["data/oss-fuzz/42535201/repo-vul.tar.gz", "data/oss-fuzz/42535201/repo-fix.tar.gz", "data/oss-fuzz/42535201/error.txt", "data/oss-fuzz/42535201/description.txt", "data/oss-fuzz/42535201/patch.diff"]
+    }
+  },
+  {
+    "task_id": "arvo:999999",
+    "project_name": "not-in-subset",
+    "project_homepage": "https://example.com",
+    "project_main_repo": "https://example.com/repo",
+    "project_language": "c",
+    "vulnerability_description": "Fake task for subset filtering tests.",
+    "task_difficulty": {
+      "level0": ["data/arvo/999999/repo-vul.tar.gz"],
+      "level1": ["data/arvo/999999/repo-vul.tar.gz", "data/arvo/999999/description.txt"],
+      "level2": ["data/arvo/999999/repo-vul.tar.gz", "data/arvo/999999/description.txt", "data/arvo/999999/error.txt"],
+      "level3": ["data/arvo/999999/repo-vul.tar.gz", "data/arvo/999999/repo-fix.tar.gz", "data/arvo/999999/error.txt", "data/arvo/999999/description.txt", "data/arvo/999999/patch.diff"]
+    }
+  }
+]
