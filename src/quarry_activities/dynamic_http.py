@@ -30,7 +30,11 @@ from quarry.schemas import (
 )
 from quarry_activities.credentials import CredentialCache, resolve_credentials
 from quarry_activities.inputs import HttpRequestActivityInput
-from quarry_artifacts.http_utils import capture_request_artifact, capture_response_artifact
+from quarry_artifacts.http_utils import (
+    capture_request_artifact,
+    capture_response_artifact,
+    response_artifact_key,
+)
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.redaction import Scrubber
 
@@ -157,4 +161,5 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
         request_artifact_ref=req_artifact.id,
+        body_artifact_key=response_artifact_key(response),
     )

@@ -11,6 +11,7 @@ Key invariants:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,8 @@ from quarry_activities.dynamic_http import (
     http_request_activity,
     scrub_and_wrap_body,
 )
+from quarry_activities.inputs import ReadArtifactTextInput
+from quarry_artifacts.local import LocalArtifactStore
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -374,4 +377,79 @@ def test_credential_cache_miss_after_invalidate() -> None:
 
     cache.invalidate("user_a")
 
-    assert cache.get("user_a") is None, "post-condition: cache miss after invalidate"
+    assert cache.get("user_a") is None, "post-condition: cache miss after invalidation"
+
+
+# ---------------------------------------------------------------------------
+# Per-class verdict evaluators (registry wiring): body resolvability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_carries_body_artifact_key(tmp_path: Path) -> None:
+    """The response artifact's store KEY must ride on the capture.
+
+    body_artifact_ref is a uuid id; LocalArtifactStore is key-addressed, so
+    without the key the dynamic-validation workflow cannot resolve the body
+    for per-class evaluators.
+    """
+    mock_response = _make_mock_response("hello-body")
+    spec = HttpRequestSpec(method="GET", path="/x")  # type: ignore[arg-type]
+    endpoint = TargetEndpoint(host="localhost", port=9000)
+    test_inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=endpoint.model_dump_json(),
+        allowed_hosts=("localhost",),
+        artifact_store_path=str(tmp_path),
+        scan_id="scan-key-test",
+        candidate_finding_id="finding-key",
+    )
+
+    with patch("quarry_activities.dynamic_http.httpx") as mock_httpx:
+        _setup_mock_httpx(mock_httpx, mock_response)
+        capture = await http_request_activity(test_inp)
+
+    assert capture.body_artifact_key is not None
+    assert capture.body_artifact_key.startswith("http/responses/")
+    assert capture.body_artifact_key.endswith(".json")
+
+    # The key resolves through the store the artifact was written to, and the
+    # stored envelope's body is the response text.
+    store = LocalArtifactStore(tmp_path / "scan-key-test")
+    raw = store.get_text(capture.body_artifact_key or "")
+    assert raw is not None
+    assert json.loads(raw)["body"] == "hello-body"
+
+
+@pytest.mark.asyncio
+async def test_body_key_round_trips_through_read_artifact_activity(
+    tmp_path: Path,
+) -> None:
+    """http-request → read-artifact-text round trip yields the response body text."""
+    from quarry_activities.read_artifact import read_artifact_text_activity
+
+    mock_response = _make_mock_response('{"result": "49"}')
+    spec = HttpRequestSpec(method="GET", path="/eval")  # type: ignore[arg-type]
+    endpoint = TargetEndpoint(host="localhost", port=9000)
+    test_inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=endpoint.model_dump_json(),
+        allowed_hosts=("localhost",),
+        artifact_store_path=str(tmp_path),
+        scan_id="scan-rt-test",
+        candidate_finding_id="finding-rt",
+    )
+
+    with patch("quarry_activities.dynamic_http.httpx") as mock_httpx:
+        _setup_mock_httpx(mock_httpx, mock_response)
+        capture = await http_request_activity(test_inp)
+
+    raw = read_artifact_text_activity(
+        ReadArtifactTextInput(
+            artifact_store_path=str(tmp_path),
+            scan_id="scan-rt-test",
+            artifact_key=capture.body_artifact_key or "",
+        )
+    )
+    assert raw is not None
+    assert json.loads(raw)["body"] == '{"result": "49"}'

@@ -5,6 +5,8 @@ Temporal boundary. Activities convert strings back to richer domain objects or
 ``Path`` instances internally.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -199,6 +201,21 @@ class HttpRequestActivityInput(BaseModel):
     scan_id: str
     candidate_finding_id: str
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+
+
+class ReadArtifactTextInput(BaseModel):
+    """Input payload for read_artifact_text_activity (registry wiring).
+
+    Resolves one artifact by store KEY (not the uuid ArtifactRef id) from the
+    scan's store rooted at ``artifact_store_path / scan_id`` — the same
+    namespace convention as ``http-request``.  All values are primitives.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    artifact_store_path: str
+    scan_id: str
+    artifact_key: str
 
 
 class SandboxExecActivityInput(BaseModel):

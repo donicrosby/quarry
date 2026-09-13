@@ -18,6 +18,10 @@ from quarry.schemas import (
     DynamicEvidenceLink,
     HttpResponseCapture,
 )
+from quarry_activities.verdict_evaluators import (
+    LiveProbeEvidence,
+    evaluate_live_verdict,
+)
 from quarry_workflows.run_scan import (
     LIVE_CORROBORATED,
     LIVE_INCONCLUSIVE,
@@ -48,19 +52,25 @@ def resolve_live_verdict(
     capture: HttpResponseCapture | None,
     scan_id: str,
     now: datetime,
+    evidence: LiveProbeEvidence | None = None,
 ) -> tuple[str, DynamicEvidenceLink | None]:
     """Map an actual HTTP capture to a live verdict + optional evidence link.
 
     - No capture (probe not dispatched / failed) → ``inconclusive``.
-    - 2xx → ``corroborated`` with a :class:`DynamicEvidenceLink` (reuses
-      :func:`promote_with_dynamic_evidence`).
-    - 401/403/404 → ``not_corroborated`` (the target enforces the guard).
-    - Anything else (5xx, other ambiguous codes) → ``inconclusive``.
+    - ``evidence`` provided → verdict comes from the per-class VerdictEvaluator
+      registry (``evaluate_live_verdict``); body content and differential
+      probes decide, not just the status code. Corroboration still promotes
+      via :func:`promote_with_dynamic_evidence` — unchanged.
+    - ``evidence`` absent → status-only mapping via ``live_verdict_from_status``
+      (2xx → corroborated; 401/403/404 → not_corroborated; else inconclusive).
     """
     if capture is None:
         return INCONCLUSIVE, None
 
-    verdict = live_verdict_from_status(capture.status_code)
+    if evidence is not None:
+        verdict = evaluate_live_verdict(candidate.vuln_class, evidence)
+    else:
+        verdict = live_verdict_from_status(capture.status_code)
     if verdict != CORROBORATED:
         return verdict, None
 
