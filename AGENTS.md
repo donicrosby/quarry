@@ -34,6 +34,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_tui` | Textual TUI consuming the HTTP API; includes `ScanLaunchScreen` with focus selection |
 | `quarry_persistence` | SQLite via SQLAlchemy (server + activities only) |
 | `quarry_plugins` | Vulnerability scanners (secrets, IDOR, command-injection) + context-injector plugins (`context/kb_context.py` resolves KB references into prompt context) |
+| `quarry_benchmark` | External benchmark harness (CyberGym): manifest/subset, HF materialization, PoC agent loop (`role=prove`), docker dual-run verifier (upstream exit-code semantics: crash on `-vul`, 0 on `-fix`, 137→300 timeout), runner → `BenchmarkRunResult` artifacts with full provenance; CLI `quarry benchmark cybergym [--verify-only]` |
 | `quarry_models` | Model layer: redaction scrubber, safe prompt construction, `run_agent_loop`, guards, `ModelClient` (Mock + LiteLLM), `checklist.py` (adversarial checklist verdict) |
 | `quarry_tools` | Guarded tool registry — `ToolSpec`, `ToolRunner`, `BUILTIN_REGISTRY` (`read_file`, `list_dir`, `grep`, `search_code`) |
 | `quarry_artifacts` | Artifact storage — `LocalArtifactStore` (filesystem-backed) |
