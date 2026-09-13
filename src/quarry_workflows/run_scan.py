@@ -99,6 +99,7 @@ from quarry_activities.verdict_evaluators import (  # noqa: F401
     VERDICT_SOURCE_DEFAULT,
     LiveProbeEvidence,
     evaluate_live_verdict_with_source,
+    resolve_evaluator_spec,
 )
 
 # Explicit re-exports (back-compat): dynamic_validate_stage and external
@@ -1653,54 +1654,62 @@ class RunScanWorkflow:
                                 "dynamic_validate.failed",
                                 {"finding_id": candidate.id, "error": _describe_failure(exc)},
                             )
-                        probe_spec = select_dynamic_probe_spec(proposed_http_specs, retained)
-                        if probe_spec is not None and scan_input.target_url is not None:
+                        probe_specs = select_dynamic_probe_specs(proposed_http_specs, retained)
+                        if probe_specs and scan_input.target_url is not None:
                             target_ep = build_target_endpoint_from_url(scan_input.target_url)
-                            inp = HttpRequestActivityInput(
-                                spec_json=probe_spec.model_dump_json(),
-                                target_endpoint_json=target_ep.model_dump_json(),
-                                allowed_hosts=scan_input.allowed_hosts
-                                or (target_ep.host, "127.0.0.1"),
-                                artifact_store_path=artifact_root,
-                                scan_id=scan.id,
-                                candidate_finding_id=candidate.id,
+                            probe_allowed_hosts = scan_input.allowed_hosts or (
+                                target_ep.host,
+                                "127.0.0.1",
                             )
                             try:
-                                capture_raw = await workflow.execute_activity(
-                                    "http-request",
-                                    args=[inp],
-                                    start_to_close_timeout=timedelta(minutes=2),
-                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                capture = await _dispatch_dynamic_probe(
+                                    probe_specs[0],
+                                    target_ep,
+                                    probe_allowed_hosts,
+                                    artifact_root,
+                                    scan.id,
+                                    candidate.id,
                                 )
-                                capture = HttpResponseCapture.model_validate(
-                                    capture_raw if isinstance(capture_raw, dict) else capture_raw
-                                )
-                                # Resolve the response body to TEXT via an activity
-                                # (workflow code stays I/O-free). A missing body is
-                                # non-corroboration for evaluators, never an error.
-                                body_text: str | None = None
-                                if capture.body_artifact_key:
+                                probe_count = 1
+                                # Differential classes (registry min_probes > 1, e.g.
+                                # SQL_INJECTION) dispatch a baseline probe — a second
+                                # single-attempt http-request — only while validation
+                                # budget remains (pure cost guard).
+                                baseline_capture: HttpResponseCapture | None = None
+                                if len(probe_specs) > 1 and differential_baseline_permitted(
+                                    retained.vuln_class,
+                                    budget_remaining=val_budget_remaining,
+                                ):
                                     try:
-                                        body_raw = await workflow.execute_activity(
-                                            "read-artifact-text",
-                                            args=[
-                                                ReadArtifactTextInput(
-                                                    artifact_store_path=artifact_root,
-                                                    scan_id=scan.id,
-                                                    artifact_key=capture.body_artifact_key,
-                                                )
-                                            ],
-                                            start_to_close_timeout=timedelta(seconds=30),
-                                            retry_policy=RetryPolicy(maximum_attempts=1),
+                                        baseline_capture = await _dispatch_dynamic_probe(
+                                            probe_specs[1],
+                                            target_ep,
+                                            probe_allowed_hosts,
+                                            artifact_root,
+                                            scan.id,
+                                            candidate.id,
                                         )
+                                        probe_count = 2
                                     except Exception:
-                                        body_raw = None  # non-fatal: body stays None
-                                    body_text = body_text_from_response_artifact(body_raw)
+                                        baseline_capture = None  # degrade to primary-only
+                                primary_evidence = LiveProbeEvidence(
+                                    status_code=capture.status_code,
+                                    body_text=await _resolve_probe_body(
+                                        capture, artifact_root, scan.id
+                                    ),
+                                )
+                                baseline_evidence: LiveProbeEvidence | None = None
+                                if baseline_capture is not None:
+                                    baseline_evidence = LiveProbeEvidence(
+                                        status_code=baseline_capture.status_code,
+                                        body_text=await _resolve_probe_body(
+                                            baseline_capture, artifact_root, scan.id
+                                        ),
+                                    )
                                 dyn_verdict, dyn_verdict_source = evaluate_live_verdict_with_source(
                                     retained.vuln_class,
-                                    LiveProbeEvidence(
-                                        status_code=capture.status_code,
-                                        body_text=body_text,
+                                    build_differential_evidence(
+                                        primary=primary_evidence, baseline=baseline_evidence
                                     ),
                                 )
                                 if dyn_verdict == LIVE_CORROBORATED:
@@ -1726,6 +1735,7 @@ class RunScanWorkflow:
                                                     len(dyn_final.proof_artifact_ids)
                                                 ),
                                                 "verdict_source": dyn_verdict_source,
+                                                "probe_count": str(probe_count),
                                             },
                                         )
                                         dyn_promoted = True
@@ -2611,6 +2621,70 @@ def _append_event(
     )
 
 
+async def _dispatch_dynamic_probe(
+    spec: HttpRequestSpec,
+    target_ep: TargetEndpoint,
+    allowed_hosts: tuple[str, ...],
+    artifact_root: str,
+    scan_id: str,
+    candidate_finding_id: str,
+) -> HttpResponseCapture:
+    """Dispatch ONE single-attempt ``http-request`` activity for a live probe.
+
+    Workflow-side helper (pure orchestration — the I/O lives in the activity).
+    Used for both the primary probe and the differential baseline; never
+    retried (``RetryPolicy(maximum_attempts=1)``), matching ADR-017.
+    """
+    inp = HttpRequestActivityInput(
+        spec_json=spec.model_dump_json(),
+        target_endpoint_json=target_ep.model_dump_json(),
+        allowed_hosts=allowed_hosts,
+        artifact_store_path=artifact_root,
+        scan_id=scan_id,
+        candidate_finding_id=candidate_finding_id,
+    )
+    capture_raw = await workflow.execute_activity(
+        "http-request",
+        args=[inp],
+        start_to_close_timeout=timedelta(minutes=2),
+        retry_policy=RetryPolicy(maximum_attempts=1),
+    )
+    return HttpResponseCapture.model_validate(
+        capture_raw if isinstance(capture_raw, dict) else capture_raw
+    )
+
+
+async def _resolve_probe_body(
+    capture: HttpResponseCapture,
+    artifact_root: str,
+    scan_id: str,
+) -> str | None:
+    """Resolve a probe capture's body to TEXT via ``read-artifact-text``.
+
+    Workflow code stays I/O-free (the activity reads the artifact store).  A
+    missing key, missing artifact, or unreadable body resolves to None —
+    non-corroboration for evaluators, never an error.
+    """
+    if not capture.body_artifact_key:
+        return None
+    try:
+        body_raw = await workflow.execute_activity(
+            "read-artifact-text",
+            args=[
+                ReadArtifactTextInput(
+                    artifact_store_path=artifact_root,
+                    scan_id=scan_id,
+                    artifact_key=capture.body_artifact_key,
+                )
+            ],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+    except Exception:
+        return None  # non-fatal: body stays None
+    return body_text_from_response_artifact(body_raw)
+
+
 async def _append_workflow_event(
     db_path: str,
     scan_id: str,
@@ -2915,6 +2989,17 @@ _CLASS_PROBE_PATHS: dict[str, str] = {
     VulnerabilityClass.XSS.value: "/",
 }
 
+# Deterministic boolean-differential fallback for SQL_INJECTION: a TRUE-payload
+# probe and its FALSE-payload counterpart, differing only in the injected
+# predicate's truth value (read-only).  Used when the dynamic_validate agent
+# proposed no usable pair; the agent's own pair is preferred when well-formed.
+_CLASS_PROBE_PAIR_PATHS: dict[str, tuple[str, str]] = {
+    VulnerabilityClass.SQL_INJECTION.value: (
+        "/items?id=1%20OR%201%3D1",
+        "/items?id=1%20AND%201%3D2",
+    ),
+}
+
 
 def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | None:
     """Build a minimal GET probe spec for a NEEDS_PROOF finding.
@@ -2932,6 +3017,88 @@ def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | N
     return HttpRequestSpec(method="GET", path=path)
 
 
+def build_dynamic_probe_spec_pair(
+    candidate: CandidateFinding,
+) -> tuple[HttpRequestSpec, HttpRequestSpec] | None:
+    """Build the deterministic TRUE/FALSE GET probe pair for a differential class.
+
+    Returns None for classes that do not need a pair (only SQL_INJECTION today)
+    or that cannot be probed over HTTP at all (e.g. secrets).  The dynamic_validate
+    agent's own proposed pair is preferred when well-formed; this is the fallback.
+    """
+    pair = _CLASS_PROBE_PAIR_PATHS.get(candidate.vuln_class.value)
+    if pair is None:
+        return None
+    true_path, false_path = pair
+    return (
+        HttpRequestSpec(method="GET", path=true_path),
+        HttpRequestSpec(method="GET", path=false_path),
+    )
+
+
+def _well_formed_probe_spec(raw: Any) -> HttpRequestSpec | None:
+    """Validate one agent-proposed probe spec; None when malformed.
+
+    Malformed proposals (e.g. inline auth rejected by ``HttpRequestSpec``) are
+    skipped rather than aborting the attempt.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return HttpRequestSpec.model_validate(raw)
+    except Exception:
+        return None
+
+
+def select_dynamic_probe_specs(
+    proposed_http_specs: list[Any],
+    candidate: CandidateFinding,
+) -> list[HttpRequestSpec]:
+    """Pick the probe specs to dispatch for a dynamic-validation attempt.
+
+    Differential classes (registry ``min_probes`` = 2, e.g. SQL_INJECTION) get
+    up to TWO well-formed proposals — primary (TRUE payload) + baseline (FALSE
+    payload).  When the agent proposed fewer usable specs than the class needs,
+    the deterministic per-class pair fills the gap (single proposal → proposal
+    as primary + built FALSE baseline; none → full deterministic pair).
+
+    Single-probe classes (``min_probes`` = 1 — every unregistered class) get
+    exactly one spec: the first well-formed proposal, else the deterministic
+    per-class fallback — identical to the pre-differential behavior.
+
+    Returns an empty list when no probe is possible (e.g. secrets).  Pure
+    function — safe inside sandboxed workflow code.
+    """
+    min_probes = resolve_evaluator_spec(candidate.vuln_class).min_probes
+    max_specs = max(min_probes, 1)
+    selected: list[HttpRequestSpec] = []
+    for raw in proposed_http_specs:
+        if len(selected) >= max_specs:
+            break
+        spec = _well_formed_probe_spec(raw)
+        if spec is not None:
+            selected.append(spec)
+    if len(selected) >= max_specs:
+        return selected
+    # Fewer usable proposals than needed → fill from the deterministic fallbacks.
+    if max_specs > 1:
+        pair = build_dynamic_probe_spec_pair(candidate)
+        if pair is None:
+            return selected
+        fallback = list(pair)
+    else:
+        single = build_dynamic_probe_spec(candidate)
+        if single is None:
+            return selected
+        fallback = [single]
+    while len(selected) < max_specs and len(fallback) > 0:
+        next_spec = fallback.pop(0)
+        # Never duplicate a spec the agent already proposed verbatim.
+        if all(next_spec != existing for existing in selected):
+            selected.append(next_spec)
+    return selected
+
+
 def select_dynamic_probe_spec(
     proposed_http_specs: list[Any],
     candidate: CandidateFinding,
@@ -2944,16 +3111,55 @@ def select_dynamic_probe_spec(
     nothing usable.  Malformed proposals (e.g. inline auth rejected by
     ``HttpRequestSpec``) are skipped rather than aborting the attempt.
 
+    Delegates to :func:`select_dynamic_probe_specs` and returns the first spec;
+    differential dispatch (two probes) uses the plural form directly.
+
     Pure function — safe inside sandboxed workflow code.
     """
-    for raw in proposed_http_specs:
-        if not isinstance(raw, dict):
-            continue
-        try:
-            return HttpRequestSpec.model_validate(raw)
-        except Exception:
-            continue
-    return build_dynamic_probe_spec(candidate)
+    specs = select_dynamic_probe_specs(proposed_http_specs, candidate)
+    return specs[0] if specs else None
+
+
+def differential_baseline_permitted(
+    vuln_class: VulnerabilityClass,
+    *,
+    budget_remaining: float | None,
+) -> bool:
+    """Cost guard for the second (baseline) probe of a differential pair.
+
+    The baseline is dispatched only when the class actually needs a pair
+    (registry ``min_probes`` > 1) AND validation budget remains.  ``None``
+    means no cap was configured → allowed; a non-positive remainder → refused
+    (the primary probe already spent the headroom).  Pure function — safe
+    inside sandboxed workflow code.
+    """
+    if resolve_evaluator_spec(vuln_class).min_probes < 2:
+        return False
+    if budget_remaining is None:
+        return True
+    return budget_remaining > 0.0
+
+
+def build_differential_evidence(
+    *,
+    primary: LiveProbeEvidence,
+    baseline: LiveProbeEvidence | None,
+) -> LiveProbeEvidence:
+    """Assemble the evidence a per-class evaluator receives.
+
+    With a *baseline* (differential pair), the baseline is nested into
+    ``additional`` so evaluators like SQLi's boolean-diff can compare the two
+    bodies; without one the primary evidence is returned unchanged (single-probe
+    classes ignore ``additional`` anyway).  Pure function — safe inside
+    sandboxed workflow code.
+    """
+    if baseline is None:
+        return primary
+    return LiveProbeEvidence(
+        status_code=primary.status_code,
+        body_text=primary.body_text,
+        additional=(baseline,),
+    )
 
 
 # Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017):
