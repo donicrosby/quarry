@@ -35,7 +35,9 @@ __all__ = [
     "LIVE_INCONCLUSIVE",
     "LIVE_NOT_CORROBORATED",
     "Evaluator",
+    "EvaluatorSpec",
     "LiveProbeEvidence",
+    "SSTI_MARKER",
     "Verdict",
     "VERDICT_SOURCE_DEFAULT",
     "VERDICT_SOURCE_PER_CLASS",
@@ -44,9 +46,13 @@ __all__ = [
     "evaluate_live_verdict",
     "evaluate_live_verdict_with_source",
     "live_verdict_from_status",
+    "register_builtin_evaluators",
     "register_evaluator",
     "registered_classes",
     "resolve_evaluator",
+    "resolve_evaluator_spec",
+    "sql_injection_evaluator",
+    "ssti_evaluator",
 ]
 
 # Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017).
@@ -104,12 +110,37 @@ class LiveProbeEvidence:
     additional: tuple[LiveProbeEvidence, ...] = field(default=())
 
 
-_REGISTRY: dict[VulnerabilityClass, Evaluator] = {}
+_REGISTRY: dict[VulnerabilityClass, EvaluatorSpec] = {}
 
 
-def register_evaluator(cls: VulnerabilityClass, fn: Evaluator) -> None:
-    """Register *fn* as the evaluator for *cls* (last registration wins)."""
-    _REGISTRY[cls] = fn
+@dataclass(frozen=True)
+class EvaluatorSpec:
+    """A registered evaluator plus the metadata the workflow consults.
+
+    ``min_probes`` is how many live probes a class NEEDS before its evaluator
+    can decide: 1 for status/marker evaluators, 2 for differential evaluators
+    (SQLi boolean TRUE/FALSE pair — the baseline rides in ``additional``).
+    The dynamic-validate dispatch loop consults this to decide whether to send
+    a second probe (budget permitting); single-probe classes keep exactly the
+    one-dispatch behavior.
+    """
+
+    fn: Evaluator
+    min_probes: int = 1
+
+
+def register_evaluator(
+    cls: VulnerabilityClass,
+    fn: Evaluator,
+    *,
+    min_probes: int = 1,
+) -> None:
+    """Register *fn* as the evaluator for *cls* (last registration wins).
+
+    ``min_probes`` declares how many probes the evaluator needs (1 = single
+    probe, 2 = a differential primary/baseline pair).
+    """
+    _REGISTRY[cls] = EvaluatorSpec(fn=fn, min_probes=min_probes)
 
 
 def registered_classes() -> list[VulnerabilityClass]:
@@ -129,7 +160,16 @@ def clear_evaluators() -> None:
 
 def resolve_evaluator(cls: VulnerabilityClass) -> Evaluator:
     """Return the evaluator for *cls*, defaulting to the status-only evaluator."""
-    return _REGISTRY.get(cls, default_evaluator)
+    return _REGISTRY.get(cls, _DEFAULT_SPEC).fn
+
+
+def resolve_evaluator_spec(cls: VulnerabilityClass) -> EvaluatorSpec:
+    """Return the evaluator spec (fn + min_probes) for *cls*.
+
+    Unregistered classes resolve to the default status-only evaluator with
+    ``min_probes=1`` — the pre-registry single-dispatch behavior.
+    """
+    return _REGISTRY.get(cls, _DEFAULT_SPEC)
 
 
 def default_evaluator(ev: LiveProbeEvidence) -> Verdict:
@@ -139,6 +179,9 @@ def default_evaluator(ev: LiveProbeEvidence) -> Verdict:
     code only matters to classes with a registered per-class evaluator.
     """
     return live_verdict_from_status(ev.status_code)
+
+
+_DEFAULT_SPEC = EvaluatorSpec(fn=default_evaluator, min_probes=1)
 
 
 def evaluate_live_verdict(cls: VulnerabilityClass, ev: LiveProbeEvidence) -> Verdict:
@@ -156,7 +199,85 @@ def evaluate_live_verdict_with_source(
     which evaluator decided — surfaced on the ``finding.dynamic_validated``
     event as ``verdict_source``.
     """
-    fn = _REGISTRY.get(cls)
-    if fn is None:
+    spec = _REGISTRY.get(cls)
+    if spec is None:
         return default_evaluator(ev), VERDICT_SOURCE_DEFAULT
-    return fn(ev), VERDICT_SOURCE_PER_CLASS
+    return spec.fn(ev), VERDICT_SOURCE_PER_CLASS
+
+
+# ---------------------------------------------------------------------------
+# Built-in per-class evaluators (per-class-dynamic-validation tasks 1.3/1.4)
+# ---------------------------------------------------------------------------
+
+# SSTI arithmetic-marker probe: the agent sends ``{{7*7}}``; a template engine
+# that evaluates it renders the result into the response body.
+SSTI_MARKER = "49"
+
+
+def _is_2xx(status_code: int) -> bool:
+    return 200 <= status_code < 300
+
+
+def ssti_evaluator(ev: LiveProbeEvidence) -> Verdict:
+    """SSTI arithmetic-marker evaluator (single probe).
+
+    The probe carries ``{{7*7}}`` to the injectable parameter; corroboration
+    means the EVALUATED result ``49`` appears in the 2xx response body — the
+    engine executed the expression — and not the literal ``{{7*7}}`` string.
+
+    - non-2xx → ``inconclusive`` (probe error / guard; cannot decide).
+    - 2xx + body contains ``49`` → ``corroborated``.
+    - 2xx without the marker, or an unresolvable body → ``not_corroborated``
+      (missing body is non-corroboration, never an error).
+    - ``additional`` (differential) probes are ignored: SSTI is single-probe.
+    """
+    if not _is_2xx(ev.status_code):
+        return LIVE_INCONCLUSIVE
+    if ev.body_text and SSTI_MARKER in ev.body_text:
+        return LIVE_CORROBORATED
+    return LIVE_NOT_CORROBORATED
+
+
+def sql_injection_evaluator(ev: LiveProbeEvidence) -> Verdict:
+    """SQLi boolean-differential evaluator (primary + baseline pair).
+
+    The workflow dispatches a TRUE-payload probe (primary) and its FALSE-payload
+    counterpart (baseline, in ``ev.additional[0]``).  Corroboration means the
+    two 2xx bodies diverge — the injected predicate changed the query's boolean
+    semantics — not that a syntax error appeared.
+
+    - no baseline probe → ``inconclusive`` (the differential needs the pair).
+    - primary non-2xx → ``inconclusive`` (probe error; cannot decide).
+    - either body unresolvable (None) → ``inconclusive`` (no text to compare).
+    - bodies diverge → ``corroborated``; identical (incl. both empty, or both
+      echoing the payload) → ``not_corroborated`` (parameterisation swallows it).
+
+    Honest limitation: the diff is symmetric — it cannot tell WHICH probe the
+    divergence favors; ``probe_count`` on the event payload lets a post-run
+    audit distinguish primary-heavy from baseline-heavy divergence.  Extra
+    probes beyond the baseline are ignored (only the first baseline compares).
+    """
+    if not ev.additional:
+        return LIVE_INCONCLUSIVE
+    baseline = ev.additional[0]
+    if not _is_2xx(ev.status_code):
+        return LIVE_INCONCLUSIVE
+    if ev.body_text is None or baseline.body_text is None:
+        return LIVE_INCONCLUSIVE
+    if ev.body_text != baseline.body_text:
+        return LIVE_CORROBORATED
+    return LIVE_NOT_CORROBORATED
+
+
+def register_builtin_evaluators() -> None:
+    """Register the shipped per-class evaluators (idempotent, import-safe).
+
+    Called at module import so SSTI/SQL_INJECTION candidates route per-class as
+    soon as the registry is loaded; also safe to re-call (e.g. from tests that
+    cleared the registry) — last registration wins, so this is idempotent.
+    """
+    register_evaluator(VulnerabilityClass.SSTI, ssti_evaluator, min_probes=1)
+    register_evaluator(VulnerabilityClass.SQL_INJECTION, sql_injection_evaluator, min_probes=2)
+
+
+register_builtin_evaluators()

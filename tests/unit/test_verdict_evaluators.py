@@ -47,12 +47,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(autouse=True)
 def isolated_registry() -> Generator[None, None, None]:
-    """Reset the registry so test registrations never leak across tests."""
-    from quarry_activities.verdict_evaluators import clear_evaluators
+    """Reset the registry so test registrations never leak across tests.
 
-    clear_evaluators()
+    Teardown restores the shipped builtins: leaving the registry empty leaks
+    into later test files under xdist ``--dist loadfile`` (one worker runs
+    many files in one process) and starves per-class routing there.
+    """
+    from quarry_activities import verdict_evaluators as ve
+
+    ve.clear_evaluators()
     yield
-    clear_evaluators()
+    ve.clear_evaluators()
+    ve.register_builtin_evaluators()
 
 
 # Referenced so pyright's reportUnusedFunction does not fire on the fixture
