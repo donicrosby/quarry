@@ -29,4 +29,5 @@ rules:
     - Reference concrete code symbols in backticks; verify each requirement against src/ and tests/ before writing it.
     - Strip only dbt-proprietary/internal content: no dbt product names, teams (e.g. SecEng), private-repo layouts, internal endpoints, or internal target conventions.
     - Name the reference designs and models the project builds on - Cloudflare Glasswing, Microsoft MDASH, Keygraph Shannon, the CyberGym benchmark, and open models (Qwen, DeepSeek, Kimi via Chutes). These attributions are vital and must be preserved.
+    - Mantis (Apache-2.0) attribution travels with content: prompt material adapted from the Mantis security-review skills (via Keygraph Shannon 3.0's static engine) keeps its attribution header in the template, is named in THIRD_PARTY_NOTICES.md, and must be preserved in any derived prompt content.
     - Keep legitimate technical dependency names (Temporal, FastAPI, SQLite, LiteLLM, AWS Bedrock, Playwright, SCIP, ast-grep).

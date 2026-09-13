@@ -14,6 +14,7 @@ from quarry.schemas import (
     CandidateFinding,
     ChangedFile,
     Confidence,
+    EvidencePathElement,
     FinalFinding,
     GitDiff,
     ImpactedCodeRegion,
@@ -362,6 +363,7 @@ def _candidate_from_secret_match(match: SecretMatch, *, scan_id: str) -> Candida
                 symbol=match.key_name,
             )
         ],
+        evidence_path=[EvidencePathElement(path=match.file_path, line=match.line_number)],
         confidence=Confidence.MEDIUM,
         created_by="secrets-scanner",
         created_at=workflow.now(),
@@ -386,6 +388,7 @@ def _final_from_candidate(candidate: CandidateFinding) -> FinalFinding:
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,
         source_refs=candidate.source_refs,
+        evidence_path=candidate.evidence_path,
         validation_result_id=f"{candidate.id}-validation",
         remediation="Move the secret to an environment variable or secret manager.",
         created_at=workflow.now(),

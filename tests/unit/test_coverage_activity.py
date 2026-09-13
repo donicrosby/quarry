@@ -18,6 +18,37 @@ from quarry_activities.coverage import (
 from quarry_activities.inputs import BuildCoverageLedgerInput
 
 
+def test_coverage_activity_tolerates_empty_and_unknown_vuln_class(tmp_path: Path) -> None:
+    """Regression: class-neutral gapfill tasks emit vuln_class="" and must not crash."""
+    skipped = [
+        {"task_id": "t1", "vuln_class": "", "scope": "src/", "reason": "no finding"},
+        {"task_id": "t2", "vuln_class": "not-a-class", "scope": "src/", "reason": "x"},
+        {"task_id": "t3", "vuln_class": "secrets", "scope": "src/", "reason": "no finding"},
+        {"task_id": "t4", "vuln_class": None, "scope": "src/", "reason": "no finding"},
+    ]
+    output = build_coverage_ledger_activity(
+        BuildCoverageLedgerInput(
+            scan_id="scan-1",
+            workspace_id="local",
+            artifact_root=str(tmp_path),
+            requested_vuln_classes=("secrets",),
+            completed_vuln_classes=("secrets",),
+            agent_tasks_total=4,
+            agent_tasks_scanned=4,
+            skipped_json=json.dumps(skipped),
+        )
+    )
+
+    ledger = CoverageLedger.model_validate_json(output.ledger_json)
+
+    assert [g.vuln_class for g in ledger.skipped_items] == [
+        None,
+        None,
+        VulnerabilityClass.SECRETS,
+        None,
+    ]
+
+
 def test_build_coverage_ledger_records_requested_and_completed() -> None:
     gaps = [CoverageGap(id="g1", scan_id="scan-1", scope_unit_id="r1", reason="not probed")]
     ledger = build_coverage_ledger(

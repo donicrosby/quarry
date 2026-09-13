@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel
 from temporalio import activity
 
+from quarry.fingerprints import compute_sink_dedup_key
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import CandidateFinding, Provider
 from quarry_activities.event_sink import make_event_sink
@@ -38,6 +39,22 @@ from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolRunner
 
 _MAX_CLUSTER_SIZE = 5
+
+
+def _dedup_group_key(finding: CandidateFinding) -> str | None:
+    """Grouping key for dedup (cpc D4 cutover, task 7.1).
+
+    When the sink-first ordered evidence path is populated, the key is the
+    sink locator (``evidence_path[0]``) + title — mechanical, order-immune to
+    unordered ``source_refs``. Findings without an ordered path fall back to
+    the legacy ``root_cause_key`` (back-compat during migration). Returns
+    ``None`` when neither is available; such findings each stay singletons.
+    """
+    if finding.evidence_path:
+        return compute_sink_dedup_key(
+            title=finding.title, sink_locator=finding.evidence_path[0].locator
+        )
+    return finding.root_cause_key
 
 
 class DedupeResponse(BaseModel):
@@ -91,16 +108,18 @@ def dedup_impl(
     if budget_spec is None:
         budget_spec = BudgetSpec()
 
-    # --- Step 1: Group by root_cause_key --------------------------------
-    # Findings without a root_cause_key each go into their own singleton.
+    # --- Step 1: Group findings by dedup key (cpc task 7.1: sink locator +
+    # title when the ordered evidence path is populated, legacy root_cause_key
+    # otherwise). Findings without a key each go into their own singleton.
     keyed: dict[str, list[CandidateFinding]] = {}
     singletons: list[CandidateFinding] = []
 
     for finding in candidates:
-        if not finding.root_cause_key:
+        group_key = _dedup_group_key(finding)
+        if not group_key:
             singletons.append(finding)
         else:
-            keyed.setdefault(finding.root_cause_key, []).append(finding)
+            keyed.setdefault(group_key, []).append(finding)
 
     result: list[CandidateFinding] = list(singletons)  # null-key findings pass through
 

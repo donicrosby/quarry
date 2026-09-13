@@ -14,7 +14,7 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from temporalio import activity
@@ -25,6 +25,7 @@ from quarry.schemas import (
     AgentTask,
     CandidateFinding,
     Confidence,
+    EvidencePathElement,
     HunterGap,
     Provider,
     Severity,
@@ -57,6 +58,38 @@ class _HuntResponse(BaseModel):
     tool_calls: list[ToolCallRequest] = []
 
 
+def _parse_evidence_path(
+    raw: dict[str, Any],
+    file_path: str,
+    start_line: int,
+) -> list[EvidencePathElement]:
+    """Build the sink-first ordered evidence path from model output.
+
+    Preference order (cpc task 7.2):
+    1. The model's explicit ``evidence_path`` — kept verbatim (order is the
+       contract), with invalid elements (non-repo-relative paths, non-integer
+       lines) silently dropped rather than rejecting the finding. A malformed
+       value (not a list) is ignored.
+    2. Derived sink: ``affected_component`` parsed as ``path:line`` — but only
+       when a line is present. No fabricated locators: a component without a
+       parseable line yields an empty path (hunt-stage spec: "No fabricated
+       locators").
+    """
+    raw_path = raw.get("evidence_path")
+    if isinstance(raw_path, list):
+        parsed: list[EvidencePathElement] = []
+        for element in cast("list[object]", raw_path):
+            with suppress(Exception):
+                parsed.append(EvidencePathElement.model_validate(element))
+        if parsed:
+            return parsed
+        # An explicit-but-empty/invalid list falls through to derivation so a
+        # verbose-but-broken model output still yields the sink.
+    if start_line >= 1 and file_path:
+        return [EvidencePathElement(path=file_path, line=start_line)]
+    return []
+
+
 def _parse_finding(
     raw: dict[str, Any],
     scan_id: str,
@@ -75,9 +108,9 @@ def _parse_finding(
         affected = raw.get("affected_component", "")
         file_path = affected.split(":")[0] if ":" in affected else affected
         try:
-            start_line = int(affected.split(":")[1]) if ":" in affected else 1
+            start_line = int(affected.split(":")[1]) if ":" in affected else 0
         except (ValueError, IndexError):
-            start_line = 1
+            start_line = 0
 
         confidence_str = raw.get("confidence", "low").lower()
         confidence = (
@@ -119,6 +152,7 @@ def _parse_finding(
             confidence=confidence,
             severity=severity,
             source_refs=source_refs,
+            evidence_path=_parse_evidence_path(raw, file_path, start_line),
             root_cause_key=root_cause_key,
             created_by="hunt-agent",
             created_at=datetime.now(UTC),

@@ -24,7 +24,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 | Package | Purpose |
 |---|---|
-| `quarry` | Core schemas, config, fingerprints, panel/focus resolver (`panel_config.py`) |
+| `quarry` | Core schemas, config, fingerprints (`compute_fingerprint`, sink-locator dedup key), panel/focus resolver (`panel_config.py`) |
 | `quarry_activities` | Temporal activities (side effects: git, filesystem, DB, regex scanning, recon) |
 | `quarry_workflows` | Temporal workflows (pure orchestration — **no I/O**) |
 | `quarry_worker` | Standalone Temporal worker entrypoint |
@@ -40,6 +40,10 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_integrations` | Finding sinks — dry-run Jira/Slack delivery, idempotent per scan |
 
 **Data flow**: CLI/TUI → `QuarryClient` (httpx) → FastAPI server → Temporal workflow → activities → SQLite/filesystem. A `kb-recon` activity (cpc slice 2) builds a knowledge-base root index per scan; the `kb_context` injector (cpc slice 3) resolves KB references into rendered hunt/gapfill/validate prompt context, with inline fallback when references are absent.
+
+**Dedup keys on the sink (cpc slice 7)**: `dedup_impl` groups findings by `compute_sink_dedup_key` — the sink locator (`evidence_path[0]`, the ordered sink-first path) + title — falling back to the legacy `root_cause_key` only for findings without an ordered path. Every finding-construction site (hunt parse, secrets plugin, diff scan, FinalFinding promotion) populates `evidence_path`; reads that used to take `source_refs[0]` (dynamic-evidence link, benchmark file key) prefer `evidence_path[0]` now. `source_refs` is retained for back-compat and fallback only — no stage relies on its ordering.
+
+**Attribution (cpc slice 7)**: prompt content adapted from the Mantis security-review skills (Apache-2.0, via Keygraph Shannon 3.0) carries an in-file header, is named in `THIRD_PARTY_NOTICES.md`, and `openspec/config.yaml` requires preserving that attribution in derived prompt content.
 
 ## Critical Constraints
 
