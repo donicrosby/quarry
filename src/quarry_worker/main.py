@@ -28,6 +28,7 @@ from quarry_activities.live_recon import live_recon_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.prove import prove_activity
 from quarry_activities.provenance import build_scan_manifest_activity
+from quarry_activities.read_artifact import read_artifact_text_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
 from quarry_activities.recon_subsystem import recon_subsystem_activity
 from quarry_activities.recon_synthesis import recon_synthesis_activity
@@ -84,6 +85,7 @@ async def run_worker() -> None:
             gapfill_activity,
             deduplicate_activity,
             http_request_activity,
+            read_artifact_text_activity,
             sandbox_exec_activity,
             prove_activity,
             tracer_activity,

@@ -1514,6 +1514,13 @@ class HttpResponseCapture(BaseModel):
     redaction_status: RedactionStatus
     # ArtifactRef id for the captured request (set by http_request_activity).
     request_artifact_ref: str | None = None
+    # Store KEY the response artifact was written under (set by
+    # http_request_activity). body_artifact_ref is a uuid id; the artifact
+    # store is key-addressed, so per-class body evaluators resolve the body
+    # through this key via the read-artifact-text activity. Optional — legacy
+    # captures construct without it and evaluators treat a missing body as
+    # non-corroboration, never an error.
+    body_artifact_key: str | None = None
 
 
 class DynamicEvidenceLink(BaseModel):

@@ -19,6 +19,19 @@ def _key_digest(*parts: str) -> str:
     return sha256(" ".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
+def response_artifact_key(response: httpx.Response) -> str:
+    """Deterministic store key for a captured response artifact.
+
+    Mirrors the default key ``capture_response_artifact`` derives internally,
+    so the caller can record the key on the ``HttpResponseCapture`` and later
+    resolve the stored body through the key-addressed artifact store
+    (per-class verdict evaluators read bodies this way).
+    """
+    digest = _key_digest(str(response.status_code), str(response.request.url))
+    host = response.request.url.host
+    return f"http/responses/{response.status_code}_{host}_{digest}.json"
+
+
 def _redact_headers(headers: httpx.Headers) -> dict[str, str | list[str]]:
     """Redact sensitive header values before storing.
 
@@ -124,9 +137,7 @@ def capture_response_artifact(
         ArtifactRef for the stored response artifact
     """
     if artifact_key is None:
-        digest = _key_digest(str(response.status_code), str(response.request.url))
-        host = response.request.url.host
-        artifact_key = f"http/responses/{response.status_code}_{host}_{digest}.json"
+        artifact_key = response_artifact_key(response)
 
     # Truncate body if needed
     body_bytes = response.content

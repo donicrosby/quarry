@@ -78,14 +78,37 @@ from quarry_activities.inputs import (
     DispatchLifecycleHooksInput,
     HttpRequestActivityInput,
     PersistScanStateInput,
+    ReadArtifactTextInput,
     RenderReportInput,
     RenderReportOutput,
     SandboxExecActivityInput,
     ValidateCandidateInput,
 )
+from quarry_activities.read_artifact import body_text_from_response_artifact
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
 from quarry_activities.validation import SecretValidationResult
+
+# Live-verdict vocabulary + per-class registry dispatch (ADR-017). Canonical
+# definitions live in quarry_activities.verdict_evaluators; re-exported here
+# because dynamic_validate_stage imports them from this module (which predates
+# the registry). Same import direction as the imports above — no cycle.
+from quarry_activities.verdict_evaluators import (  # noqa: F401
+    LIVE_CORROBORATED,
+    LIVE_INCONCLUSIVE,
+    VERDICT_SOURCE_DEFAULT,
+    LiveProbeEvidence,
+    evaluate_live_verdict_with_source,
+)
+
+# Explicit re-exports (back-compat): dynamic_validate_stage and external
+# callers import these from this module, which predates the registry.
+from quarry_activities.verdict_evaluators import (  # noqa: F401
+    LIVE_NOT_CORROBORATED as LIVE_NOT_CORROBORATED,
+)
+from quarry_activities.verdict_evaluators import (  # noqa: F401
+    live_verdict_from_status as live_verdict_from_status,
+)
 from quarry_persistence import QuarryRepository
 from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
@@ -1585,6 +1608,7 @@ class RunScanWorkflow:
                     # Non-idempotent methods are non-retryable (single attempt).
                     dyn_promoted = False
                     dyn_verdict = LIVE_INCONCLUSIVE
+                    dyn_verdict_source = VERDICT_SOURCE_DEFAULT
                     dynamic_active = (
                         scan_input.dynamic_validation_enabled
                         and bool(scan_input.target_url)
@@ -1651,7 +1675,34 @@ class RunScanWorkflow:
                                 capture = HttpResponseCapture.model_validate(
                                     capture_raw if isinstance(capture_raw, dict) else capture_raw
                                 )
-                                dyn_verdict = live_verdict_from_status(capture.status_code)
+                                # Resolve the response body to TEXT via an activity
+                                # (workflow code stays I/O-free). A missing body is
+                                # non-corroboration for evaluators, never an error.
+                                body_text: str | None = None
+                                if capture.body_artifact_key:
+                                    try:
+                                        body_raw = await workflow.execute_activity(
+                                            "read-artifact-text",
+                                            args=[
+                                                ReadArtifactTextInput(
+                                                    artifact_store_path=artifact_root,
+                                                    scan_id=scan.id,
+                                                    artifact_key=capture.body_artifact_key,
+                                                )
+                                            ],
+                                            start_to_close_timeout=timedelta(seconds=30),
+                                            retry_policy=RetryPolicy(maximum_attempts=1),
+                                        )
+                                    except Exception:
+                                        body_raw = None  # non-fatal: body stays None
+                                    body_text = body_text_from_response_artifact(body_raw)
+                                dyn_verdict, dyn_verdict_source = evaluate_live_verdict_with_source(
+                                    retained.vuln_class,
+                                    LiveProbeEvidence(
+                                        status_code=capture.status_code,
+                                        body_text=body_text,
+                                    ),
+                                )
                                 if dyn_verdict == LIVE_CORROBORATED:
                                     promotion = promote_with_dynamic_evidence(
                                         retained, capture, scan.id, workflow.now()
@@ -1674,6 +1725,7 @@ class RunScanWorkflow:
                                                 "proof_artifact_count": str(
                                                     len(dyn_final.proof_artifact_ids)
                                                 ),
+                                                "verdict_source": dyn_verdict_source,
                                             },
                                         )
                                         dyn_promoted = True
@@ -2904,30 +2956,9 @@ def select_dynamic_probe_spec(
     return build_dynamic_probe_spec(candidate)
 
 
-# Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017).
-LIVE_CORROBORATED = "corroborated"
-LIVE_NOT_CORROBORATED = "not_corroborated"
-LIVE_INCONCLUSIVE = "inconclusive"
-
-# Status codes that indicate the live target actively defends the path — the
-# candidate hypothesis is NOT corroborated (guard present / resource absent).
-_LIVE_DEFENDED_STATUS = frozenset({401, 403, 404})
-
-
-def live_verdict_from_status(status_code: int) -> str:
-    """Map an HTTP status code to a live-corroboration verdict.
-
-    Pure function (no I/O) — safe inside sandboxed workflow code.
-
-    - 2xx → ``corroborated`` (the hypothesised path is served live).
-    - 401/403/404 → ``not_corroborated`` (the target enforces the guard).
-    - anything else (5xx, other ambiguous codes) → ``inconclusive``.
-    """
-    if 200 <= status_code < 300:
-        return LIVE_CORROBORATED
-    if status_code in _LIVE_DEFENDED_STATUS:
-        return LIVE_NOT_CORROBORATED
-    return LIVE_INCONCLUSIVE
+# Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017):
+# re-exported at the top of this module from quarry_activities.verdict_evaluators
+# (the canonical home — see the import block above).
 
 
 def promote_with_dynamic_evidence(
