@@ -231,10 +231,12 @@ class TestBuildDynamicProbeSpec:
         assert spec.method == "GET"
 
     def test_ssrf_probe_uses_get(self) -> None:
+        """SSRF no longer has a static single-probe fallback (its nested URL
+        must derive from the scan target's origin) — the pair builder in
+        ``test_ssrf_dynamic_evaluator.py`` covers the target-aware pair; here
+        we lock the removal of the broken port-80 single probe."""
         candidate = _make_candidate(vuln_class=VulnerabilityClass.SSRF)
-        spec = build_dynamic_probe_spec(candidate)
-        assert spec is not None
-        assert spec.method == "GET"
+        assert build_dynamic_probe_spec(candidate) is None
 
     def test_secrets_probe_returns_none(self) -> None:
         """Secrets findings cannot be proven via an HTTP request."""

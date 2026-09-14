@@ -52,6 +52,7 @@ __all__ = [
     "resolve_evaluator",
     "resolve_evaluator_spec",
     "sql_injection_evaluator",
+    "ssrf_evaluator",
     "ssti_evaluator",
 ]
 
@@ -269,15 +270,56 @@ def sql_injection_evaluator(ev: LiveProbeEvidence) -> Verdict:
     return LIVE_NOT_CORROBORATED
 
 
+def ssrf_evaluator(ev: LiveProbeEvidence) -> Verdict:
+    """SSRF boolean-differential evaluator (primary + baseline pair).
+
+    The workflow dispatches a userinfo-bypass probe (primary) — e.g.
+    ``/fetch-local?url=http://localhost@<target-origin>/users/1`` — whose
+    nested URL defeats a naive ``startswith`` prefix check while still
+    fetching the scan target itself, and a baseline probe (``additional[0]``)
+    fetching the same nested endpoint WITHOUT the bypass (or a disallowed/
+    never-resolving URL the guard must reject).  Corroboration means the two
+    bodies diverge: the bypassed probe reached nested-endpoint content the
+    baseline could not — the server really fetched an attacker-shaped URL.
+
+    - no baseline probe → ``inconclusive`` (the differential needs the pair).
+    - primary non-2xx → ``inconclusive`` (guard rejected the bypass, or the
+      nested fetch itself errored — e.g. the app's own 500 — cannot decide).
+    - either body unresolvable (None) → ``inconclusive`` (no text to compare).
+    - bodies diverge → ``corroborated``; identical → ``not_corroborated``
+      (the parameter drives no observable difference — validated or inert).
+
+    Honest limitation: the diff is symmetric — it cannot tell WHICH probe the
+    divergence favors, nor distinguish "nested fetch succeeded" from any other
+    response asymmetry (e.g. a cache or rate limiter keyed on the URL).  The
+    pair is CONSTRUCTED to make the primary the only one that can return
+    nested-endpoint content, so in practice divergence implies the bypass
+    worked; ``probe_count`` on the event payload lets a post-run audit
+    re-examine.  Extra probes beyond the baseline are ignored.
+    """
+    if not ev.additional:
+        return LIVE_INCONCLUSIVE
+    baseline = ev.additional[0]
+    if not _is_2xx(ev.status_code):
+        return LIVE_INCONCLUSIVE
+    if ev.body_text is None or baseline.body_text is None:
+        return LIVE_INCONCLUSIVE
+    if ev.body_text != baseline.body_text:
+        return LIVE_CORROBORATED
+    return LIVE_NOT_CORROBORATED
+
+
 def register_builtin_evaluators() -> None:
     """Register the shipped per-class evaluators (idempotent, import-safe).
 
-    Called at module import so SSTI/SQL_INJECTION candidates route per-class as
-    soon as the registry is loaded; also safe to re-call (e.g. from tests that
-    cleared the registry) — last registration wins, so this is idempotent.
+    Called at module import so SSTI/SQL_INJECTION/SSRF candidates route
+    per-class as soon as the registry is loaded; also safe to re-call (e.g.
+    from tests that cleared the registry) — last registration wins, so this
+    is idempotent.
     """
     register_evaluator(VulnerabilityClass.SSTI, ssti_evaluator, min_probes=1)
     register_evaluator(VulnerabilityClass.SQL_INJECTION, sql_injection_evaluator, min_probes=2)
+    register_evaluator(VulnerabilityClass.SSRF, ssrf_evaluator, min_probes=2)
 
 
 register_builtin_evaluators()
