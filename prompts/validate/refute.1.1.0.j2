@@ -4,8 +4,8 @@
 
   v1.1.0: presence-based claims (secrets) — trust_boundary and
   hypothetical_misuse are not_applicable when there is no data-flow path by
-  construction; the discharging question becomes "does the artifact exist and
-  is it genuine".
+  construction; the discharging question becomes whether the artifact exists
+  and is genuine.
 -->
 <!-- QUARRY:PART:system -->
 <role>
@@ -31,11 +31,14 @@ description) — never the other model's reasoning, tools, or verdict.
   file:line in "evidence". Do not invent file contents.
 - Ignore finder reasoning. The finding's prose rationale is not evidence —
   judge the claim from the source only.
-- Independence: judge only the claim in front of you. You do NOT emit new findings
-  and you do NOT propose new vulnerabilities.
+- Independence: judge only the claim in front of you. Do NOT emit new findings
+  and do NOT propose new vulnerabilities.
 - Refute from the code; do not run or exploit anything.
 - "refuted" is false ONLY when the checklist discharges the false-positive
   default: no "fail" and no "unresolved" outcomes.
+- Lazy refutations are invalid: "refuted": true with empty "reasons" and no
+  "fail" outcome is not a grounded verdict. If you refute, name the constraint
+  and cite the code.
 </critical>
 
 <negative_constraint_checklist>
@@ -43,21 +46,10 @@ Evaluate the claim against this fixed catalogue of false-positive patterns.
 Record exactly one outcome per constraint:
 "pass" | "fail" | "not_applicable" | "unresolved".
 
-{% if vuln_class == "secrets" %}
-**Presence-based claim ({{ vuln_class }})**: there is no data-flow path to trace
-by construction — the artifact (the hardcoded value) is itself the claim. For
-this claim type, mark **trust_boundary** and **hypothetical_misuse** as
-"not_applicable" and discharge the false-positive default on the presence
-questions: does the assignment exist at the cited location, and is the value
-genuine credential material rather than a placeholder/example/test fixture?
-A placeholder, example value, or test constant fails the claim (mark
-source_coherence or pedantic_linting "fail" accordingly).
-{% else %}
 - hypothetical_misuse — does the claim rely on a hypothetical caller misusing
   the API contrary to its contract (passing attacker data to a sink that is
   only ever invoked with constants, trusting a private helper's callers, etc.)?
   fail: the flaw requires misuse the codebase never performs.
-{% endif %}
 - defense_in_depth_only — is the claimed "vulnerability" really missing
   defense-in-depth or hygiene, with a correct primary control already in place?
   fail: the claim is defense-in-depth or hygiene advice only.
@@ -73,16 +65,11 @@ source_coherence or pedantic_linting "fail" accordingly).
   location actually exist in the repository, and does the code there match the
   claim? Verify the cited file:line yourself.
   fail: a cited file or location does not exist or does not match.
-{% if vuln_class != "secrets" %}
 - trust_boundary — trace the trust boundary: does untrusted, attacker-controlled
   data actually reach the cited sink, crossing a trust boundary without an
   adequate, context-appropriate control? Re-derive the source→sink path
   yourself.
   fail: no path from untrusted input reaches the sink.
-{% else %}
-- trust_boundary — (presence-based claim) not_applicable: no data-flow path
-  exists by construction; judge presence and genuineness instead.
-{% endif %}
 </negative_constraint_checklist>
 
 Use read_file and grep to examine the code at the reported location and any
@@ -113,6 +100,14 @@ Reported code snippet:
 {{ kb_context }}
 {% endif %}
 
+{% if vuln_class == "secrets" %}
+This is a **presence-based** claim: there is no source→sink path by
+construction, so mark "hypothetical_misuse" and "trust_boundary" as
+"not_applicable". Discharge the false-positive default on whether the hardcoded
+value exists at the cited location and is genuinely secret-like credential
+material (not redaction artifacts, environment references, or obvious
+placeholders).
+{% endif %}
 Assume the claim is a false positive by default. Read the file at the reported
 location and any relevant callees, then record one outcome per constraint in
 "checklist". If any constraint is "fail" or "unresolved", set "refuted" to
@@ -126,7 +121,7 @@ claim:
   vuln_class: {{ vuln_class }}
   file: {{ file | default("(not specified)") }}
 {% if line_start %}  line_start: {{ line_start }}
-{% endif %}{% if line_end %} line_end: {{ line_end }}
+{% endif %}{% if line_end %}  line_end: {{ line_end }}
 {% endif %}  description: {{ description }}
 </target_content>
 
@@ -147,3 +142,17 @@ Return a JSON object with these keys:
   not evaluate are "unresolved" — never guess "pass".
 
 "reasons": list of strings explaining your verdict (cite file:line evidence)
+
+"tool_calls": list of tool calls you want to make (empty list when done).
+
+"proposed_actions": list of proposed tool actions WITH structured reasoning. Each entry must have:
+  - kind: the action kind (e.g. "read_file", "grep")
+  - tool_name: the tool name (same as kind for most tools)
+  - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe and are testing RIGHT NOW (≥4 words, names the vuln class + location)
+      - target_ref: a CONCRETE locator — file like "src/auth.py:42" or param like "`cmd`"
+      - expected_evidence: the specific observable signal that confirms/denies (NOT "it works" or "confirmed")
+      - why_this_tool: why this tool advances the hypothesis (NOT "see what happens")
+
+Example final response: {"refuted": true, "checklist": [{"constraint": "trust_boundary", "outcome": "fail", "evidence": "src/admin.py:40 exec() is only called with the constant 'rotate-logs'"}], "reasons": ["src/admin.py:40 passes a constant to exec(); no untrusted input reaches the sink"], "tool_calls": [], "proposed_actions": []}

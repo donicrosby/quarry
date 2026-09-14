@@ -19,14 +19,12 @@ a sensitive sink with the defense for that sink absent, mismatched, or bypassabl
 A path is NOT a vulnerability if a correct, context-appropriate control is applied
 and not undone by a later mutation.
 
-**Presence-based classes (e.g. {{ "secrets" }}: hardcoded secrets, vulnerable
+**Presence-based classes (e.g. secrets: hardcoded credentials, vulnerable
 dependency pins) have NO untrusted-input path to re-derive — the artifact itself
 (hardcoded value, pinned version) is the flaw. For these classes, "validated"
 means: the artifact exists in the code at the cited location AND is a genuine
-instance of the class (real secret-like value, not a placeholder/fixture/test
-constant), regardless of data flow. The source→sink requirement is
-**not applicable** to presence-based classes; demanding it rejects true positives
-structurally.
+instance of the class. The source→sink requirement is not applicable to
+presence-based classes; demanding it rejects true positives structurally.**
 </exploitable_vulnerability_definition>
 
 <critical>
@@ -63,14 +61,12 @@ Reported code snippet:
 
 {% if vuln_class == "secrets" %}
 This is a **presence-based** claim: verify the hardcoded value exists at the
-cited location and is genuinely secret-like (real credential material, not a
-placeholder, test fixture, example value, or non-secret constant). Do NOT
+cited location and is genuinely secret-like credential material. Do NOT
 re-derive a source→sink path — there is none by construction.
-{% else %}
+{% endif %}
 Read the file at the reported location and any relevant callees. Re-derive the
 source→sink path yourself and decide whether the defense for that sink is absent,
 mismatched, or bypassable.
-{% endif %}
 
 <false_positives_to_avoid>
 - Client-side checks (e.g. JavaScript validation) are not server-side defenses.
@@ -80,8 +76,6 @@ mismatched, or bypassable.
 - Authentication is not authorization (being logged in ≠ ownership/role check).
 - A network firewall is not an application control unless the code enforces it.
 - Do not treat config comments or docs as proof — require code/config evidence.
-- For presence-based classes: placeholders ("changeme", "your-api-key", "<...>",
-  "example", test fixtures in test directories) are NOT validated secrets.
 </false_positives_to_avoid>
 
 Confidence and verdict: High = the flaw (or its absence) is deterministic and
@@ -107,7 +101,7 @@ Return a JSON object with these keys:
   - "validated": the code confirms a source→sink path with an absent/mismatched/bypassable defense
     (presence-based classes: the artifact exists at the cited location and is genuine)
   - "rejected": the code applies a correct context-appropriate defense, or no such path exists
-    (presence-based classes: the value is a placeholder/fixture or not secret-like)
+    (presence-based classes: the cited artifact does not exist or is not of the class)
   - "needs_proof": plausible but static analysis alone is insufficient to confirm
 
 "reasons": list of strings explaining your verdict (cite file/line evidence and the missing/present defense)
@@ -118,3 +112,10 @@ Return a JSON object with these keys:
   - kind: the action kind (e.g. "read_file", "grep")
   - tool_name: the tool name (same as kind for most tools)
   - args: dict of tool arguments
+  - reasoning: object with FOUR required fields:
+      - hypothesis: what you believe and are testing RIGHT NOW (≥4 words, names the vuln class + location)
+      - target_ref: a CONCRETE locator — file like "src/auth.py:42" or param like "`cmd`"
+      - expected_evidence: the specific observable signal that confirms/denies (NOT "it works" or "confirmed")
+      - why_this_tool: why this tool advances the hypothesis (NOT "see what happens")
+
+Example final response: {"verdict": "validated", "reasons": ["Line 42 passes unsanitized req.query.cmd to exec() with no allowlist"], "tool_calls": [], "proposed_actions": []}
