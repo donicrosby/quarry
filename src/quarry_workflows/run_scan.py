@@ -19,6 +19,8 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.fingerprints import compute_fingerprint as _compute_fingerprint
+from quarry.fingerprints import compute_root_cause_key as _compute_root_cause_key
 from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
 from quarry.schemas import (
@@ -28,6 +30,7 @@ from quarry.schemas import (
     ArtifactRef,
     CallGraph,
     CandidateFinding,
+    Confidence,
     DynamicEvidenceLink,
     ExploitChain,
     ExploitStep,
@@ -82,6 +85,7 @@ from quarry_activities.inputs import (
     RenderReportInput,
     RenderReportOutput,
     SandboxExecActivityInput,
+    ScanSecretsInput,
     ValidateCandidateInput,
 )
 from quarry_activities.read_artifact import body_text_from_response_artifact
@@ -904,6 +908,7 @@ class RunScanWorkflow:
             scan_input,
             scan,
             agent_tasks,
+            candidate_findings,
             final_findings,
             artifact_root,
         )
@@ -1427,6 +1432,78 @@ class RunScanWorkflow:
                                 {"finding_id": candidate.id},
                             )
 
+            # ── Deterministic secrets sweep (full-scan parity with diff scans) ──
+            # The plugin-based secrets scanner only ran in RunDiffScanWorkflow;
+            # full scans relied on the hunt agent, whose candidates carry no
+            # key_name and were structurally rejected by the source→sink-shaped
+            # validation rubric (see VALIDATE_PROMPT_VERSION 1.1.0). Sweep the
+            # repo deterministically and feed matches through the same
+            # key_name auto-promotion gate as agent findings.
+            if VulnerabilityClass.SECRETS in scan.profile.vuln_classes:
+                secret_matches_raw = await workflow.execute_activity(
+                    "scan-repo-for-secrets",
+                    ScanSecretsInput(repo_root=repo_path),
+                    start_to_close_timeout=timedelta(minutes=10),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                secret_candidates = secret_candidates_from_activity_payload(
+                    secret_matches_raw,
+                    scan_id=scan.id,
+                    created_at=workflow.now(),
+                )
+                existing_ids = {c.id for c in candidate_findings}
+                for candidate in secret_candidates:
+                    if candidate.id in existing_ids:
+                        continue  # re-round: sweep candidate already recorded
+                    existing_ids.add(candidate.id)
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(candidate)},
+                    )
+                    candidate_findings.append(candidate)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.candidate_created",
+                        {"finding_id": candidate.id, "source": "secrets-sweep"},
+                    )
+                    # key_name metadata routes these through the deterministic
+                    # gate (below) — the agentic ensemble never sees them, so
+                    # the presence-based rubric change cannot FPs them in.
+                    validation_payload = await workflow.execute_activity(
+                        "validate-secret-candidate",
+                        ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=self._retry_policy,
+                    )
+                    validation = _validation_result_from_activity(validation_payload)
+                    if validation.is_valid:
+                        final = final_from_candidate(candidate, scan.id, workflow.now())
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_final_finding",
+                            {"finding": _model_json_dict(final)},
+                        )
+                        final_findings.append(final)
+                        await self._emit_and_dispatch(
+                            scan_input,
+                            scan,
+                            artifact_root,
+                            "finding.validated",
+                            {"finding_id": final.id},
+                            finding=final,
+                            severity=final.severity,
+                        )
+                    else:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "finding.rejected",
+                            {"finding_id": candidate.id},
+                        )
+
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
 
         # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
@@ -1757,7 +1834,15 @@ class RunScanWorkflow:
                             "save_candidate_finding",
                             {"finding": _model_json_dict(retained)},
                         )
+                        # Keep the accumulator in sync so later stages (TRACER)
+                        # persist the annotated candidate, not a stale copy.
+                        sync_candidate_accumulator(candidate_findings, retained)
                         needs_proof_findings.append(retained)
+                        needs_proof_reason = promotion_exhaustion_reason(
+                            dynamic_active=dynamic_active,
+                            live_verdict=dyn_verdict if dynamic_active else "",
+                            proof_enabled=scan_input.proof_enabled,
+                        )
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
@@ -1766,6 +1851,7 @@ class RunScanWorkflow:
                                 "finding_id": candidate.id,
                                 "verdict": verdict,
                                 "live_verdict": dyn_verdict if dynamic_active else "",
+                                "promotion_exhausted": needs_proof_reason or "",
                             },
                         )
                 elif verdict == "rejected":
@@ -2254,23 +2340,16 @@ class RunScanWorkflow:
         scan_input: "RunScanInput",
         scan: Scan,
         agent_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
         final_findings: list[FinalFinding],
         artifact_root: str,
     ) -> str:
         """Build and persist the coverage ledger over AgentTasks, returning JSON."""
         requested = tuple(vc.value for vc in scan.profile.vuln_classes)
         completed_classes = tuple(sorted({f.vuln_class.value for f in final_findings}))
-        # Skipped = tasks that ran but produced no finding
-        skipped: list[dict[str, str]] = [
-            {
-                "task_id": t.id,
-                "vuln_class": t.vuln_class.value if t.vuln_class else "",
-                "scope": t.scope or "",
-                "reason": "no finding from hunt agent",
-            }
-            for t in agent_tasks
-            if not any(f.vuln_class == t.vuln_class for f in final_findings)
-        ]
+        # Skipped rows distinguish hunt failure from promotion failure — blaming
+        # the hunter for candidates that died in validation hides those defects.
+        skipped = skipped_task_records(agent_tasks, candidate_findings, final_findings)
         payload = await workflow.execute_activity(
             "build-coverage-ledger",
             BuildCoverageLedgerInput(
@@ -3539,3 +3618,187 @@ def _report_artifact_ref(report_path: Path) -> ArtifactRef:
         created_at=utc_now(),
         metadata={"path": str(report_path)},
     )
+
+
+def secret_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-secrets`` activity payload (raw dict list) to
+    key_name-carrying CandidateFindings for the full-scan HUNT stage.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected secret match payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in payload:
+        record = item if isinstance(item, dict) else None
+        if record is None:
+            continue
+        key_name = str(record.get("key_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(record.get("line_number", 0) or 0)
+        if not key_name or not file_path or line_number <= 0:
+            continue
+        candidates.append(
+            _secret_candidate_from_match_record(
+                key_name=key_name,
+                file_path=file_path,
+                line_number=line_number,
+                scan_id=scan_id,
+                created_at=created_at,
+            )
+        )
+    return candidates
+
+
+def _secret_candidate_from_match_record(
+    *,
+    key_name: str,
+    file_path: str,
+    line_number: int,
+    scan_id: str,
+    created_at: datetime,
+) -> CandidateFinding:
+    """Workflow-deterministic mirror of the plugin's candidate builder.
+
+    Same fingerprint inputs as ``quarry_plugins.vuln_classes.secrets`` so a
+    secret found by both the deterministic sweep and an agent gets the same
+    candidate id (dedup then collapses them).
+    """
+    fingerprint = _compute_fingerprint(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=file_path,
+        start_line=line_number,
+        key_name=key_name,
+        evidence_kind="hardcoded_assignment",
+    )
+    root_cause_key = _compute_root_cause_key(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=file_path,
+        sink=key_name,
+    )
+    return CandidateFinding(
+        id=fingerprint[:32],
+        scan_id=scan_id,
+        workspace_id="local",
+        vuln_class=VulnerabilityClass.SECRETS,
+        title=f"Hardcoded secret: {key_name}",
+        hypothesis=f"Variable '{key_name}' in {file_path}:{line_number} "
+        f"contains a hardcoded value that may be a secret.",
+        root_cause_key=root_cause_key,
+        affected_component=file_path,
+        source_refs=[
+            SourceRef(
+                file_path=file_path,
+                start_line=line_number,
+                end_line=line_number,
+                symbol=key_name,
+            )
+        ],
+        evidence_path=[],
+        confidence=Confidence.MEDIUM,
+        created_by="secrets-scanner",
+        created_at=created_at,
+        metadata={
+            "key_name": key_name,
+            "evidence_kind": "hardcoded_assignment",
+        },
+    )
+
+
+def skipped_task_records(
+    tasks: list[Any],
+    candidates: list[CandidateFinding],
+    finals: list[FinalFinding],
+    *,
+    _promoted_classes: set[VulnerabilityClass] | None = None,
+) -> list[dict[str, str]]:
+    """Coverage-ledger skipped rows: distinguish hunt failure from promotion failure.
+
+    A task is only "no finding from hunt agent" when no candidate of its class
+    ever existed. When candidates existed but none made it to final, the honest
+    reason is "candidate not promoted" — blaming the hunter hides validation
+    and dynamic-probe defects (the 2caa3abc lesson: ledger said "no finding"
+    while three high-confidence candidates sat in needs_proof/rejected).
+    """
+    promoted_classes = _promoted_classes
+    if promoted_classes is None:
+        promoted_classes = {f.vuln_class for f in finals}
+    candidate_classes = {c.vuln_class for c in candidates}
+    records: list[dict[str, str]] = []
+    for t in tasks:
+        task_class = getattr(t, "vuln_class", None)
+        if task_class is None:
+            continue
+        if task_class in promoted_classes:
+            continue
+        if task_class in candidate_classes:
+            records.append(
+                {
+                    "task_id": str(getattr(t, "id", "")),
+                    "vuln_class": task_class.value,
+                    "scope": str(getattr(t, "scope", "") or ""),
+                    "reason": "candidate not promoted",
+                }
+            )
+        else:
+            records.append(
+                {
+                    "task_id": str(getattr(t, "id", "")),
+                    "vuln_class": task_class.value,
+                    "scope": str(getattr(t, "scope", "") or ""),
+                    "reason": "no finding from hunt agent",
+                }
+            )
+    return records
+
+
+def sync_candidate_accumulator(
+    accumulator: list[CandidateFinding],
+    updated: CandidateFinding,
+) -> None:
+    """Replace *updated* in *accumulator* by id (append when absent).
+
+    The needs_proof branch annotates a candidate with its live_verdict but never
+    synced it back, so TRACER later re-persisted the stale row and clobbered the
+    annotation (run 4: needs_proof rows in the DB lost their live_verdict).
+    """
+    for idx, existing in enumerate(accumulator):
+        if existing.id == updated.id:
+            accumulator[idx] = updated
+            return
+    accumulator.append(updated)
+
+
+def promotion_exhaustion_reason(
+    *,
+    dynamic_active: bool,
+    live_verdict: str,
+    proof_enabled: bool,
+) -> str | None:
+    """Why a needs_proof finding has no remaining promotion path (or None when
+    one exists).  Surfaced on the finding.needs_proof event so dead-ends are
+    visible in the audit trail instead of silently parking findings.
+
+    - corroborated + prove enabled  → PROVE can still promote (no dead end)
+    - inconclusive + no prove       → the 2caa3abc ssrf dead end
+    - no dynamic + no prove         → pipeline never had a promotion path for it
+    """
+    if dynamic_active and live_verdict == "corroborated" and proof_enabled:
+        return None
+    if dynamic_active and live_verdict == "inconclusive" and not proof_enabled:
+        return (
+            "dynamic probe inconclusive and proof disabled — "
+            "no remaining promotion path for this finding"
+        )
+    if not dynamic_active and not proof_enabled:
+        return "no dynamic validation and proof disabled for this scan"
+    return None
+

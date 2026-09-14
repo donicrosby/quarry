@@ -108,6 +108,14 @@ def _last_invocation_id(client: Any) -> str | None:
     return candidate_id if isinstance(candidate_id, str) else None
 
 
+# Prompt template versions for the validate ensemble. v1.1.0 adds the
+# presence-based clause (secrets claims have no source→sink path to re-derive;
+# the artifact itself is the claim) — v1.0.0 structurally rejected every
+# hardcoded-secret claim via the mandatory trust_boundary check.
+VALIDATE_PROMPT_VERSION = "1.1.0"
+REFUTE_PROMPT_VERSION = "1.1.0"
+
+
 def _run_debater(
     *,
     finding: CandidateFinding,
@@ -142,7 +150,7 @@ def _run_debater(
         registry=registry,
         role="validate",
         name=debater_tier.prompt_regime or "refute",
-        version="1.0.0",
+        version=REFUTE_PROMPT_VERSION,
         variables={
             "vuln_class": claim.vuln_class.value,
             "file": claim.file or "",
@@ -280,7 +288,7 @@ def validate_impl(
         registry=registry,
         role="validate",
         name="validate",
-        version="1.0.0",
+        version=VALIDATE_PROMPT_VERSION,
         variables={
             "vuln_class": claim.vuln_class.value,
             "file": claim.file or "",
