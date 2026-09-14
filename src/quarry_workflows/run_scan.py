@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, NamedTuple, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1654,9 +1654,16 @@ class RunScanWorkflow:
                                 "dynamic_validate.failed",
                                 {"finding_id": candidate.id, "error": _describe_failure(exc)},
                             )
-                        probe_specs = select_dynamic_probe_specs(proposed_http_specs, retained)
-                        if probe_specs and scan_input.target_url is not None:
+                        # SSRF's fallback pair derives its nested URL from the
+                        # target's own origin, so resolve the endpoint BEFORE
+                        # selecting specs (SQLi's static pair ignores it).
+                        target_ep: TargetEndpoint | None = None
+                        if scan_input.target_url is not None:
                             target_ep = build_target_endpoint_from_url(scan_input.target_url)
+                        probe_specs = select_dynamic_probe_specs(
+                            proposed_http_specs, retained, target_ep
+                        )
+                        if probe_specs and target_ep is not None:
                             probe_allowed_hosts = scan_input.allowed_hosts or (
                                 target_ep.host,
                                 "127.0.0.1",
@@ -2982,10 +2989,12 @@ def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:
 # Each path is a minimal, safe GET probe that confirms the endpoint is reachable.
 # For production, the dynamic_validate agent proposes the spec; these defaults are
 # used when no agent-proposed spec is available (e.g., simplified demo probes).
+# NOTE: SSRF deliberately has NO entry here — a static path would hardcode the
+# nested-fetch origin (the old port-80 string hit nothing); SSRF fallbacks are
+# built target-origin-aware in ``build_dynamic_probe_spec_pair`` instead.
 _CLASS_PROBE_PATHS: dict[str, str] = {
     VulnerabilityClass.IDOR.value: "/users/1",
     VulnerabilityClass.COMMAND_INJECTION.value: "/debug/ping?host=127.0.0.1",
-    VulnerabilityClass.SSRF.value: "/fetch-local?url=http://127.0.0.1",
     VulnerabilityClass.XSS.value: "/",
 }
 
@@ -2999,6 +3008,37 @@ _CLASS_PROBE_PAIR_PATHS: dict[str, tuple[str, str]] = {
         "/items?id=1%20AND%201%3D2",
     ),
 }
+
+# Nested (inner) URL path fetched through the SSRF sink's fetch parameter, and
+# the reserved authority used for the SSRF baseline (RFC 2606 .invalid — can
+# never resolve, so a prefix-validating guard is the only thing that can make
+# the baseline responses differ from a genuine nested fetch of the target).
+_SSRF_NESTED_PATH = "/users/1"
+_SSRF_BASELINE_HOST = "ssrf-baseline.invalid"
+
+
+def _ssrf_fallback_pair_paths(target_ep: TargetEndpoint) -> tuple[str, str]:
+    """Build the SSRF userinfo-bypass pair paths for the SCAN TARGET's origin.
+
+    Probe egress is allow-listed to the scan target's own host, so the nested
+    (inner) URL points at the target ITSELF — scheme/host/port derived from
+    *target_ep*, never a hardcoded localhost port.  Primary embeds the classic
+    userinfo bypass (``http://localhost@<origin>/users/1``): a naive
+    ``startswith("http://localhost")`` prefix check passes while the fetch
+    connects to the host after ``@``.  Baseline requests the same nested path
+    on a reserved, never-resolving authority — without the bypass the guard
+    must reject it (or the fetch fails), which is exactly the differential.
+    Pure; constructs path strings only, performs no HTTP.
+    """
+    base_path = target_ep.base_path.rstrip("/")
+    nested = f"{base_path}{_SSRF_NESTED_PATH}"
+    origin = f"{target_ep.host}:{target_ep.port}"
+    bypass_url = f"http://localhost@{origin}{nested}"
+    baseline_url = f"http://{_SSRF_BASELINE_HOST}{nested}"
+    return (
+        f"/fetch-local?url={quote(bypass_url, safe='')}",
+        f"/fetch-local?url={quote(baseline_url, safe='')}",
+    )
 
 
 def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | None:
@@ -3019,17 +3059,28 @@ def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | N
 
 def build_dynamic_probe_spec_pair(
     candidate: CandidateFinding,
+    target_ep: TargetEndpoint | None = None,
 ) -> tuple[HttpRequestSpec, HttpRequestSpec] | None:
-    """Build the deterministic TRUE/FALSE GET probe pair for a differential class.
+    """Build the deterministic differential GET pair for a pair-needing class.
 
-    Returns None for classes that do not need a pair (only SQL_INJECTION today)
-    or that cannot be probed over HTTP at all (e.g. secrets).  The dynamic_validate
-    agent's own proposed pair is preferred when well-formed; this is the fallback.
+    SQL_INJECTION uses the static TRUE/FALSE payload pair above.  SSRF has no
+    static pair — its nested (inner) URL must derive from the scan target's own
+    origin (probe egress is target-scoped), so it needs *target_ep* and returns
+    None without it (never a hardcoded localhost-port guess; the agent's own
+    proposals then carry the attempt).  Returns None for classes that need no
+    pair or that cannot be probed over HTTP at all (e.g. secrets).  The
+    dynamic_validate agent's own proposed pair is preferred when well-formed;
+    this is the fallback.  Constructs specs only — never executes HTTP.
     """
-    pair = _CLASS_PROBE_PAIR_PATHS.get(candidate.vuln_class.value)
-    if pair is None:
-        return None
-    true_path, false_path = pair
+    if candidate.vuln_class is VulnerabilityClass.SSRF:
+        if target_ep is None:
+            return None
+        true_path, false_path = _ssrf_fallback_pair_paths(target_ep)
+    else:
+        pair = _CLASS_PROBE_PAIR_PATHS.get(candidate.vuln_class.value)
+        if pair is None:
+            return None
+        true_path, false_path = pair
     return (
         HttpRequestSpec(method="GET", path=true_path),
         HttpRequestSpec(method="GET", path=false_path),
@@ -3053,14 +3104,17 @@ def _well_formed_probe_spec(raw: Any) -> HttpRequestSpec | None:
 def select_dynamic_probe_specs(
     proposed_http_specs: list[Any],
     candidate: CandidateFinding,
+    target_ep: TargetEndpoint | None = None,
 ) -> list[HttpRequestSpec]:
     """Pick the probe specs to dispatch for a dynamic-validation attempt.
 
-    Differential classes (registry ``min_probes`` = 2, e.g. SQL_INJECTION) get
-    up to TWO well-formed proposals — primary (TRUE payload) + baseline (FALSE
-    payload).  When the agent proposed fewer usable specs than the class needs,
-    the deterministic per-class pair fills the gap (single proposal → proposal
-    as primary + built FALSE baseline; none → full deterministic pair).
+    Differential classes (registry ``min_probes`` = 2, e.g. SQL_INJECTION and
+    SSRF) get up to TWO well-formed proposals — primary + baseline.  When the
+    agent proposed fewer usable specs than the class needs, the deterministic
+    per-class pair fills the gap (single proposal → proposal as primary + built
+    baseline; none → full deterministic pair).  SSRF's fallback pair needs the
+    scan target's origin: pass *target_ep* (the caller already resolves it for
+    dispatch); without it SSRF dispatches only what the agent proposed.
 
     Single-probe classes (``min_probes`` = 1 — every unregistered class) get
     exactly one spec: the first well-formed proposal, else the deterministic
@@ -3082,10 +3136,15 @@ def select_dynamic_probe_specs(
         return selected
     # Fewer usable proposals than needed → fill from the deterministic fallbacks.
     if max_specs > 1:
-        pair = build_dynamic_probe_spec_pair(candidate)
+        pair = build_dynamic_probe_spec_pair(candidate, target_ep)
         if pair is None:
             return selected
         fallback = list(pair)
+        if selected:
+            # A usable proposal already occupies the PRIMARY slot → the built
+            # BASELINE is the complement that completes the pair (the built
+            # primary is another true-shaped probe, not a baseline).
+            fallback.reverse()
     else:
         single = build_dynamic_probe_spec(candidate)
         if single is None:
