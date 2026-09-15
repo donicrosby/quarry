@@ -36,6 +36,7 @@ from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.checklist import enforce_checklist_invariants
+from quarry_models.mitigation_gate import sanitize_checklist_fails
 from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
@@ -140,7 +141,7 @@ def _last_invocation_id(client: Any) -> str | None:
 # the redaction-disclosure notice: validators were rejecting genuine secrets
 # because the scrubber's own [REDACTED_SECRET_N] mask read as a placeholder.
 VALIDATE_PROMPT_VERSION = "1.2.0"
-REFUTE_PROMPT_VERSION = "1.2.0"
+REFUTE_PROMPT_VERSION = "1.3.0"
 
 
 def _run_debater(
@@ -422,6 +423,13 @@ def validate_impl(
             checklist_enabled=checklist_enabled,
         )
         refuted = refute.refuted if refute is not None else False
+        # Deterministic backstop (run-5): a mitigation_stretching FAIL whose
+        # evidence names no real defensive primitive (e.g. cites only
+        # `timeout`/`capture_output` on a shell=True sink) is downgraded to
+        # unresolved so it cannot drive a rejection.
+        recorded_checklist = sanitize_checklist_fails(
+            recorded_checklist, repo_root=repo_path
+        )
         # Default-false-positive stance: when the checklist refuter keeps the
         # default (undischarged / refuted), a reasoner "validated" verdict is not
         # promoted — it is retained as needs_proof, never silently dropped.
