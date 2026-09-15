@@ -82,11 +82,7 @@ def test_higher_versions_are_supersets_of_1_0_0(name: str) -> None:
     it silently.
     """
     base = PROMPTS_DIR / f"{name}.1.0.0.j2"
-    base_lines = [
-        ln.strip()
-        for ln in base.read_text(encoding="utf-8").splitlines()
-        if ln.strip()
-    ]
+    base_lines = [ln.strip() for ln in base.read_text(encoding="utf-8").splitlines() if ln.strip()]
     for path in _template_files(name):
         if _version(path) <= (1, 0, 0):
             continue

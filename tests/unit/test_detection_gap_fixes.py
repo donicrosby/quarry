@@ -27,6 +27,7 @@ import pytest
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
+    FinalFinding,
     VulnerabilityClass,
     utc_now,
 )
@@ -100,14 +101,20 @@ def test_refute_template_1_1_0_exists_and_trust_boundary_na_for_secrets() -> Non
     assert "not_applicable" in text
 
 
-def test_validate_activity_pins_1_1_0() -> None:
+def test_validate_activity_pins_1_2_0() -> None:
+    """v1.2.0 = 1.1.0 + the redaction-disclosure notice (run-5 self-own fix).
+
+    The pin moves together for both templates; the 1.1.0 presence-based clause
+    is preserved additively (see tests/unit/test_validate_redaction_grounding.py
+    lineage anchors).
+    """
     from quarry_activities.validate import (
         REFUTE_PROMPT_VERSION,
         VALIDATE_PROMPT_VERSION,
     )
 
-    assert VALIDATE_PROMPT_VERSION == "1.1.0"
-    assert REFUTE_PROMPT_VERSION == "1.1.0"
+    assert VALIDATE_PROMPT_VERSION == "1.2.0"
+    assert REFUTE_PROMPT_VERSION == "1.2.0"
 
 
 # ── 2. Secrets sweep in the full-scan HUNT stage ────────────────────────────
@@ -153,9 +160,9 @@ def test_secret_candidates_from_activity_payload_rejects_non_list() -> None:
 def test_secret_candidates_payload_roundtrip_via_plugin_activity() -> None:
     """The payload dicts the activity actually returns (dataclass asdict form)
     must convert; integration mirrors diff_scan's _secret_matches_from_activity."""
-    from quarry_plugins.vuln_classes.secrets import _scan_repo_for_secrets_impl
+    from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
 
-    matches = _scan_repo_for_secrets_impl(
+    matches = scan_repo_for_secrets(
         Path(__file__).resolve().parents[2] / "examples" / "vulnerable-fastapi"
     )
     names = {m.key_name for m in matches}
@@ -219,7 +226,7 @@ def test_skipped_tasks_distinguish_no_finding_from_rejected() -> None:
 
     tasks = [_task(VulnerabilityClass.SECRETS, "t1"), _task(VulnerabilityClass.SSRF, "t2")]
     candidates = [_candidate(VulnerabilityClass.SECRETS, "s")]
-    finals: list[object] = []
+    finals: list[FinalFinding] = []
 
     records = skipped_task_records(tasks, candidates, finals)
     by_class = {r["vuln_class"]: r for r in records}
@@ -234,8 +241,10 @@ def test_skipped_tasks_empty_when_all_promoted() -> None:
 
     tasks = [_task(VulnerabilityClass.IDOR, "t1")]
     candidates = [_candidate(VulnerabilityClass.IDOR, "s")]
-    finals = [object()]  # presence of a promoted final for the class
-    records = skipped_task_records(tasks, candidates, finals, _promoted_classes={VulnerabilityClass.IDOR})
+    finals: list[FinalFinding] = []  # presence asserted via _promoted_classes
+    records = skipped_task_records(
+        tasks, candidates, finals, _promoted_classes={VulnerabilityClass.IDOR}
+    )
     assert records == []
 
 
@@ -247,7 +256,8 @@ def test_sync_candidate_accumulator_updates_matching_row_in_place() -> None:
 
     scan_id = "s"
     base = _candidate(VulnerabilityClass.SSRF, scan_id)
-    updated = base.model_copy(update={"metadata": {**base.metadata, "live_verdict": "inconclusive"}})
+    metadata = {**base.metadata, "live_verdict": "inconclusive"}
+    updated = base.model_copy(update={"metadata": metadata})
     accumulator = [base]
     sync_candidate_accumulator(accumulator, updated)
     assert accumulator[0].metadata.get("live_verdict") == "inconclusive"
@@ -281,6 +291,7 @@ def test_promotion_exhaustion_reason_names_the_dead_end() -> None:
         is None
     )
     # No dynamic track and no prove → nothing was ever going to promote it.
-    assert promotion_exhaustion_reason(
-        dynamic_active=False, live_verdict="", proof_enabled=False
-    ) == "no dynamic validation and proof disabled for this scan"
+    assert (
+        promotion_exhaustion_reason(dynamic_active=False, live_verdict="", proof_enabled=False)
+        == "no dynamic validation and proof disabled for this scan"
+    )

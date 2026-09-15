@@ -115,7 +115,9 @@ class TestChecklistOffPath:
             repo_path="/tmp/repo",
             panel=_panel(),
             client=MockModelClient(default=_ValidateResponse(verdict="validated")),
-            debater_client=MockModelClient(default=RefuteResponse(refuted=True)),
+            debater_client=MockModelClient(
+                default=RefuteResponse(refuted=True, reasons=["app.py:42: defense present"])
+            ),
             debater_tier=_debater_tier(),
             checklist_enabled=False,
         )

@@ -63,11 +63,28 @@ class RefuteResponse(BaseModel):
 
     The debater argues to refute the candidate and emits NO new findings — its
     ``refuted`` flag is the only stance it contributes to the ensemble.
+
+    A bare ``refuted=True`` with no reasons is a degenerate refutation (the
+    model kept the false-positive default without grounding it in code) and is
+    rejected at the schema boundary when any other field was populated — an
+    untouched all-default instance is allowed so the safe default stance can be
+    constructed programmatically.
     """
 
     refuted: bool = False
     reasons: list[str] = []
     tool_calls: list[ToolCallRequest] = []
+
+    @model_validator(mode="after")
+    def _refute_must_be_grounded(self) -> RefuteResponse:
+        if self.refuted and not self.reasons and self.tool_calls:
+            msg = (
+                "refuted=true with tool calls but empty reasons is not a "
+                "grounded verdict; name the disproving evidence (cite "
+                "file:line) or set refuted=false."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ChecklistRefuteResponse(RefuteResponse):
@@ -95,6 +112,14 @@ class ChecklistRefuteResponse(RefuteResponse):
                 "Re-emit with refuted=true or correct the checklist entry."
             )
             raise ValueError(msg)
+        if self.refuted and not failed and not self.reasons and self.checklist:
+            msg = (
+                "refuted=true with a recorded checklist but no FAIL entry and "
+                "empty reasons is not a grounded verdict; name the constraint "
+                "that fails with code evidence (or give reasons citing "
+                "file:line), or set refuted=false."
+            )
+            raise ValueError(msg)
         return self
 
 
@@ -111,9 +136,11 @@ def _last_invocation_id(client: Any) -> str | None:
 # Prompt template versions for the validate ensemble. v1.1.0 adds the
 # presence-based clause (secrets claims have no source→sink path to re-derive;
 # the artifact itself is the claim) — v1.0.0 structurally rejected every
-# hardcoded-secret claim via the mandatory trust_boundary check.
-VALIDATE_PROMPT_VERSION = "1.1.0"
-REFUTE_PROMPT_VERSION = "1.1.0"
+# hardcoded-secret claim via the mandatory trust_boundary check. v1.2.0 adds
+# the redaction-disclosure notice: validators were rejecting genuine secrets
+# because the scrubber's own [REDACTED_SECRET_N] mask read as a placeholder.
+VALIDATE_PROMPT_VERSION = "1.2.0"
+REFUTE_PROMPT_VERSION = "1.2.0"
 
 
 def _run_debater(

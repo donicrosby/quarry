@@ -3696,13 +3696,15 @@ def secret_candidates_from_activity_payload(
         msg = f"Unexpected secret match payload: {type(payload).__name__}"
         raise TypeError(msg)
     candidates: list[CandidateFinding] = []
-    for item in payload:
-        record = item if isinstance(item, dict) else None
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
         if record is None:
             continue
         key_name = str(record.get("key_name", ""))
         file_path = str(record.get("file_path", ""))
-        line_number = int(record.get("line_number", 0) or 0)
+        line_number = int(str(record.get("line_number", 0) or 0))
         if not key_name or not file_path or line_number <= 0:
             continue
         candidates.append(
@@ -3860,4 +3862,3 @@ def promotion_exhaustion_reason(
     if not dynamic_active and not proof_enabled:
         return "no dynamic validation and proof disabled for this scan"
     return None
-
