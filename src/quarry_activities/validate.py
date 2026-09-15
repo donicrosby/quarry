@@ -36,10 +36,10 @@ from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
 from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.checklist import enforce_checklist_invariants
-from quarry_models.mitigation_gate import sanitize_checklist_fails
 from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
+from quarry_models.mitigation_gate import sanitize_checklist_fails
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
@@ -427,9 +427,7 @@ def validate_impl(
         # evidence names no real defensive primitive (e.g. cites only
         # `timeout`/`capture_output` on a shell=True sink) is downgraded to
         # unresolved so it cannot drive a rejection.
-        recorded_checklist = sanitize_checklist_fails(
-            recorded_checklist, repo_root=repo_path
-        )
+        recorded_checklist = sanitize_checklist_fails(recorded_checklist, repo_root=repo_path)
         # Default-false-positive stance: when the checklist refuter keeps the
         # default (undischarged / refuted), a reasoner "validated" verdict is not
         # promoted — it is retained as needs_proof, never silently dropped.

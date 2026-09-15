@@ -101,12 +101,14 @@ def test_refute_template_1_1_0_exists_and_trust_boundary_na_for_secrets() -> Non
     assert "not_applicable" in text
 
 
-def test_validate_activity_pins_1_2_0() -> None:
+def test_validate_activity_pins() -> None:
     """v1.2.0 = 1.1.0 + the redaction-disclosure notice (run-5 self-own fix).
 
-    The pin moves together for both templates; the 1.1.0 presence-based clause
-    is preserved additively (see tests/unit/test_validate_redaction_grounding.py
-    lineage anchors).
+    The validate pin stays on 1.2.0; the refute pin moved to 1.3.0 when the
+    mitigation-stretching/source-coherence gates landed (the refute template
+    gained the anti-stretching clauses). The 1.1.0 presence-based clause is
+    preserved additively in both lines (see
+    tests/unit/test_prompt_lineage.py lineage anchors).
     """
     from quarry_activities.validate import (
         REFUTE_PROMPT_VERSION,
@@ -114,7 +116,7 @@ def test_validate_activity_pins_1_2_0() -> None:
     )
 
     assert VALIDATE_PROMPT_VERSION == "1.2.0"
-    assert REFUTE_PROMPT_VERSION == "1.2.0"
+    assert REFUTE_PROMPT_VERSION == "1.3.0"
 
 
 # ── 2. Secrets sweep in the full-scan HUNT stage ────────────────────────────
@@ -295,3 +297,99 @@ def test_promotion_exhaustion_reason_names_the_dead_end() -> None:
         promotion_exhaustion_reason(dynamic_active=False, live_verdict="", proof_enabled=False)
         == "no dynamic validation and proof disabled for this scan"
     )
+
+
+# ── 6. Deterministic SSRF sink sweep (run-8 detection-gap fix) ──────────────
+#
+# Run 8 (24af6f8d) promoted secrets/IDOR/cmdi but detected ZERO ssrf: the
+# SSRF hunt task read app.py and emitted findings:[] on the glaring
+# fetch_local/urlopen sink, and every safety net (gapfill grep loop with the
+# wrong `path` kwarg, hunter self-gaps with vuln_class=None) silently failed.
+# House rule: presence-based classes get a deterministic sweep (the secrets
+# pattern), so detection never rides on a single model roll.
+
+
+def _sample_ssrf_payload() -> list[dict[str, object]]:
+    return [
+        {
+            "line_number": 89,
+            "sink_name": "urlopen",
+            "url_source": "url",
+            "file_path": "app.py",
+            "evidence_kind": "outbound_request_sink",
+        }
+    ]
+
+
+def test_ssrf_candidates_from_activity_payload_builds_sink_candidate() -> None:
+    from quarry_workflows.run_scan import ssrf_candidates_from_activity_payload
+
+    now = utc_now()
+    candidates = ssrf_candidates_from_activity_payload(
+        _sample_ssrf_payload(), scan_id="scan-1", created_at=now
+    )
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.vuln_class is VulnerabilityClass.SSRF
+    assert c.scan_id == "scan-1"
+    assert c.created_at == now
+    # deterministic-sweep provenance: the coverage ledger + accumulator must be
+    # able to tell sweep candidates apart from hunter candidates
+    assert c.metadata.get("source") == "ssrf-sweep"
+    assert c.metadata.get("evidence_kind") == "outbound_request_sink"
+    assert c.created_by == "ssrf-sweep"
+    assert c.source_refs[0].file_path == "app.py"
+    assert c.source_refs[0].start_line == 89
+    assert c.source_refs[0].symbol == "urlopen"
+    assert c.evidence_path[0].path == "app.py"
+    assert c.evidence_path[0].line == 89
+
+
+def test_ssrf_candidates_from_activity_payload_skips_malformed_and_rejects_non_list() -> None:
+    from quarry_workflows.run_scan import ssrf_candidates_from_activity_payload
+
+    payload = [
+        {"sink_name": "", "file_path": "app.py", "line_number": 3},  # no sink name
+        {"sink_name": "urlopen", "file_path": "", "line_number": 3},  # no file
+        {"sink_name": "urlopen", "file_path": "app.py", "line_number": 0},  # no line
+        "not-a-dict",
+        {
+            "line_number": 89,
+            "sink_name": "urlopen",
+            "url_source": "url",
+            "file_path": "app.py",
+        },
+    ]
+    candidates = ssrf_candidates_from_activity_payload(payload, scan_id="s", created_at=utc_now())
+    assert len(candidates) == 1
+
+    with pytest.raises(TypeError):
+        ssrf_candidates_from_activity_payload({"nope": 1}, scan_id="s", created_at=utc_now())
+
+
+def test_ssrf_sweep_activity_flags_fetch_local_urlopen() -> None:
+    """The fixture app's fetch_local endpoint (app.py) is the SSRF ground truth:
+    a user-controlled `url` query param reaching urlopen with only a
+    startswith() allowlist. The deterministic sweep must surface it."""
+    from quarry_plugins.vuln_classes.ssrf import scan_repo_for_ssrf_sinks
+
+    matches = scan_repo_for_ssrf_sinks(
+        Path(__file__).resolve().parents[2] / "examples" / "vulnerable-fastapi"
+    )
+    sinks = {(m.file_path, m.sink_name) for m in matches}
+    assert ("app.py", "urlopen") in sinks
+    flagged = [m for m in matches if m.file_path == "app.py" and m.sink_name == "urlopen"]
+    assert flagged[0].line_number > 0
+
+
+def test_ssrf_sweep_activity_skips_constant_urls_and_non_source_files() -> None:
+    """Precision guard: urlopen with a constant string URL is not a candidate,
+    and test/vendor directories are out of scope."""
+    from quarry_plugins.vuln_classes.ssrf import scan_repo_for_ssrf_sinks
+
+    matches = scan_repo_for_ssrf_sinks(
+        Path(__file__).resolve().parents[2] / "examples" / "vulnerable-fastapi"
+    )
+    for m in matches:
+        assert "test" not in Path(m.file_path).parts
+        assert m.url_source != ""  # constant-URL sinks carry no url_source

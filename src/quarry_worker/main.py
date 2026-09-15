@@ -42,6 +42,7 @@ from quarry_activities.validation import (
     validate_secret_candidate,
 )
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
+from quarry_plugins.vuln_classes.ssrf import scan_repo_for_ssrf_sinks
 from quarry_workflows import RunDiffScanWorkflow, RunScanWorkflow
 from quarry_workflows.commit_stage import CommitStageWorkflow
 from quarry_workflows.recon import ReconWorkflow
@@ -63,6 +64,7 @@ async def run_worker() -> None:
             persist_scan_state,
             git_diff_commits,
             scan_repo_for_secrets,
+            scan_repo_for_ssrf_sinks,
             map_impacted_regions,
             validate_secret_candidate,
             promote_to_final_finding_metadata,

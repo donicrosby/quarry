@@ -32,6 +32,7 @@ from quarry.schemas import (
     CandidateFinding,
     Confidence,
     DynamicEvidenceLink,
+    EvidencePathElement,
     ExploitChain,
     ExploitStep,
     FinalFinding,
@@ -680,6 +681,47 @@ class RunScanWorkflow:
         # Hoist panel JSON so every round's hunt fan-out (recon-derived tasks
         # in round 0, gapfill/feedback tasks thereafter) shares one binding.
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
+
+        # ── Deterministic SSRF sink sweep (run-8 detection-gap fix) ──────────
+        # The SSRF hunt task is a single model roll: scan 24af6f8d read the
+        # fixture app's obvious fetch_local/urlopen sink and emitted no finding,
+        # while every model-side safety net (gapfill, hunter self-gaps) failed
+        # silently. Same answer as secrets (the sweep above): detect outbound-
+        # request sinks deterministically and feed them through the SAME
+        # agentic ensemble + per-class SSRF dynamic evaluator as hunter
+        # candidates — the sweep owns detection, the ensemble owns
+        # exploitability adjudication. Runs once before the coverage loop;
+        # resume-safe via the existing candidate-id dedup in each round.
+        if VulnerabilityClass.SSRF in scan.profile.vuln_classes:
+            ssrf_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-ssrf-sinks",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            ssrf_candidates = ssrf_candidates_from_activity_payload(
+                ssrf_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in ssrf_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "ssrf-sweep"},
+                )
 
         # ── Live-exploitation track (Shannon pillar; design D1) ──────────────
         # When live exploitation is authorized, the app-centric loop (live recon →
@@ -3772,6 +3814,89 @@ def _secret_candidate_from_match_record(
             "evidence_kind": "hardcoded_assignment",
         },
     )
+
+
+def ssrf_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-ssrf-sinks`` activity payload to SSRF candidates.
+
+    Deterministic-sweep parity with ``secret_candidates_from_activity_payload``:
+    the SSRF hunt task is a single model roll and missed the fixture app's
+    obvious urlopen sink in run 8 (24af6f8d) while every model-side safety net
+    silently failed. Sweep candidates are ordinary candidates — exploitability
+    adjudication stays with the agentic ensemble + per-class dynamic
+    evaluator; ``metadata.source == "ssrf-sweep"`` keeps provenance visible.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected SSRF sink payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
+        if record is None:
+            continue
+        sink_name = str(record.get("sink_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(str(record.get("line_number", 0) or 0))
+        url_source = str(record.get("url_source", ""))
+        if not sink_name or not file_path or line_number <= 0:
+            continue
+        fingerprint = _compute_fingerprint(
+            vuln_class=VulnerabilityClass.SSRF,
+            file_path=file_path,
+            start_line=line_number,
+            key_name=sink_name,
+            evidence_kind="outbound_request_sink",
+        )
+        root_cause_key = _compute_root_cause_key(
+            vuln_class=VulnerabilityClass.SSRF,
+            file_path=file_path,
+            sink=sink_name,
+        )
+        candidates.append(
+            CandidateFinding(
+                id=fingerprint[:32],
+                scan_id=scan_id,
+                workspace_id="local",
+                vuln_class=VulnerabilityClass.SSRF,
+                title=f"Outbound request sink: {sink_name}({url_source or '...'})",
+                hypothesis=f"'{sink_name}' in {file_path}:{line_number} issues an "
+                f"outbound server-side request whose destination is the variable "
+                f"'{url_source}' — if that value is influenced by untrusted input "
+                f"without scheme/host validation, this is exploitable SSRF.",
+                root_cause_key=root_cause_key,
+                affected_component=file_path,
+                source_refs=[
+                    SourceRef(
+                        file_path=file_path,
+                        start_line=line_number,
+                        end_line=line_number,
+                        symbol=sink_name,
+                    )
+                ],
+                evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
+                confidence=Confidence.MEDIUM,
+                created_by="ssrf-sweep",
+                created_at=created_at,
+                metadata={
+                    "source": "ssrf-sweep",
+                    "evidence_kind": "outbound_request_sink",
+                    "sink_name": sink_name,
+                    "url_source": url_source,
+                },
+            )
+        )
+    return candidates
 
 
 def skipped_task_records(

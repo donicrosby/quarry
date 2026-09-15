@@ -111,17 +111,6 @@ def _names_primitive(evidence: str) -> bool:
     return any(p.lower() in low for p in _DEFENSIVE_PRIMITIVES)
 
 
-def _only_non_mitigation_args(evidence: str) -> bool:
-    """True when the evidence is nothing but a file:line cite plus
-    non-mitigation argument names (the run-5 failure signature)."""
-    low = evidence.lower()
-    # Strip file:line citations and generic words; if what remains is only
-    # non-mitigation args, the FAIL is unsupported.
-    stripped = _CITE_RE.sub("", low)
-    has_non_mitigation = any(a in stripped for a in _NON_MITIGATION_ARGS)
-    return has_non_mitigation and not _names_primitive(low)
-
-
 def sanitize_checklist_fails(
     items: list[ChecklistItem],
     *,
@@ -153,9 +142,7 @@ def sanitize_checklist_fails(
             out.append(_downgrade(item, "no defensive primitive named in evidence"))
         elif item.constraint is ChecklistConstraint.SOURCE_COHERENCE and repo_root is not None:
             if _coherence_fail_unsupported(item.evidence, Path(repo_root)):
-                out.append(
-                    _downgrade(item, "cited file(s) exist and no mismatch named")
-                )
+                out.append(_downgrade(item, "cited file(s) exist and no mismatch named"))
             else:
                 out.append(item)
         else:
@@ -168,8 +155,7 @@ def _downgrade(item: ChecklistItem, why: str) -> ChecklistItem:
         update={
             "outcome": ChecklistOutcome.UNRESOLVED,
             "evidence": (
-                item.evidence
-                + f" [gate: FAIL unsupported — {why}; downgraded to unresolved]"
+                item.evidence + f" [gate: FAIL unsupported — {why}; downgraded to unresolved]"
             ),
         }
     )

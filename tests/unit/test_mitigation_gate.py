@@ -8,6 +8,8 @@ mitigations. The gate must refuse to let that FAIL drive a rejection.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from quarry.schemas import ChecklistConstraint, ChecklistItem, ChecklistOutcome
 from quarry_models.mitigation_gate import sanitize_checklist_fails
 
@@ -85,9 +87,7 @@ class TestMitigationGate:
     def test_pass_and_not_applicable_untouched(self) -> None:
         items = [
             _item(ChecklistConstraint.MITIGATION_STRETCHING, ChecklistOutcome.PASS, ""),
-            _item(
-                ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.NOT_APPLICABLE, ""
-            ),
+            _item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.NOT_APPLICABLE, ""),
         ]
         out = sanitize_checklist_fails(items)
         assert [i.outcome for i in out] == [
@@ -112,18 +112,16 @@ class TestMitigationGate:
 
 
 class TestCoherenceGate:
-    def test_lazy_coherence_fail_on_existing_file_downgraded(self, tmp_path) -> None:
+    def test_lazy_coherence_fail_on_existing_file_downgraded(self, tmp_path: Path) -> None:
         """Run-5 signature: debater FAILs source_coherence on app.py:74 with no
         explanation; the file exists. Gate downgrades to unresolved."""
         (tmp_path / "app.py").write_text("import subprocess\n" * 80)
-        items = [
-            _item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.FAIL, "app.py:74")
-        ]
+        items = [_item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.FAIL, "app.py:74")]
         out = sanitize_checklist_fails(items, repo_root=tmp_path)
         assert out[0].outcome is ChecklistOutcome.UNRESOLVED
         assert "cited file(s) exist" in out[0].evidence
 
-    def test_coherence_fail_with_mismatch_marker_stands(self, tmp_path) -> None:
+    def test_coherence_fail_with_mismatch_marker_stands(self, tmp_path: Path) -> None:
         """A coherence FAIL that names a concrete mismatch is credible."""
         (tmp_path / "app.py").write_text("x = 1\n")
         items = [
@@ -136,7 +134,7 @@ class TestCoherenceGate:
         out = sanitize_checklist_fails(items, repo_root=tmp_path)
         assert out[0].outcome is ChecklistOutcome.FAIL
 
-    def test_coherence_fail_on_missing_file_stands(self, tmp_path) -> None:
+    def test_coherence_fail_on_missing_file_stands(self, tmp_path: Path) -> None:
         items = [
             _item(
                 ChecklistConstraint.SOURCE_COHERENCE,
@@ -148,8 +146,6 @@ class TestCoherenceGate:
         assert out[0].outcome is ChecklistOutcome.FAIL
 
     def test_coherence_untouched_without_repo_root(self) -> None:
-        items = [
-            _item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.FAIL, "app.py:74")
-        ]
+        items = [_item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.FAIL, "app.py:74")]
         out = sanitize_checklist_fails(items)
         assert out[0].outcome is ChecklistOutcome.FAIL
