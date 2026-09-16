@@ -60,6 +60,7 @@ from quarry_models.types import (
 )
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
+from quarry_tools.errors import UnauthorizedToolError
 
 _log = logging.getLogger(__name__)
 
@@ -306,6 +307,7 @@ def run_agent_loop(
     steps: list[AgentStep] = []
     total_cost: float = 0.0
     tool_calls_used: int = 0  # cumulative tool calls issued (for tool_call_cap)
+    unauthorized_denials: list[str] = []  # tools denied via UnauthorizedToolError
     history: list[ModelMessage] = [
         ModelMessage(role="system", content=system_prompt),
         ModelMessage(role="user", content=initial_user_message),
@@ -406,6 +408,7 @@ def run_agent_loop(
                         iterations_used=iteration,
                         total_cost=total_cost,
                         stop_reason="schema_rejected",
+                        unauthorized_tool_denials=list(unauthorized_denials),
                     )
                 # Render repair feedback from the registry template (ADR-019).
                 feedback = _render_schema_repair_feedback(
@@ -459,6 +462,7 @@ def run_agent_loop(
                     iterations_used=iteration,
                     total_cost=total_cost,
                     stop_reason="guard_triggered",
+                    unauthorized_tool_denials=list(unauthorized_denials),
                 )
 
             # Check proposed_actions reasoning (ADR-020)
@@ -503,6 +507,7 @@ def run_agent_loop(
                             iterations_used=iteration,
                             total_cost=total_cost,
                             stop_reason="reasoning_rejected",
+                            unauthorized_tool_denials=list(unauthorized_denials),
                         )
 
                     # Re-prompt: render feedback (ADR-019 — all text in .j2)
@@ -597,6 +602,7 @@ def run_agent_loop(
                     iterations_used=iteration,
                     total_cost=total_cost,
                     stop_reason="tool_call_cap",
+                    unauthorized_tool_denials=list(unauthorized_denials),
                 )
             if len(tool_calls) > remaining:
                 tool_calls = tool_calls[:remaining]
@@ -630,6 +636,7 @@ def run_agent_loop(
                 iterations_used=iteration,
                 total_cost=total_cost,
                 stop_reason="final_answer",
+                unauthorized_tool_denials=list(unauthorized_denials),
             )
 
         # Execute tool calls and append results to history
@@ -639,6 +646,19 @@ def run_agent_loop(
             try:
                 record = runner.run(tc.tool, tc.inputs)
                 output_text = record.output
+            except UnauthorizedToolError as exc:
+                # Role-policy denial — a misconfiguration, not a model mistake.
+                # Track it so callers (e.g. dynamic_validate) can fail loud
+                # instead of silently producing empty results.
+                if tc.tool not in unauthorized_denials:
+                    unauthorized_denials.append(tc.tool)
+                _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
+                tool_results.append(
+                    f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
+                    f"Retry with valid arguments (paths must be relative to the repo root, "
+                    f"not URL routes)."
+                )
+                continue
             except Exception as exc:
                 # Any tool failure — bad/missing args, a path that escapes the repo
                 # (ToolSecurityError), an unauthorized or unavailable tool, a decode
@@ -675,6 +695,7 @@ def run_agent_loop(
                 iterations_used=iteration,
                 total_cost=total_cost,
                 stop_reason="budget_exceeded",
+                unauthorized_tool_denials=list(unauthorized_denials),
             )
 
     # Exhausted iterations — preserve findings from the last response if the model
@@ -687,4 +708,5 @@ def run_agent_loop(
         iterations_used=max_iterations,
         total_cost=total_cost,
         stop_reason="max_iterations",
+        unauthorized_tool_denials=list(unauthorized_denials),
     )

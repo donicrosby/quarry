@@ -1366,6 +1366,12 @@ class AgentLoopResult(BaseModel):
         # Per-tier tool_call_cap reached; loop stopped issuing tool calls (mdash D1).
         "tool_call_cap",
     ]
+    # ADR-017/role-policy observability: names of tools the runner denied via
+    # UnauthorizedToolError during this loop. Empty when every tool call was
+    # permitted. The dynamic-validate activity uses this to emit a loud
+    # ``dynamic_validate.tool_access_denied`` event instead of silently
+    # promoting nothing (the scan b4faf0a6 failure mode).
+    unauthorized_tool_denials: list[str] = Field(default_factory=_empty_strings)
 
 
 # ---------------------------------------------------------------------------
