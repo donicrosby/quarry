@@ -169,6 +169,24 @@ def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
     assert cfg.scan_defaults.validate_max_concurrent == 8
 
 
+def test_scan_defaults_dynamic_validate_max_concurrent_defaults_to_8(tmp_path: Path) -> None:
+    """New inventory-fanout knob defaults to 8 (scan-stage-fanout slice 4)."""
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert cfg.scan_defaults.dynamic_validate_max_concurrent == 8
+
+
+def test_scan_defaults_dynamic_validate_max_concurrent_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\ndynamic_validate_max_concurrent = 2\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.dynamic_validate_max_concurrent == 2
+
+
 def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "quarry.toml"
     toml_path.write_text(

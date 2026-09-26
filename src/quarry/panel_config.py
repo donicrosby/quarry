@@ -196,6 +196,10 @@ class ScanDefaultsConfig(BaseModel):
     # Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE
     # (scan-stage-fanout). Same shape as hunt_max_concurrent.
     validate_max_concurrent: int = 8
+    # Pre-hunt inventory sweep (per-class dynamic-validation chains): how many
+    # classes' propose→dispatch→capture chains may overlap. Default 8; 1 restores
+    # the historical serial per-class behavior.
+    dynamic_validate_max_concurrent: int = 8
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40

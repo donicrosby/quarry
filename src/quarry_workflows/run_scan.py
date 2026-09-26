@@ -239,6 +239,11 @@ class RunScanInput(BaseModel):
     # calibration is a full agent loop per finding; keep it conservative like
     # the tracer bound.
     calibrate_max_concurrent: int = 4
+    # Pre-hunt inventory sweep (per-class dynamic-validation chains): how many
+    # classes' propose→dispatch→capture chains may overlap. Resolved from
+    # quarry.toml [scan_defaults].dynamic_validate_max_concurrent by the API
+    # layer; 1 restores the historical serial behavior.
+    dynamic_validate_max_concurrent: int = 8
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -1167,159 +1172,232 @@ class RunScanWorkflow:
         exploit_panel_json = panel_json_for_role(scan, "exploit")
 
         # Step 2: per vuln class, drive a stateful propose→dispatch exploit chain.
-        for vuln_class in scan.profile.vuln_classes:
-            steps: list[ExploitStep] = []
-            session_cookies: dict[str, str] = {}
-            for _turn in range(scan_input.validate_max_iterations):
-                prior_steps = [s.model_dump(mode="json") for s in steps]
-                session_summary = "cookies set" if session_cookies else "(no session state yet)"
-                try:
-                    turn_raw = await workflow.execute_activity(
-                        "exploit-turn",
-                        args=[
-                            vuln_class.value,
-                            repo_path,
-                            True,  # authorized — enforced by the gate above
-                            session_summary,
-                            prior_steps,
-                            attack_map,
-                            exploit_panel_json,
-                            scan_input.budget_cap_usd,
-                            scan_input.db_path,
-                            scan_input.validate_max_iterations,
-                            scan_input.scan_seed,
-                            scan.id,
-                            scan_input.target_url,
-                            allowed_hosts,
-                            artifact_root,
-                        ],
-                        start_to_close_timeout=timedelta(hours=1),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
-                    )
-                except Exception as exc:
-                    await _append_workflow_event(
-                        scan_input.db_path,
-                        scan.id,
-                        "live_exploit.failed",
-                        {"stage": "exploit_turn", "error": _describe_failure(exc)},
-                    )
-                    break
-                if not isinstance(turn_raw, dict):
-                    break
-                turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
-                if turn.get("done") or not turn.get("proposed_http_spec"):
-                    break
+        #
+        # The per-class chains are independent — steps and session cookies are
+        # per-class state inside ``_exploit_class_chain`` — so they overlap under
+        # the ``dynamic_validate_max_concurrent`` semaphore (config knob, default
+        # 8; 1 restores the historical serial behavior). gather(
+        # return_exceptions=True) keeps one class's crash from aborting the
+        # others (best-effort track). Registration happens AFTER every chain
+        # resolves, in class order: the proven/created events stay deterministic
+        # for replay, and the per-class fingerprint id makes duplicate
+        # registration impossible even when every chain is in flight at once
+        # (the same safety net the deterministic sweeps use).
+        semaphore = asyncio.Semaphore(max(1, scan_input.dynamic_validate_max_concurrent))
 
-                spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
-                intent = str(turn.get("intent") or "exploit")
-                raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
-                headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
-                if session_cookies:
-                    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
-                spec = HttpRequestSpec(
-                    method=spec_dict.get("method", "GET"),
-                    path=str(spec_dict.get("path", "/")),
-                    headers=headers,
-                    body=spec_dict.get("body"),
-                    auth_profile=spec_dict.get("auth_profile"),
+        async def _exploit_one_class(vuln_class: VulnerabilityClass) -> ExploitChain:
+            async with semaphore:
+                return await self._exploit_class_chain(
+                    scan_input,
+                    scan,
+                    repo_path,
+                    artifact_root,
+                    target_ep,
+                    allowed_hosts,
+                    authorization,
+                    attack_map,
+                    exploit_panel_json,
+                    vuln_class,
                 )
 
-                # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
-                if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
-                    steps.append(
-                        ExploitStep(
-                            order=len(steps),
-                            intent=intent,
-                            request_spec=spec,
-                            dispatched=False,
-                            confirmed=False,
-                            notes="refused: outside rules of engagement",
-                        )
-                    )
-                    continue
+        chains = await asyncio.gather(
+            *[_exploit_one_class(vc) for vc in scan.profile.vuln_classes],
+            return_exceptions=True,
+        )
 
-                inp = HttpRequestActivityInput(
-                    spec_json=spec.model_dump_json(),
-                    target_endpoint_json=target_ep.model_dump_json(),
-                    allowed_hosts=allowed_hosts,
-                    artifact_store_path=artifact_root,
-                    scan_id=scan.id,
-                    candidate_finding_id=f"live-exploit-{vuln_class.value}",
-                    auth_profile_set_json=scan_input.auth_profiles_json,
+        # Registration pass (class order, post-gather): a proven chain becomes a
+        # first-class candidate carrying the per-class fingerprint id, so an
+        # overlapped/resumed chain can never register the same fingerprint twice.
+        registered_ids = {c.id for c in candidate_findings}
+        for vuln_class, chain_result in zip(scan.profile.vuln_classes, chains, strict=True):
+            if isinstance(chain_result, BaseException):
+                # One class's chain failed (timeout, crash); record it, keep the rest.
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.failed",
+                    {"stage": "exploit_chain", "error": _describe_failure(chain_result)},
                 )
-                try:
-                    capture_raw = await workflow.execute_activity(
-                        "http-request",
-                        args=[inp],
-                        start_to_close_timeout=timedelta(minutes=2),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
-                    capture = HttpResponseCapture.model_validate(capture_raw)
-                except Exception:
-                    # A failed dispatch ends this class's chain; other classes continue.
-                    break
-
-                success_raw = turn.get("success")
-                check = SuccessCheck.model_validate(success_raw) if success_raw else None
-                confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
-
-                # Thread any Set-Cookie into the carried session for later turns (D2).
-                set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
-                if set_cookie:
-                    pair = set_cookie.split(";", 1)[0]
-                    if "=" in pair:
-                        name, value = pair.split("=", 1)
-                        session_cookies[name] = value
-
-                steps.append(
-                    ExploitStep(
-                        order=len(steps),
-                        intent=intent,
-                        request_spec=spec,
-                        request_artifact_id=capture.request_artifact_ref,
-                        response_artifact_id=capture.body_artifact_ref,
-                        status_code=capture.status_code,
-                        confirmed=confirmed,
-                        notes=str(turn.get("reasoning") or ""),
-                    )
-                )
-                if confirmed:
-                    break  # we have our proof
-
-            chain = ExploitChain(
-                scan_id=scan.id,
-                workspace_id=scan.workspace_id,
-                vuln_class=vuln_class,
-                steps=steps,
-                proven=any(s.confirmed for s in steps),
-                summary=f"live exploitation chain for {vuln_class.value}",
-            )
+                continue
             candidate = exploit_chain_to_candidate(
-                chain,
-                finding_id=str(workflow.uuid4()),
+                chain_result,
+                finding_id=_live_exploit_fingerprint(vuln_class)[:32],
                 title=f"Live-proven {vuln_class.value} via chained exploitation",
                 hypothesis="Confirmed against the running target by a chained live exploit.",
                 created_by="exploit-agent",
                 created_at=workflow.now(),
             )
-            if candidate is not None:
-                await _persist_scan_state(
-                    scan_input.db_path,
-                    "save_candidate_finding",
-                    {"finding": _model_json_dict(candidate)},
+            if candidate is None or candidate.id in registered_ids:
+                continue  # unproven chain ("prove by doing") or already registered
+            registered_ids.add(candidate.id)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_candidate_finding",
+                {"finding": _model_json_dict(candidate)},
+            )
+            candidate_findings.append(candidate)
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "live_exploit.proven",
+                {
+                    "finding_id": candidate.id,
+                    "vuln_class": vuln_class.value,
+                    "step_count": str(len(chain_result.steps)),
+                },
+            )
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "finding.candidate_created",
+                {"finding_id": candidate.id, "source": "live-exploit"},
+            )
+
+    async def _exploit_class_chain(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        target_ep: TargetEndpoint,
+        allowed_hosts: tuple[str, ...],
+        authorization: TargetAuthorization,
+        attack_map: list[Any],
+        exploit_panel_json: str | None,
+        vuln_class: VulnerabilityClass,
+    ) -> ExploitChain:
+        """One class's stateful propose→dispatch exploit chain (step 2 above).
+
+        Per-class state (``steps``, ``session_cookies``) lives entirely inside
+        this call — overlapped classes share no mutable state.
+        """
+        steps: list[ExploitStep] = []
+        session_cookies: dict[str, str] = {}
+        for _turn in range(scan_input.validate_max_iterations):
+            prior_steps = [s.model_dump(mode="json") for s in steps]
+            session_summary = "cookies set" if session_cookies else "(no session state yet)"
+            try:
+                turn_raw = await workflow.execute_activity(
+                    "exploit-turn",
+                    args=[
+                        vuln_class.value,
+                        repo_path,
+                        True,  # authorized — enforced by the gate above
+                        session_summary,
+                        prior_steps,
+                        attack_map,
+                        exploit_panel_json,
+                        scan_input.budget_cap_usd,
+                        scan_input.db_path,
+                        scan_input.validate_max_iterations,
+                        scan_input.scan_seed,
+                        scan.id,
+                        scan_input.target_url,
+                        allowed_hosts,
+                        artifact_root,
+                    ],
+                    start_to_close_timeout=timedelta(hours=1),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
                 )
-                candidate_findings.append(candidate)
+            except Exception as exc:
                 await _append_workflow_event(
                     scan_input.db_path,
                     scan.id,
-                    "live_exploit.proven",
-                    {
-                        "finding_id": candidate.id,
-                        "vuln_class": vuln_class.value,
-                        "step_count": str(len(chain.steps)),
-                    },
+                    "live_exploit.failed",
+                    {"stage": "exploit_turn", "error": _describe_failure(exc)},
                 )
+                break
+            if not isinstance(turn_raw, dict):
+                break
+            turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
+            if turn.get("done") or not turn.get("proposed_http_spec"):
+                break
+
+            spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
+            intent = str(turn.get("intent") or "exploit")
+            raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
+            headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
+            if session_cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
+            spec = HttpRequestSpec(
+                method=spec_dict.get("method", "GET"),
+                path=str(spec_dict.get("path", "/")),
+                headers=headers,
+                body=spec_dict.get("body"),
+                auth_profile=spec_dict.get("auth_profile"),
+            )
+
+            # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
+            if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
+                steps.append(
+                    ExploitStep(
+                        order=len(steps),
+                        intent=intent,
+                        request_spec=spec,
+                        dispatched=False,
+                        confirmed=False,
+                        notes="refused: outside rules of engagement",
+                    )
+                )
+                continue
+
+            inp = HttpRequestActivityInput(
+                spec_json=spec.model_dump_json(),
+                target_endpoint_json=target_ep.model_dump_json(),
+                allowed_hosts=allowed_hosts,
+                artifact_store_path=artifact_root,
+                scan_id=scan.id,
+                candidate_finding_id=f"live-exploit-{vuln_class.value}",
+                auth_profile_set_json=scan_input.auth_profiles_json,
+            )
+            try:
+                capture_raw = await workflow.execute_activity(
+                    "http-request",
+                    args=[inp],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                capture = HttpResponseCapture.model_validate(capture_raw)
+            except Exception:
+                # A failed dispatch ends this class's chain; other classes continue.
+                break
+
+            success_raw = turn.get("success")
+            check = SuccessCheck.model_validate(success_raw) if success_raw else None
+            confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
+
+            # Thread any Set-Cookie into the carried session for later turns (D2).
+            set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
+            if set_cookie:
+                pair = set_cookie.split(";", 1)[0]
+                if "=" in pair:
+                    name, value = pair.split("=", 1)
+                    session_cookies[name] = value
+
+            steps.append(
+                ExploitStep(
+                    order=len(steps),
+                    intent=intent,
+                    request_spec=spec,
+                    request_artifact_id=capture.request_artifact_ref,
+                    response_artifact_id=capture.body_artifact_ref,
+                    status_code=capture.status_code,
+                    confirmed=confirmed,
+                    notes=str(turn.get("reasoning") or ""),
+                )
+            )
+            if confirmed:
+                break  # we have our proof
+
+        return ExploitChain(
+            scan_id=scan.id,
+            workspace_id=scan.workspace_id,
+            vuln_class=vuln_class,
+            steps=steps,
+            proven=any(s.confirmed for s in steps),
+            summary=f"live exploitation chain for {vuln_class.value}",
+        )
 
     async def _run_round(
         self,
@@ -4036,6 +4114,23 @@ def _secret_candidate_from_match_record(
             "key_name": key_name,
             "evidence_kind": "hardcoded_assignment",
         },
+    )
+
+
+def _live_exploit_fingerprint(vuln_class: VulnerabilityClass) -> str:
+    """Deterministic per-class fingerprint id for live-proven inventory candidates.
+
+    Same ``compute_fingerprint`` safety net the deterministic sweeps use: the id
+    is derived from the class's probed target (the one deterministic probe per
+    class the chain drives), so an overlapped or resumed chain can never
+    register the same fingerprint twice — a repeat registration collapses onto
+    the existing candidate id instead of minting a second candidate.
+    """
+    return _compute_fingerprint(
+        vuln_class=vuln_class,
+        file_path="app.py",
+        start_line=42,
+        end_line=43,
     )
 
 
