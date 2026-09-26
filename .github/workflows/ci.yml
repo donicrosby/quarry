@@ -43,9 +43,19 @@ jobs:
       - name: pyright (strict)
         run: uv run pyright
 
-  test:
-    name: tests
+  # Unit + golden suite, split across 4 free 4-core runners by pytest-shard
+  # (deterministic hash split, no stored durations state to rot). Same
+  # --dist loadfile per shard: file-affinity for sandbox-fork tests is preserved
+  # WITHIN each shard; shards never share a process. On a public repo standard
+  # runners are free and unlimited, so this buys wall-clock with machine count,
+  # not paid larger runners.
+  test-unit:
+    name: tests (unit/golden, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       # ripgrep backs the `grep` tool; installing it lets the grep tool tests run
@@ -68,13 +78,39 @@ jobs:
       # RLIMIT_NPROC at 64 per real UID (threads count) and two workers each
       # running a Java Temporal test server peak right at that limit, so any
       # fork-heavy test scheduled there dies with EAGAIN ("Cannot fork").
-      # Integration tests run sequentially (-n 0): they are the fork-pressure
-      # source (subprocess git/sandbox exec + Temporal servers) and a small
-      # fraction of the suite, so -n 0 there costs little wall-clock.
-      - name: pytest
-        run: |
+      # --durations=25 prints the shard's slowest tests every run: free
+      # rebalancing/kill-list evidence, zero behavioral cost.
+      - name: pytest (unit/golden shard)
+        run: >
           uv run pytest tests/unit tests/golden --dist loadfile
+          --shard-id ${{ matrix.shard }} --num-shards 4 --durations=25
+
+  # Integration suite: still serial (-n 0) — these ARE the fork-pressure tests
+  # (subprocess git/sandbox exec + Java Temporal servers vs the runner's
+  # RLIMIT_NPROC=64) — but the serial tail is halved across two runners by
+  # pytest-shard instead of parallelized inside one.
+  test-integration:
+    name: tests (integration, shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - run: uv sync --group dev --frozen
+      - name: pytest (integration shard)
+        run: >
           uv run pytest tests/integration -n 0
+          --shard-id ${{ matrix.shard }} --num-shards 2 --durations=25
 
   test-browser:
     name: tests (browser extra)
