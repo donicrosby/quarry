@@ -63,10 +63,11 @@ class TestEmitAndDispatchWiring:
         assert "finding" in sig.parameters
         assert "severity" in sig.parameters
 
-    def test_both_finding_validated_sites_pass_finding_and_severity(self) -> None:
-        """Both places run_scan.py emits finding.validated call _emit_and_dispatch
-        with finding= and severity= set, so a lifecycle hook can react to either
-        the deterministic-secret path or the agentic AGENTIC_VALIDATE path."""
+    def test_all_finding_validated_sites_pass_finding_and_severity(self) -> None:
+        """Every place run_scan.py emits finding.validated calls _emit_and_dispatch
+        with finding= and severity= set, so a lifecycle hook can react to any
+        validation path: the agentic AGENTIC_VALIDATE path, the deterministic
+        secret path, and the sweep auto-promotion path (scan-repo-for-secrets)."""
         import inspect as _inspect
         import sys
 
@@ -82,9 +83,11 @@ class TestEmitAndDispatchWiring:
         # Every "finding.validated" emission must go through _emit_and_dispatch,
         # never the bare _append_workflow_event (which drops the hook dispatch).
         # Check the immediately-preceding call keyword at each occurrence site.
+        # Three sites: agentic validate, deterministic secret validate, and the
+        # sweep auto-promotion gate (added with scan-repo-for-secrets).
         parts = source.split('"finding.validated"')
         sites = parts[:-1]
-        assert len(sites) == 2
+        assert len(sites) == 3
         for site in sites:
             window = site[-200:]
             call_start = window.rfind("await self._emit_and_dispatch(")

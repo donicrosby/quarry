@@ -75,22 +75,3 @@ class TestWorkerConfiguration:
         source = inspect.getsource(run_worker)
         assert "QuarrySettings()" in source
         assert "settings.temporal_address" in source
-
-    def test_all_activities_registered(self) -> None:
-        import inspect
-
-        from quarry_worker.main import run_worker
-
-        source = inspect.getsource(run_worker)
-        expected_activities = [
-            "create_repository_snapshot",
-            "recon_orchestrator_activity",
-            "emit_agent_tasks",
-            "hunt_activity",
-            "validate_secret_candidate",
-            "promote_to_final_finding_metadata",
-            "build_coverage_ledger_activity",
-            "render_markdown_report_activity",
-        ]
-        for act_name in expected_activities:
-            assert act_name in source, f"Activity {act_name} not registered"

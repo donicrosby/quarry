@@ -24,6 +24,7 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from quarry_activities.inputs import ScanSecretsInput
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
 
@@ -123,6 +124,20 @@ def _build_worker(
     from quarry_workflows.commit_stage import CommitStageWorkflow
     from quarry_workflows.recon import ReconWorkflow
 
+    @activity.defn(name="scan-repo-for-secrets")
+    def _stub_scan_repo_for_secrets(
+        payload: ScanSecretsInput,
+    ) -> list[dict[str, object]]:
+        """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+        return []
+
+    @activity.defn(name="scan-repo-for-ssrf-sinks")
+    def _stub_scan_repo_for_ssrf_sinks(
+        payload: ScanSecretsInput,
+    ) -> list[dict[str, object]]:
+        """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+        return []
+
     @activity.defn(name="recon-subsystem")
     def _passthrough_recon_subsystem(
         assignment: object,
@@ -150,6 +165,8 @@ def _build_worker(
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
             create_repository_snapshot,
+            _stub_scan_repo_for_secrets,
+            _stub_scan_repo_for_ssrf_sinks,
             persist_scan_state,
             recon_orchestrator_activity,
             _passthrough_recon_subsystem,
