@@ -209,6 +209,10 @@ class RunScanInput(BaseModel):
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    # Cap on concurrently in-flight per-finding ``tracer-finding`` activities in
+    # the TRACER stage (scan-stage-fanout). Trace is heavier per call than hunt,
+    # so the default stays conservative.
+    trace_max_concurrent: int = 4
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -2192,9 +2196,13 @@ class RunScanWorkflow:
                 call_graph = CallGraph.model_validate(call_graph_raw)
                 tracer_panel_json = panel_json_for_role(scan, "trace")
                 final_findings_by_id = {f.id: f for f in final_findings}
-                for finding in pending_trace:
-                    try:
-                        trace_raw = await workflow.execute_activity(
+                # Fan-out cap: no more than trace_max_concurrent tracer-finding
+                # activities in flight at once (scan-stage-fanout).
+                trace_semaphore = asyncio.Semaphore(scan_input.trace_max_concurrent)
+
+                async def _trace_one(finding: CandidateFinding) -> Any:
+                    async with trace_semaphore:
+                        return await workflow.execute_activity(
                             "tracer-finding",
                             args=[
                                 finding.model_dump(mode="json"),
@@ -2212,48 +2220,63 @@ class RunScanWorkflow:
                             heartbeat_timeout=timedelta(minutes=3),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )
-                        trace = Trace.model_validate(
-                            trace_raw if isinstance(trace_raw, dict) else trace_raw
-                        )
-                        apply_trace_severity_reranking(finding, trace)
-                        await _persist_scan_state(
-                            scan_input.db_path,
-                            "save_trace",
-                            {"trace": _model_json_dict(trace)},
-                        )
-                        await _persist_scan_state(
-                            scan_input.db_path,
-                            "save_candidate_finding",
-                            {"finding": _model_json_dict(finding)},
-                        )
-                        updated_final = sync_final_finding_trace(
-                            finding, trace, final_findings_by_id
-                        )
-                        if updated_final is not None:
-                            await _persist_scan_state(
-                                scan_input.db_path,
-                                "save_final_finding",
-                                {"finding": _model_json_dict(updated_final)},
-                            )
-                        traced_finding_ids.add(finding.id)
-                        if trace.reachable == ReachabilityVerdict.REACHABLE:
-                            reachable_traces.append(trace)
-                        await _append_workflow_event(
-                            scan_input.db_path,
-                            scan.id,
-                            "tracer.verdict",
-                            {
-                                "finding_id": finding.id,
-                                "verdict": trace.reachable.value,
-                            },
-                        )
-                    except Exception as exc:
+
+                # return_exceptions=True: one tracer failing (timeout, crash)
+                # must not fail the scan — its per-finding result becomes the
+                # Exception and the post-gather loop records tracer.failed.
+                trace_results = await asyncio.gather(
+                    *[_trace_one(f) for f in pending_trace],
+                    return_exceptions=True,
+                )
+
+                # Post-gather, in finding INPUT order: persistence, severity
+                # re-ranking inputs, reachable-trace accumulation, and event
+                # emission stay deterministic for replay.
+                for finding, trace_result in zip(pending_trace, trace_results, strict=True):
+                    if isinstance(trace_result, BaseException):
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
                             "tracer.failed",
-                            {"finding_id": finding.id, "error": _describe_failure(exc)},
+                            {
+                                "finding_id": finding.id,
+                                "error": _describe_failure(trace_result),
+                            },
                         )
+                        continue
+                    trace = Trace.model_validate(
+                        trace_result if isinstance(trace_result, dict) else trace_result
+                    )
+                    apply_trace_severity_reranking(finding, trace)
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_trace",
+                        {"trace": _model_json_dict(trace)},
+                    )
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(finding)},
+                    )
+                    updated_final = sync_final_finding_trace(finding, trace, final_findings_by_id)
+                    if updated_final is not None:
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_final_finding",
+                            {"finding": _model_json_dict(updated_final)},
+                        )
+                    traced_finding_ids.add(finding.id)
+                    if trace.reachable == ReachabilityVerdict.REACHABLE:
+                        reachable_traces.append(trace)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "tracer.verdict",
+                        {
+                            "finding_id": finding.id,
+                            "verdict": trace.reachable.value,
+                        },
+                    )
             await _persist_scan_stage(scan_input.db_path, scan.id, "TRACER")
             await _append_workflow_event(
                 scan_input.db_path,

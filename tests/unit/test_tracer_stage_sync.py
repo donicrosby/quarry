@@ -197,7 +197,9 @@ def _tracer_block_source() -> str:
     """Extract the TRACER stage block from ``RunScanWorkflow._run_round``."""
     from quarry_workflows.run_scan import RunScanWorkflow
 
-    src = inspect.getsource(RunScanWorkflow._run_round)
+    src = inspect.getsource(
+        RunScanWorkflow._run_round  # type: ignore[reportPrivateUsage]
+    )
     marker = "# ── TRACER stage"
     start = src.index(marker)
     end = src.index("return _RoundOutcome(", start)
@@ -215,13 +217,13 @@ class TestTracerFanOutBlockStructure:
         """Post-gather emission zips results onto the pending findings so
         verdict/failed events follow finding input order, not completion order."""
         block = _tracer_block_source()
-        assert "for finding, result in zip(pending_trace" in block
+        assert "for finding, trace_result in zip(pending_trace" in block
 
     def test_reachable_traces_appended_post_gather_only(self) -> None:
         """REACHABLE accumulation lives in the post-gather ordered loop, not in
         the concurrent workers — replay-visible order must stay deterministic."""
         block = _tracer_block_source()
-        ordered_loop_start = block.index("for finding, result in zip(pending_trace")
+        ordered_loop_start = block.index("for finding, trace_result in zip(pending_trace")
         worker_start = block.index("async def _trace_one(")
         worker_part = block[worker_start:ordered_loop_start]
         post_gather_part = block[ordered_loop_start:]

@@ -18,6 +18,7 @@ network / DB beyond the scan's own SQLite file in ``tmp_path``.
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,9 +39,9 @@ _NOW = datetime(2026, 9, 26, tzinfo=UTC)
 
 # ── Shared counters (activity threads; guarded by _lock) ────────────────────
 _lock = threading.Lock()
-_peak_in_flight = [0]
-_current_in_flight = [0]
 _dispatch_order: list[str] = []
+# (finding_id, started, ended) wall-clock execution windows per tracer activity.
+_activity_windows: list[tuple[str, float, float]] = []
 
 # Which finding ids the fake tracer-finding activity raises for.
 _fail_findings: list[str] = []
@@ -53,11 +54,32 @@ _FINDING_IDS = [f"cf-trace-{i}" for i in range(1, _NUM_FINDINGS + 1)]
 
 def _reset_counters() -> None:
     with _lock:
-        _peak_in_flight[0] = 0
-        _current_in_flight[0] = 0
         _dispatch_order.clear()
+        _activity_windows.clear()
         _fail_findings.clear()
         _stagger.clear()
+
+
+def _peak_overlap() -> int:
+    """Max number of tracer-activity execution windows overlapping any instant.
+
+    End events sort before start events at identical timestamps so an exact
+    hand-off (one activity ends exactly when another starts) is not counted
+    as overlap.
+    """
+    with _lock:
+        windows = list(_activity_windows)
+    events: list[tuple[float, int]] = []
+    for _fid, started, ended in windows:
+        events.append((started, 1))
+        events.append((ended, -1))
+    events.sort(key=lambda e: (e[0], e[1]))
+    current = 0
+    peak = 0
+    for _t, delta in events:
+        current += delta
+        peak = max(peak, current)
+    return peak
 
 
 def _finding_dict(scan_id: str, finding_id: str) -> dict[str, object]:
@@ -172,17 +194,18 @@ def _instrumented_tracer_activity(
     finding_id = _finding_id_from_payload(finding)
     with _lock:
         _dispatch_order.append(finding_id)
-        _current_in_flight[0] += 1
-        if _current_in_flight[0] > _peak_in_flight[0]:
-            _peak_in_flight[0] = _current_in_flight[0]
         fail = finding_id in _fail_findings
         delay = _stagger.get(finding_id, 0.0)
+    # Record each execution's [started, ended] wall-clock window; the test
+    # derives peak overlap from the windows afterwards. Windows are taken
+    # INSIDE the activity, so time queued behind the workflow semaphore is
+    # never counted — a window spans only actual execution time.
+    started = time.monotonic()
     if delay:
-        import time
-
         time.sleep(delay)
+    ended = time.monotonic()
     with _lock:
-        _current_in_flight[0] -= 1
+        _activity_windows.append((finding_id, started, ended))
     if fail:
         msg = f"boom: {finding_id}"
         raise RuntimeError(msg)
@@ -411,9 +434,10 @@ class TestTracerFanOutEventOrder:
             if etype == "tracer.verdict"
         ]
         assert verdict_events == _FINDING_IDS
-        # Sanity: completion order really differed from input order.
-        with _lock:
-            assert _dispatch_order == _FINDING_IDS
+        # Sanity: with a 0.05*(N-i) stagger the executions genuinely overlap
+        # (fan-out is real, not serialized), so a completion-ordered
+        # implementation cannot pass the input-order assertion above.
+        assert _peak_overlap() >= 2
 
     async def test_failure_records_tracer_failed_and_verdicts_for_siblings(
         self, temporal_client: Client, tmp_path: Path
@@ -460,8 +484,7 @@ class TestTracerFanOutEventOrder:
             trace_max_concurrent=2,
         )
 
-        with _lock:
-            peak = _peak_in_flight[0]
+        peak = _peak_overlap()
         assert peak <= 2, f"peak in-flight tracer activities was {peak}, expected ≤ 2"
 
         verdicts = [
