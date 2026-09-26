@@ -179,6 +179,23 @@ class _RoundOutcome(NamedTuple):
     call_graph: CallGraph | None
 
 
+class _CalibrateOutcome(NamedTuple):
+    """Per-finding result of one gathered CALIBRATE batch (scan-stage-fanout).
+
+    ``calibrated`` is False when the calibration was skipped (non-dict
+    activity payload, unparsable severity) or failed outright (activity
+    exception) — in both cases the finding keeps its raw severity, the
+    best-effort contract. ``error`` carries the failure description for the
+    post-gather ``calibrate.failed`` event; events are emitted after the whole
+    batch resolves, in finding input order, so replay stays deterministic.
+    """
+
+    final: FinalFinding
+    candidate: CandidateFinding
+    calibrated: bool
+    error: str = ""
+
+
 def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
@@ -217,6 +234,11 @@ class RunScanInput(BaseModel):
     # (scan-stage-fanout). Mirrors hunt_max_concurrent; the API layer resolves
     # it from scan_defaults.
     validate_max_concurrent: int = 8
+    # Per-finding severity-calibration fan-out bound (scan-stage-fanout): the
+    # validated-findings calibrations are gathered under this semaphore. 4 —
+    # calibration is a full agent loop per finding; keep it conservative like
+    # the tracer bound.
+    calibrate_max_concurrent: int = 4
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -1655,6 +1677,11 @@ class RunScanWorkflow:
                     )
                     return (candidate, payload, None)
 
+            # Freshly validated findings awaiting severity calibration; the
+            # calibrations are gathered as one bounded batch after the loop
+            # (scan-stage-fanout) so their events land in finding input order.
+            pending_calibrations: list[tuple[FinalFinding, CandidateFinding]] = []
+
             # return_exceptions=True: the worker closures already capture their
             # own failures; this is a second belt-and-braces layer so a bug in
             # the closure itself degrades to a per-candidate event instead of
@@ -1718,9 +1745,9 @@ class RunScanWorkflow:
                     # severity/priority by marginal attacker capability and
                     # records which catalogue rules fired. Raw severity is
                     # retained on the finding; calibration never overwrites it.
-                    final, candidate = await self._calibrate_validated_finding(
-                        scan_input, scan, repo_path, artifact_root, final, candidate
-                    )
+                    # Queue it for the bounded batch gather below — calibration
+                    # itself runs after the whole candidate loop resolves.
+                    pending_calibrations.append((final, candidate))
                     # Keep the accumulator in sync so later stages (TRACER,
                     # report) persist the calibrated candidate, not the stale
                     # pre-calibration object.
@@ -2004,6 +2031,82 @@ class RunScanWorkflow:
                         scan.id,
                         "finding.rejected",
                         {"finding_id": candidate.id, "verdict": verdict or "unknown"},
+                    )
+
+            # ── CALIBRATE batch fan-out (scan-stage-fanout) ──────────────────
+            # Calibrate every freshly validated finding under one bounded
+            # gather (calibrate_max_concurrent semaphore). The candidate loop
+            # above only queues work; this gather is the stage's single
+            # dispatch point. return_exceptions stays False because the
+            # per-finding closure never raises (best-effort contract: a
+            # failure keeps the raw severity and is recorded below) — a
+            # calibration outage must never drop or block a validated finding.
+            calibrate_semaphore = asyncio.Semaphore(scan_input.calibrate_max_concurrent)
+
+            async def _calibrate_with_bound(
+                final_in: FinalFinding,
+                candidate_in: CandidateFinding,
+            ) -> _CalibrateOutcome:
+                async with calibrate_semaphore:
+                    return await self._calibrate_one_finding(
+                        scan_input, scan, repo_path, artifact_root, final_in, candidate_in
+                    )
+
+            calibrate_outcomes = await asyncio.gather(
+                *[
+                    _calibrate_with_bound(final_f, cand_f)
+                    for final_f, cand_f in pending_calibrations
+                ]
+            )
+
+            # Post-gather, in finding INPUT order (deterministic replay): sync
+            # accumulators with the calibrated objects, then emit the lifecycle
+            # event — success first (finding.calibrated), failure second
+            # (calibrate.failed) — so an absent finding.calibrated always means
+            # the finding kept its raw severity.
+            for pair_in, outcome in zip(pending_calibrations, calibrate_outcomes, strict=True):
+                cand_in = pair_in[1]
+                final = outcome.final
+                candidate = outcome.candidate
+                if outcome.calibrated:
+                    # Keep the accumulators in sync so later stages (TRACER,
+                    # report, sinks) see the calibrated final/candidate, and
+                    # re-persist the final: the pre-gather save above stored the
+                    # raw finding, so the calibrated one must overwrite it here
+                    # (same persisted state the serial flow produced).
+                    for idx, existing in enumerate(candidate_findings):
+                        if existing.id == candidate.id:
+                            candidate_findings[idx] = candidate
+                            break
+                    for idx, existing in enumerate(final_findings):
+                        if existing.id == final.id:
+                            final_findings[idx] = final
+                            break
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.calibrated",
+                        {
+                            "finding_id": final.id,
+                            "calibrated_severity": (
+                                final.calibrated_severity.value
+                                if final.calibrated_severity is not None
+                                else ""
+                            ),
+                            "firing_rule_ids": ",".join(final.firing_rule_ids),
+                        },
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "calibrate.failed",
+                        {"finding_id": cand_in.id, "error": outcome.error},
                     )
             await _persist_scan_stage(scan_input.db_path, scan.id, "AGENTIC_VALIDATE")
             await _append_workflow_event(
@@ -2369,7 +2472,7 @@ class RunScanWorkflow:
 
         return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
 
-    async def _calibrate_validated_finding(
+    async def _calibrate_one_finding(
         self,
         scan_input: "RunScanInput",
         scan: Scan,
@@ -2377,15 +2480,18 @@ class RunScanWorkflow:
         artifact_root: str,
         final: FinalFinding,
         candidate: CandidateFinding,
-    ) -> tuple[FinalFinding, CandidateFinding]:
-        """Calibrate a freshly validated finding (severity-calibration capability).
+    ) -> _CalibrateOutcome:
+        """Dispatch one ``calibrate-finding`` activity (fan-out closure body).
 
-        Dispatches the ``calibrate-finding`` activity and mirrors its calibrated
-        severity/priority + firing-rule ids onto BOTH the FinalFinding that is
-        reported and the CandidateFinding that is persisted. The hunter's raw
-        severity is never modified. Best-effort: on activity failure the
-        finding keeps its raw severity (a calibration outage must never drop or
-        block a validated finding — rollback note in the change design).
+        Semantics are exactly the historical per-finding behaviour: on
+        activity failure (or a skipped calibration) the finding keeps its raw
+        severity (``calibrated=False``) and the failure is reported for the
+        post-gather ``calibrate.failed`` event — never raised into the scan.
+        On success the calibrated severity/priority + firing-rule ids are
+        mirrored onto BOTH the FinalFinding that is reported and the
+        CandidateFinding that is persisted, and the calibration is persisted
+        here inside the closure (persistence order is not externally
+        observable; event order is — events are emitted post-gather).
         """
         calibrate_panel_json = panel_json_for_role(scan, "calibrate")
         try:
@@ -2408,21 +2514,32 @@ class RunScanWorkflow:
                 retry_policy=self._retry_policy,
             )
         except Exception as exc:
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "calibrate.failed",
-                {"finding_id": final.id, "error": _describe_failure(exc)},
+            # Best-effort contract: a calibration outage must never drop or
+            # block a validated finding — rollback note in the change design.
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error=_describe_failure(exc),
             )
-            return (final, candidate)
 
         if not isinstance(calibrate_raw, dict):
-            return (final, candidate)
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error="calibrate-finding returned a non-dict payload",
+            )
         payload = cast("dict[str, Any]", calibrate_raw)
 
         calibrated = _severity_from_activity(payload.get("calibrated_severity"))
         if calibrated is None:
-            return (final, candidate)
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error="calibrate-finding returned an unparsable calibrated severity",
+            )
 
         priority_raw = payload.get("calibrated_priority")
         priority = int(priority_raw) if isinstance(priority_raw, (int, str)) else None
@@ -2456,17 +2573,11 @@ class RunScanWorkflow:
             "save_candidate_finding",
             {"finding": _model_json_dict(candidate)},
         )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "finding.calibrated",
-            {
-                "finding_id": final.id,
-                "calibrated_severity": calibrated.value,
-                "firing_rule_ids": ",".join(firing_rule_ids),
-            },
+        return _CalibrateOutcome(
+            final=final,
+            candidate=candidate,
+            calibrated=True,
         )
-        return (final, candidate)
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
