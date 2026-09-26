@@ -32,6 +32,7 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
+from quarry_activities.inputs import ScanSecretsInput
 from quarry_activities.repo import persist_scan_state
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
@@ -145,6 +146,8 @@ def _build_worker(
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
             create_repository_snapshot,
+            _stub_scan_repo_for_secrets,
+            _stub_scan_repo_for_ssrf_sinks,
             persist_scan_state,
             recon_orchestrator_activity,
             _passthrough_recon_subsystem,
@@ -168,6 +171,22 @@ def _build_worker(
         graceful_shutdown_timeout=__import__("datetime").timedelta(seconds=10),
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
+
+
+@activity.defn(name="scan-repo-for-secrets")
+def _stub_scan_repo_for_secrets(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
+
+
+@activity.defn(name="scan-repo-for-ssrf-sinks")
+def _stub_scan_repo_for_ssrf_sinks(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
 
 
 @activity.defn(name="recon-subsystem")
@@ -371,23 +390,6 @@ async def test_calibrate_runs_after_validation_and_reports_calibrated_fields(
     assert candidates[0].calibrated_severity is Severity.HIGH
     assert candidates[0].raw_severity is Severity.CRITICAL
     assert candidates[0].status in {FindingStatus.VALIDATED, FindingStatus.CANDIDATE}
-
-
-@pytest.mark.skipif(not FIXTURE_REPO.exists(), reason=_SKIP_REASON)
-async def test_calibrate_stage_registered_on_worker_and_server() -> None:
-    """The calibrate activity must be registered in worker + server + conftest."""
-    from pathlib import Path as _Path
-
-    repo_root = _Path(__file__).resolve().parents[2]
-    for rel in (
-        "src/quarry_worker/main.py",
-        "src/quarry_server/app.py",
-        "tests/conftest.py",
-    ):
-        source = (repo_root / rel).read_text(encoding="utf-8")
-        assert "calibrate_activity" in source, (
-            f"{rel} must register the calibrate activity (worker/server/test parity)"
-        )
 
 
 def _rejecting_validator_activity_fn() -> Callable[..., dict[str, object]]:

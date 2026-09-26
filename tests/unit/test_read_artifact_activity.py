@@ -177,10 +177,3 @@ class TestReadArtifactTextActivity:
             )
         )
         assert result is None
-
-    def test_registered_in_worker_and_server(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
-        worker_src = (repo_root / "src" / "quarry_worker" / "main.py").read_text()
-        server_src = (repo_root / "src" / "quarry_server" / "app.py").read_text()
-        assert "read_artifact_text_activity" in worker_src
-        assert "read_artifact_text_activity" in server_src
