@@ -30,6 +30,8 @@ from quarry.schemas import (
     Target,
     local_scan_profile,
 )
+from quarry_activities.calibrate import calibrate_activity
+from quarry_activities.call_graph import build_call_graph_activity
 from quarry_activities.clone import clone_repository_activity
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
@@ -39,6 +41,7 @@ from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.inputs import ScanSecretsInput
 from quarry_activities.integrations import deliver_integrations_activity
+from quarry_activities.kb_recon import kb_recon_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
@@ -651,6 +654,9 @@ async def test_e2e_concurrent_scans(
                 recon_synthesis_activity,
                 emit_agent_tasks,
                 hunt_activity,
+                kb_recon_activity,
+                build_call_graph_activity,
+                calibrate_activity,
                 validate_activity,
                 gapfill_activity,
                 deduplicate_activity,
