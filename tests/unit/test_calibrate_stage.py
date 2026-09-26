@@ -187,3 +187,65 @@ class TestHardCaps:
             "static-only-no-critical",
             "self-contained-blast-radius-cap-medium",
         }
+
+
+# ---------------------------------------------------------------------------
+# Scan-stage fan-out: deterministic event order + best-effort failure isolation
+# ---------------------------------------------------------------------------
+# The validated-findings calibrations run concurrently under a semaphore, so
+# `finding.calibrated` events must be appended in finding INPUT order (not
+# completion order) for deterministic replay, and a calibration failure must
+# keep the finding at its raw severity (never drop or block it).
+#
+# The workflow body is sandbox-pure orchestration, so per the repo's
+# established pattern (see tests/unit/test_workflow_differential_dispatch.py)
+# these stage-level wiring contracts are asserted against the workflow source,
+# with the real gathered dispatch exercised end to end in
+# tests/unit/test_workflow_concurrency.py.
+
+
+def _run_scan_source() -> str:
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "src" / "quarry_workflows" / "run_scan.py"
+    return path.read_text(encoding="utf-8")
+
+
+class TestCalibrateFanOutWiring:
+    def test_calibrations_gather_under_calibrate_max_concurrent(self) -> None:
+        source = _run_scan_source()
+        assert "calibrate_max_concurrent" in source, (
+            "RunScanInput must carry calibrate_max_concurrent and the calibrate "
+            "dispatch must be bounded by it"
+        )
+        assert "asyncio.gather(" in source, (
+            "the per-finding calibrations must be gathered (asyncio.gather), not "
+            "awaited one at a time"
+        )
+
+    def test_calibration_failure_keeps_raw_severity(self) -> None:
+        source = _run_scan_source()
+        # The per-finding closure swallows calibration failures (best-effort
+        # contract): it records the failure and returns the finding pair
+        # unchanged (`calibrated=False`) — a gathered batch must never
+        # propagate the exception into the scan.
+        assert '"calibrate.failed"' in source
+        assert "_CalibrateOutcome(" in source, (
+            "calibration outcomes must be returned as _CalibrateOutcome so a "
+            "failure is recorded post-gather instead of unwinding the batch"
+        )
+        assert "calibrated=False," in source, (
+            "a failed/skipped calibration must return the finding unchanged "
+            "(calibrated=False) so it keeps its raw severity"
+        )
+
+    def test_input_field_defaults_to_four(self) -> None:
+        source = _run_scan_source()
+        line = next(
+            line
+            for line in source.splitlines()
+            if line.strip().startswith("calibrate_max_concurrent")
+        )
+        assert ": int = 4" in line, (
+            "calibrate_max_concurrent must default to 4 for direct/test construction"
+        )
