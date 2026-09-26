@@ -193,6 +193,9 @@ class ScanDefaultsConfig(BaseModel):
     focus_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     hunt_max_iterations: int = 12
     hunt_max_concurrent: int = 8
+    # Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE
+    # (scan-stage-fanout). Same shape as hunt_max_concurrent.
+    validate_max_concurrent: int = 8
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40

@@ -213,6 +213,10 @@ class RunScanInput(BaseModel):
     # the TRACER stage (scan-stage-fanout). Trace is heavier per call than hunt,
     # so the default stays conservative.
     trace_max_concurrent: int = 4
+    # Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE
+    # (scan-stage-fanout). Mirrors hunt_max_concurrent; the API layer resolves
+    # it from scan_defaults.
+    validate_max_concurrent: int = 8
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -1574,58 +1578,136 @@ class RunScanWorkflow:
             validate_panel_json = panel_json_for_role(scan, "validate")
             # Candidates already promoted by the deterministic secret gate above.
             already_final = {f.id for f in final_findings}
-            for candidate in list(candidate_findings[hunt_new_start:]):
-                if val_over_budget:
-                    break  # budget exhausted: stop validating, continue the scan
-                if candidate.triage_label == "oos":
-                    continue  # skip OOS findings
-                if candidate.id in already_final:
-                    continue  # already promoted deterministically
-                try:
-                    validate_payload = await workflow.execute_activity(
-                        "validate-candidate-finding",
-                        args=[
-                            candidate.model_dump(mode="json"),
-                            repo_path,
-                            None,
-                            val_budget_remaining,
-                            validate_panel_json,
-                            scan_input.db_path,
-                            scan_input.validate_max_iterations,
-                            scan_input.scan_seed,
-                            artifact_root,
-                            kb_root_index_key,
-                        ],
-                        start_to_close_timeout=timedelta(hours=4),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
+            # Snapshot the eligible candidates BEFORE dispatch: candidates
+            # promoted by a sibling validation mid-flight must not be
+            # re-validated, and no cross-candidate mutation happens while the
+            # batch is in the air (post-gather loop below is the only writer).
+            eligible_candidates = [
+                candidate
+                for candidate in list(candidate_findings[hunt_new_start:])
+                if candidate.triage_label != "oos" and candidate.id not in already_final
+            ]
+
+            validate_max_concurrent = max(1, scan_input.validate_max_concurrent)
+            validate_semaphore = asyncio.Semaphore(validate_max_concurrent)
+            # Shared mid-batch budget tracker (workflow-local, mutated only
+            # inside semaphore-guarded closures): what stage-local spend is
+            # still allowed. None = uncapped. The validate activity itself
+            # enforces the real cap on the model loop; this gate only decides
+            # whether a queued candidate may dispatch at all.
+            val_remaining_spend: list[float] | None = (
+                [val_budget_remaining] if val_budget_remaining is not None else None
+            )
+
+            async def _validate_one_candidate(
+                candidate: CandidateFinding,
+            ) -> tuple[CandidateFinding, dict[str, Any] | None, Exception | None]:
+                """Validate a single candidate under the stage semaphore.
+
+                Returns ``(candidate, payload, failure)``. The failure slot is
+                an alias for ``return_exceptions=True`` isolation: the
+                exception travels in the result tuple, never out of the
+                closure, so one candidate crashing cannot fail the gathered
+                batch. Checked *inside* the closure (after acquiring the
+                semaphore) so a dispatched batch cannot blow through the
+                budget cap — once the budget is spent, queued dispatches
+                resolve without a model call.
+                """
+                async with validate_semaphore:
+                    if val_remaining_spend is not None and val_remaining_spend[0] <= 0.0:
+                        # Budget exhausted mid-batch: skip without dispatching.
+                        return (candidate, None, None)
+                    try:
+                        validate_payload = await workflow.execute_activity(
+                            "validate-candidate-finding",
+                            args=[
+                                candidate.model_dump(mode="json"),
+                                repo_path,
+                                None,
+                                val_budget_remaining,
+                                validate_panel_json,
+                                scan_input.db_path,
+                                scan_input.validate_max_iterations,
+                                scan_input.scan_seed,
+                                artifact_root,
+                                kb_root_index_key,
+                            ],
+                            start_to_close_timeout=timedelta(hours=4),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=self._retry_policy,
+                        )
+                    except Exception as exc:
+                        # One finding's validation failing must not fail the
+                        # scan — but record it so the degradation is visible,
+                        # not silent. Emit in input order post-gather.
+                        return (candidate, None, exc)
+                    if val_remaining_spend is not None:
+                        # Charge a conservative flat increment per completed
+                        # validation so queued siblings stop once the cap is
+                        # reached (the activity enforces the precise spend).
+                        val_remaining_spend[0] = max(
+                            0.0, val_remaining_spend[0] - _VALIDATE_COST_INCREMENT_USD
+                        )
+                    payload: dict[str, Any] | None = (
+                        cast("dict[str, Any]", validate_payload)
+                        if isinstance(validate_payload, dict)
+                        else None
                     )
-                except Exception as exc:
-                    # One finding's validation failing must not fail the scan —
-                    # but record it so the degradation is visible, not silent.
+                    return (candidate, payload, None)
+
+            # return_exceptions=True: the worker closures already capture their
+            # own failures; this is a second belt-and-braces layer so a bug in
+            # the closure itself degrades to a per-candidate event instead of
+            # failing the scan.
+            validate_results = await asyncio.gather(
+                *[_validate_one_candidate(c) for c in eligible_candidates],
+                return_exceptions=True,
+            )
+
+            # Post-gather: emit events in candidate INPUT order (deterministic
+            # replay), not completion order. The per-candidate verdict branches
+            # below are the serial flow, unchanged.
+            for result_item, candidate in zip(validate_results, eligible_candidates, strict=True):
+                if isinstance(result_item, BaseException):
+                    # Closure-level bug: record and keep the rest.
                     await _append_workflow_event(
                         scan_input.db_path,
                         scan.id,
                         "validate.failed",
-                        {"finding_id": candidate.id, "error": _describe_failure(exc)},
+                        {
+                            "finding_id": candidate.id,
+                            "error": _describe_failure(result_item),
+                        },
                     )
                     continue
+                candidate, validate_payload, failure = result_item
+                if failure is not None:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "validate.failed",
+                        {"finding_id": candidate.id, "error": _describe_failure(failure)},
+                    )
+                    continue
+                if validate_payload is None:
+                    # Budget exhausted before this candidate dispatched.
+                    continue
                 # Explicit 4-way verdict branch — never silently drop any verdict.
-                verdict = ""
-                if isinstance(validate_payload, dict):
-                    payload_dict = cast("dict[str, Any]", validate_payload)
-                    verdict = str(payload_dict.get("verdict", "")).lower()
-                    # Mirror the ensemble credibility posterior (design D3) onto the
-                    # candidate so it flows to whichever report section it lands in.
-                    credibility = payload_dict.get("credibility")
-                    ensemble = payload_dict.get("ensemble")
-                    if credibility is not None or ensemble:
-                        candidate = candidate.model_copy(
-                            update={
-                                "credibility": credibility,
-                                "ensemble": ensemble or [],
-                            }
-                        )
+                # validate_payload is dict[str, Any] here (the None budget-skip
+                # path already continued above).
+                payload_dict = validate_payload
+                verdict = str(payload_dict.get("verdict", "")).lower()
+                # Mirror the ensemble credibility posterior (design D3) onto the
+                # candidate so it flows to whichever report section it lands in.
+                credibility = payload_dict.get("credibility")
+                ensemble = payload_dict.get("ensemble")
+                if credibility is not None or ensemble:
+                    candidate = candidate.model_copy(
+                        update={
+                            "credibility": credibility,
+                            "ensemble": ensemble or [],
+                        }
+                    )
 
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
@@ -2921,6 +3003,13 @@ async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]
         msg = f"Unexpected final findings payload: {type(payload).__name__}"
         raise TypeError(msg)
     return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
+
+
+# Conservative per-validation charge used by the AGENTIC_VALIDATE fan-out's
+# mid-batch budget gate (scan-stage-fanout). The validate activity enforces the
+# precise model-loop spend; this flat increment only decides whether a queued
+# candidate may dispatch once the stage-local cap is spent.
+_VALIDATE_COST_INCREMENT_USD = 0.05
 
 
 def budget_decision(cap: float | None, spent: float) -> tuple[bool, float | None]:
