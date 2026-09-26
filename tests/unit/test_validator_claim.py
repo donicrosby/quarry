@@ -57,6 +57,27 @@ class TestValidatorClaim:
         assert claim.vuln_class == VulnerabilityClass.COMMAND_INJECTION
         assert claim.description == finding.hypothesis
 
+    def test_claim_prefers_evidence_path_over_symbol_garbage(self) -> None:
+        """Run-5 regression: affected_component can be a symbol path like
+        'app.py::config [http_handler]' which parses to a nonexistent file and
+        self-fails source_coherence. evidence_path[0] is the clean locator."""
+        from quarry.schemas import EvidencePathElement
+
+        finding = _make_finding(affected_component="app.py::config [http_handler]")
+        finding = finding.model_copy(
+            update={"evidence_path": [EvidencePathElement(path="app.py", line=48)]}
+        )
+        claim = validate_claim_from_finding(finding)
+        assert claim.file == "app.py"
+        assert claim.line_start == 48
+
+    def test_claim_strips_symbol_decoration_from_component(self) -> None:
+        """'app.py::read_user (line 52)' → file 'app.py', line 52."""
+        finding = _make_finding(affected_component="app.py::read_user (line 52)")
+        claim = validate_claim_from_finding(finding)
+        assert claim.file == "app.py"
+        assert claim.line_start == 52
+
     def test_claim_does_not_contain_hunter_reasoning(self) -> None:
         finding = _make_finding(reasoning="Hunter saw the param flow to exec()")
         claim = validate_claim_from_finding(finding)

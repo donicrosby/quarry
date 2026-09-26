@@ -131,11 +131,16 @@ def _check_actions(payload: dict[str, Any], role: str) -> GuardRejection | None:
 def _parse_file_and_lines(
     affected_component: str | None,
 ) -> tuple[str | None, int | None, int | None]:
-    """Extract (file, line_start, line_end) from 'path/file.js:42-55' notation."""
+    """Extract (file, line_start, line_end) from 'path/file.js:42-55' notation.
+
+    Tolerates hunter-emitted symbol decorations — 'app.py::read_user (line 52)'
+    and 'app.py::config [http_handler]' — by stripping the '::symbol' suffix and
+    recovering a '(line N)' annotation. A bare symbol path with no recoverable
+    line is file-only.
+    """
     if not affected_component:
         return None, None, None
 
-    # Strip leading/trailing whitespace
     component = affected_component.strip()
 
     # Try 'file:start-end' or 'file:start'
@@ -145,6 +150,13 @@ def _parse_file_and_lines(
         start = int(m.group(2))
         end = int(m.group(3)) if m.group(3) else start
         return file_path, start, end
+
+    # 'file.py::symbol (line N)' / 'file.py::symbol [role]' decorations.
+    sym = re.match(r"^(.+?)::[^\s(]+(?:\s*\(line\s+(\d+)\))?", component)
+    if sym:
+        file_path = sym.group(1)
+        line = int(sym.group(2)) if sym.group(2) else None
+        return file_path, line, line
 
     # No line numbers — just a file path
     return component, None, None
@@ -163,7 +175,22 @@ def validate_claim_from_finding(finding: CandidateFinding) -> ValidatorClaim:
       - reasoning / hunter tool trace
       - hunter_provider / hunter model name
       - any other CandidateFinding provenance field
+
+    evidence_path[0] (the sink locator) is preferred over parsing
+    affected_component — hunters sometimes emit symbol paths there
+    (app.py::config [http_handler]) that don't resolve to a file and
+    would self-fail the validator's source-coherence check.
     """
+    if finding.evidence_path:
+        sink = finding.evidence_path[0]
+        return ValidatorClaim(
+            file=sink.path,
+            line_start=sink.line,
+            line_end=sink.line,
+            vuln_class=finding.vuln_class,
+            description=finding.hypothesis,
+            affected_code_snippet=None,
+        )
     file_path, line_start, line_end = _parse_file_and_lines(finding.affected_component)
     return ValidatorClaim(
         file=file_path,

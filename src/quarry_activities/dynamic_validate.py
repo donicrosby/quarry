@@ -162,6 +162,22 @@ def dynamic_validate_impl(
             invocations=client.invocations,
         )
 
+    sink = event_sink
+    if result.unauthorized_tool_denials and sink is not None:
+        # Role-policy denial inside the loop — historically this silently
+        # produced an inconclusive verdict and dropped every non-secrets
+        # finding (scan b4faf0a6). Emit a loud, queryable event.
+        sink(
+            "dynamic_validate.tool_access_denied",
+            {
+                "scan_id": finding.scan_id,
+                "finding_title": finding.title,
+                "vuln_class": finding.vuln_class.value,
+                "denied_tools": list(result.unauthorized_tool_denials),
+                "stop_reason": result.stop_reason,
+            },
+        )
+
     if result.final_answer and isinstance(result.final_answer, DynamicValidateResponse):
         return result.final_answer
 

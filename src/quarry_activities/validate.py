@@ -39,6 +39,7 @@ from quarry_models.checklist import enforce_checklist_invariants
 from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
+from quarry_models.mitigation_gate import sanitize_checklist_fails
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
@@ -63,11 +64,28 @@ class RefuteResponse(BaseModel):
 
     The debater argues to refute the candidate and emits NO new findings — its
     ``refuted`` flag is the only stance it contributes to the ensemble.
+
+    A bare ``refuted=True`` with no reasons is a degenerate refutation (the
+    model kept the false-positive default without grounding it in code) and is
+    rejected at the schema boundary when any other field was populated — an
+    untouched all-default instance is allowed so the safe default stance can be
+    constructed programmatically.
     """
 
     refuted: bool = False
     reasons: list[str] = []
     tool_calls: list[ToolCallRequest] = []
+
+    @model_validator(mode="after")
+    def _refute_must_be_grounded(self) -> RefuteResponse:
+        if self.refuted and not self.reasons and self.tool_calls:
+            msg = (
+                "refuted=true with tool calls but empty reasons is not a "
+                "grounded verdict; name the disproving evidence (cite "
+                "file:line) or set refuted=false."
+            )
+            raise ValueError(msg)
+        return self
 
 
 class ChecklistRefuteResponse(RefuteResponse):
@@ -95,6 +113,14 @@ class ChecklistRefuteResponse(RefuteResponse):
                 "Re-emit with refuted=true or correct the checklist entry."
             )
             raise ValueError(msg)
+        if self.refuted and not failed and not self.reasons and self.checklist:
+            msg = (
+                "refuted=true with a recorded checklist but no FAIL entry and "
+                "empty reasons is not a grounded verdict; name the constraint "
+                "that fails with code evidence (or give reasons citing "
+                "file:line), or set refuted=false."
+            )
+            raise ValueError(msg)
         return self
 
 
@@ -106,6 +132,16 @@ def _last_invocation_id(client: Any) -> str | None:
     last = cast("Any", invocations[-1])
     candidate_id = getattr(last, "id", None)
     return candidate_id if isinstance(candidate_id, str) else None
+
+
+# Prompt template versions for the validate ensemble. v1.1.0 adds the
+# presence-based clause (secrets claims have no source→sink path to re-derive;
+# the artifact itself is the claim) — v1.0.0 structurally rejected every
+# hardcoded-secret claim via the mandatory trust_boundary check. v1.2.0 adds
+# the redaction-disclosure notice: validators were rejecting genuine secrets
+# because the scrubber's own [REDACTED_SECRET_N] mask read as a placeholder.
+VALIDATE_PROMPT_VERSION = "1.2.0"
+REFUTE_PROMPT_VERSION = "1.3.0"
 
 
 def _run_debater(
@@ -142,7 +178,7 @@ def _run_debater(
         registry=registry,
         role="validate",
         name=debater_tier.prompt_regime or "refute",
-        version="1.0.0",
+        version=REFUTE_PROMPT_VERSION,
         variables={
             "vuln_class": claim.vuln_class.value,
             "file": claim.file or "",
@@ -280,7 +316,7 @@ def validate_impl(
         registry=registry,
         role="validate",
         name="validate",
-        version="1.0.0",
+        version=VALIDATE_PROMPT_VERSION,
         variables={
             "vuln_class": claim.vuln_class.value,
             "file": claim.file or "",
@@ -387,6 +423,11 @@ def validate_impl(
             checklist_enabled=checklist_enabled,
         )
         refuted = refute.refuted if refute is not None else False
+        # Deterministic backstop (run-5): a mitigation_stretching FAIL whose
+        # evidence names no real defensive primitive (e.g. cites only
+        # `timeout`/`capture_output` on a shell=True sink) is downgraded to
+        # unresolved so it cannot drive a rejection.
+        recorded_checklist = sanitize_checklist_fails(recorded_checklist, repo_root=repo_path)
         # Default-false-positive stance: when the checklist refuter keeps the
         # default (undischarged / refuted), a reasoner "validated" verdict is not
         # promoted — it is retained as needs_proof, never silently dropped.

@@ -138,6 +138,7 @@ class TestOneOutcomePerConstraint:
                     _item(ChecklistConstraint.TRUST_BOUNDARY, ChecklistOutcome.PASS),
                     _item(ChecklistConstraint.SOURCE_COHERENCE, ChecklistOutcome.PASS),
                 ],
+                reasons=["remaining constraints unresolved from code read"],
             )
         )
 
@@ -232,7 +233,13 @@ class TestDefaultFalsePositiveStance:
         It is retained as needs_proof (never silently dropped), and the
         debater's stance stays rejecting.
         """
-        result = _validate(ChecklistRefuteResponse(refuted=True, checklist=[]))
+        result = _validate(
+            ChecklistRefuteResponse(
+                refuted=True,
+                checklist=[],
+                reasons=["no code-backed disproof found; default stance kept"],
+            )
+        )
 
         assert result.verdict != "validated"
         assert result.verdict == "needs_proof"
@@ -246,6 +253,7 @@ class TestDefaultFalsePositiveStance:
             ChecklistRefuteResponse(
                 refuted=True,
                 checklist=[_item(ChecklistConstraint.TRUST_BOUNDARY, ChecklistOutcome.UNRESOLVED)],
+                reasons=["trust boundary unresolved from code read"],
             )
         )
 

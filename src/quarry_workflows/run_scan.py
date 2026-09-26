@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, NamedTuple, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,6 +19,8 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.fingerprints import compute_fingerprint as _compute_fingerprint
+from quarry.fingerprints import compute_root_cause_key as _compute_root_cause_key
 from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
 from quarry.schemas import (
@@ -28,7 +30,9 @@ from quarry.schemas import (
     ArtifactRef,
     CallGraph,
     CandidateFinding,
+    Confidence,
     DynamicEvidenceLink,
+    EvidencePathElement,
     ExploitChain,
     ExploitStep,
     FinalFinding,
@@ -82,6 +86,7 @@ from quarry_activities.inputs import (
     RenderReportInput,
     RenderReportOutput,
     SandboxExecActivityInput,
+    ScanSecretsInput,
     ValidateCandidateInput,
 )
 from quarry_activities.read_artifact import body_text_from_response_artifact
@@ -677,6 +682,47 @@ class RunScanWorkflow:
         # in round 0, gapfill/feedback tasks thereafter) shares one binding.
         hunt_panel_json: str | None = panel_json_for_role(scan, "hunt")
 
+        # ── Deterministic SSRF sink sweep (run-8 detection-gap fix) ──────────
+        # The SSRF hunt task is a single model roll: scan 24af6f8d read the
+        # fixture app's obvious fetch_local/urlopen sink and emitted no finding,
+        # while every model-side safety net (gapfill, hunter self-gaps) failed
+        # silently. Same answer as secrets (the sweep above): detect outbound-
+        # request sinks deterministically and feed them through the SAME
+        # agentic ensemble + per-class SSRF dynamic evaluator as hunter
+        # candidates — the sweep owns detection, the ensemble owns
+        # exploitability adjudication. Runs once before the coverage loop;
+        # resume-safe via the existing candidate-id dedup in each round.
+        if VulnerabilityClass.SSRF in scan.profile.vuln_classes:
+            ssrf_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-ssrf-sinks",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            ssrf_candidates = ssrf_candidates_from_activity_payload(
+                ssrf_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in ssrf_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "ssrf-sweep"},
+                )
+
         # ── Live-exploitation track (Shannon pillar; design D1) ──────────────
         # When live exploitation is authorized, the app-centric loop (live recon →
         # stateful propose→dispatch exploit chain) runs against the target and feeds
@@ -904,6 +950,7 @@ class RunScanWorkflow:
             scan_input,
             scan,
             agent_tasks,
+            candidate_findings,
             final_findings,
             artifact_root,
         )
@@ -1427,6 +1474,78 @@ class RunScanWorkflow:
                                 {"finding_id": candidate.id},
                             )
 
+            # ── Deterministic secrets sweep (full-scan parity with diff scans) ──
+            # The plugin-based secrets scanner only ran in RunDiffScanWorkflow;
+            # full scans relied on the hunt agent, whose candidates carry no
+            # key_name and were structurally rejected by the source→sink-shaped
+            # validation rubric (see VALIDATE_PROMPT_VERSION 1.1.0). Sweep the
+            # repo deterministically and feed matches through the same
+            # key_name auto-promotion gate as agent findings.
+            if VulnerabilityClass.SECRETS in scan.profile.vuln_classes:
+                secret_matches_raw = await workflow.execute_activity(
+                    "scan-repo-for-secrets",
+                    ScanSecretsInput(repo_root=repo_path),
+                    start_to_close_timeout=timedelta(minutes=10),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                secret_candidates = secret_candidates_from_activity_payload(
+                    secret_matches_raw,
+                    scan_id=scan.id,
+                    created_at=workflow.now(),
+                )
+                existing_ids = {c.id for c in candidate_findings}
+                for candidate in secret_candidates:
+                    if candidate.id in existing_ids:
+                        continue  # re-round: sweep candidate already recorded
+                    existing_ids.add(candidate.id)
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(candidate)},
+                    )
+                    candidate_findings.append(candidate)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.candidate_created",
+                        {"finding_id": candidate.id, "source": "secrets-sweep"},
+                    )
+                    # key_name metadata routes these through the deterministic
+                    # gate (below) — the agentic ensemble never sees them, so
+                    # the presence-based rubric change cannot FPs them in.
+                    validation_payload = await workflow.execute_activity(
+                        "validate-secret-candidate",
+                        ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=self._retry_policy,
+                    )
+                    validation = _validation_result_from_activity(validation_payload)
+                    if validation.is_valid:
+                        final = final_from_candidate(candidate, scan.id, workflow.now())
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_final_finding",
+                            {"finding": _model_json_dict(final)},
+                        )
+                        final_findings.append(final)
+                        await self._emit_and_dispatch(
+                            scan_input,
+                            scan,
+                            artifact_root,
+                            "finding.validated",
+                            {"finding_id": final.id},
+                            finding=final,
+                            severity=final.severity,
+                        )
+                    else:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "finding.rejected",
+                            {"finding_id": candidate.id},
+                        )
+
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
 
         # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
@@ -1654,9 +1773,16 @@ class RunScanWorkflow:
                                 "dynamic_validate.failed",
                                 {"finding_id": candidate.id, "error": _describe_failure(exc)},
                             )
-                        probe_specs = select_dynamic_probe_specs(proposed_http_specs, retained)
-                        if probe_specs and scan_input.target_url is not None:
+                        # SSRF's fallback pair derives its nested URL from the
+                        # target's own origin, so resolve the endpoint BEFORE
+                        # selecting specs (SQLi's static pair ignores it).
+                        target_ep: TargetEndpoint | None = None
+                        if scan_input.target_url is not None:
                             target_ep = build_target_endpoint_from_url(scan_input.target_url)
+                        probe_specs = select_dynamic_probe_specs(
+                            proposed_http_specs, retained, target_ep
+                        )
+                        if probe_specs and target_ep is not None:
                             probe_allowed_hosts = scan_input.allowed_hosts or (
                                 target_ep.host,
                                 "127.0.0.1",
@@ -1757,7 +1883,15 @@ class RunScanWorkflow:
                             "save_candidate_finding",
                             {"finding": _model_json_dict(retained)},
                         )
+                        # Keep the accumulator in sync so later stages (TRACER)
+                        # persist the annotated candidate, not a stale copy.
+                        sync_candidate_accumulator(candidate_findings, retained)
                         needs_proof_findings.append(retained)
+                        needs_proof_reason = promotion_exhaustion_reason(
+                            dynamic_active=dynamic_active,
+                            live_verdict=dyn_verdict if dynamic_active else "",
+                            proof_enabled=scan_input.proof_enabled,
+                        )
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
@@ -1766,6 +1900,7 @@ class RunScanWorkflow:
                                 "finding_id": candidate.id,
                                 "verdict": verdict,
                                 "live_verdict": dyn_verdict if dynamic_active else "",
+                                "promotion_exhausted": needs_proof_reason or "",
                             },
                         )
                 elif verdict == "rejected":
@@ -2254,23 +2389,16 @@ class RunScanWorkflow:
         scan_input: "RunScanInput",
         scan: Scan,
         agent_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
         final_findings: list[FinalFinding],
         artifact_root: str,
     ) -> str:
         """Build and persist the coverage ledger over AgentTasks, returning JSON."""
         requested = tuple(vc.value for vc in scan.profile.vuln_classes)
         completed_classes = tuple(sorted({f.vuln_class.value for f in final_findings}))
-        # Skipped = tasks that ran but produced no finding
-        skipped: list[dict[str, str]] = [
-            {
-                "task_id": t.id,
-                "vuln_class": t.vuln_class.value if t.vuln_class else "",
-                "scope": t.scope or "",
-                "reason": "no finding from hunt agent",
-            }
-            for t in agent_tasks
-            if not any(f.vuln_class == t.vuln_class for f in final_findings)
-        ]
+        # Skipped rows distinguish hunt failure from promotion failure — blaming
+        # the hunter for candidates that died in validation hides those defects.
+        skipped = skipped_task_records(agent_tasks, candidate_findings, final_findings)
         payload = await workflow.execute_activity(
             "build-coverage-ledger",
             BuildCoverageLedgerInput(
@@ -2982,10 +3110,12 @@ def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:
 # Each path is a minimal, safe GET probe that confirms the endpoint is reachable.
 # For production, the dynamic_validate agent proposes the spec; these defaults are
 # used when no agent-proposed spec is available (e.g., simplified demo probes).
+# NOTE: SSRF deliberately has NO entry here — a static path would hardcode the
+# nested-fetch origin (the old port-80 string hit nothing); SSRF fallbacks are
+# built target-origin-aware in ``build_dynamic_probe_spec_pair`` instead.
 _CLASS_PROBE_PATHS: dict[str, str] = {
     VulnerabilityClass.IDOR.value: "/users/1",
     VulnerabilityClass.COMMAND_INJECTION.value: "/debug/ping?host=127.0.0.1",
-    VulnerabilityClass.SSRF.value: "/fetch-local?url=http://127.0.0.1",
     VulnerabilityClass.XSS.value: "/",
 }
 
@@ -2999,6 +3129,37 @@ _CLASS_PROBE_PAIR_PATHS: dict[str, tuple[str, str]] = {
         "/items?id=1%20AND%201%3D2",
     ),
 }
+
+# Nested (inner) URL path fetched through the SSRF sink's fetch parameter, and
+# the reserved authority used for the SSRF baseline (RFC 2606 .invalid — can
+# never resolve, so a prefix-validating guard is the only thing that can make
+# the baseline responses differ from a genuine nested fetch of the target).
+_SSRF_NESTED_PATH = "/users/1"
+_SSRF_BASELINE_HOST = "ssrf-baseline.invalid"
+
+
+def _ssrf_fallback_pair_paths(target_ep: TargetEndpoint) -> tuple[str, str]:
+    """Build the SSRF userinfo-bypass pair paths for the SCAN TARGET's origin.
+
+    Probe egress is allow-listed to the scan target's own host, so the nested
+    (inner) URL points at the target ITSELF — scheme/host/port derived from
+    *target_ep*, never a hardcoded localhost port.  Primary embeds the classic
+    userinfo bypass (``http://localhost@<origin>/users/1``): a naive
+    ``startswith("http://localhost")`` prefix check passes while the fetch
+    connects to the host after ``@``.  Baseline requests the same nested path
+    on a reserved, never-resolving authority — without the bypass the guard
+    must reject it (or the fetch fails), which is exactly the differential.
+    Pure; constructs path strings only, performs no HTTP.
+    """
+    base_path = target_ep.base_path.rstrip("/")
+    nested = f"{base_path}{_SSRF_NESTED_PATH}"
+    origin = f"{target_ep.host}:{target_ep.port}"
+    bypass_url = f"http://localhost@{origin}{nested}"
+    baseline_url = f"http://{_SSRF_BASELINE_HOST}{nested}"
+    return (
+        f"/fetch-local?url={quote(bypass_url, safe='')}",
+        f"/fetch-local?url={quote(baseline_url, safe='')}",
+    )
 
 
 def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | None:
@@ -3019,17 +3180,28 @@ def build_dynamic_probe_spec(candidate: CandidateFinding) -> HttpRequestSpec | N
 
 def build_dynamic_probe_spec_pair(
     candidate: CandidateFinding,
+    target_ep: TargetEndpoint | None = None,
 ) -> tuple[HttpRequestSpec, HttpRequestSpec] | None:
-    """Build the deterministic TRUE/FALSE GET probe pair for a differential class.
+    """Build the deterministic differential GET pair for a pair-needing class.
 
-    Returns None for classes that do not need a pair (only SQL_INJECTION today)
-    or that cannot be probed over HTTP at all (e.g. secrets).  The dynamic_validate
-    agent's own proposed pair is preferred when well-formed; this is the fallback.
+    SQL_INJECTION uses the static TRUE/FALSE payload pair above.  SSRF has no
+    static pair — its nested (inner) URL must derive from the scan target's own
+    origin (probe egress is target-scoped), so it needs *target_ep* and returns
+    None without it (never a hardcoded localhost-port guess; the agent's own
+    proposals then carry the attempt).  Returns None for classes that need no
+    pair or that cannot be probed over HTTP at all (e.g. secrets).  The
+    dynamic_validate agent's own proposed pair is preferred when well-formed;
+    this is the fallback.  Constructs specs only — never executes HTTP.
     """
-    pair = _CLASS_PROBE_PAIR_PATHS.get(candidate.vuln_class.value)
-    if pair is None:
-        return None
-    true_path, false_path = pair
+    if candidate.vuln_class is VulnerabilityClass.SSRF:
+        if target_ep is None:
+            return None
+        true_path, false_path = _ssrf_fallback_pair_paths(target_ep)
+    else:
+        pair = _CLASS_PROBE_PAIR_PATHS.get(candidate.vuln_class.value)
+        if pair is None:
+            return None
+        true_path, false_path = pair
     return (
         HttpRequestSpec(method="GET", path=true_path),
         HttpRequestSpec(method="GET", path=false_path),
@@ -3053,14 +3225,17 @@ def _well_formed_probe_spec(raw: Any) -> HttpRequestSpec | None:
 def select_dynamic_probe_specs(
     proposed_http_specs: list[Any],
     candidate: CandidateFinding,
+    target_ep: TargetEndpoint | None = None,
 ) -> list[HttpRequestSpec]:
     """Pick the probe specs to dispatch for a dynamic-validation attempt.
 
-    Differential classes (registry ``min_probes`` = 2, e.g. SQL_INJECTION) get
-    up to TWO well-formed proposals — primary (TRUE payload) + baseline (FALSE
-    payload).  When the agent proposed fewer usable specs than the class needs,
-    the deterministic per-class pair fills the gap (single proposal → proposal
-    as primary + built FALSE baseline; none → full deterministic pair).
+    Differential classes (registry ``min_probes`` = 2, e.g. SQL_INJECTION and
+    SSRF) get up to TWO well-formed proposals — primary + baseline.  When the
+    agent proposed fewer usable specs than the class needs, the deterministic
+    per-class pair fills the gap (single proposal → proposal as primary + built
+    baseline; none → full deterministic pair).  SSRF's fallback pair needs the
+    scan target's origin: pass *target_ep* (the caller already resolves it for
+    dispatch); without it SSRF dispatches only what the agent proposed.
 
     Single-probe classes (``min_probes`` = 1 — every unregistered class) get
     exactly one spec: the first well-formed proposal, else the deterministic
@@ -3082,10 +3257,15 @@ def select_dynamic_probe_specs(
         return selected
     # Fewer usable proposals than needed → fill from the deterministic fallbacks.
     if max_specs > 1:
-        pair = build_dynamic_probe_spec_pair(candidate)
+        pair = build_dynamic_probe_spec_pair(candidate, target_ep)
         if pair is None:
             return selected
         fallback = list(pair)
+        if selected:
+            # A usable proposal already occupies the PRIMARY slot → the built
+            # BASELINE is the complement that completes the pair (the built
+            # primary is another true-shaped probe, not a baseline).
+            fallback.reverse()
     else:
         single = build_dynamic_probe_spec(candidate)
         if single is None:
@@ -3539,3 +3719,271 @@ def _report_artifact_ref(report_path: Path) -> ArtifactRef:
         created_at=utc_now(),
         metadata={"path": str(report_path)},
     )
+
+
+def secret_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-secrets`` activity payload (raw dict list) to
+    key_name-carrying CandidateFindings for the full-scan HUNT stage.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected secret match payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
+        if record is None:
+            continue
+        key_name = str(record.get("key_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(str(record.get("line_number", 0) or 0))
+        if not key_name or not file_path or line_number <= 0:
+            continue
+        candidates.append(
+            _secret_candidate_from_match_record(
+                key_name=key_name,
+                file_path=file_path,
+                line_number=line_number,
+                scan_id=scan_id,
+                created_at=created_at,
+            )
+        )
+    return candidates
+
+
+def _secret_candidate_from_match_record(
+    *,
+    key_name: str,
+    file_path: str,
+    line_number: int,
+    scan_id: str,
+    created_at: datetime,
+) -> CandidateFinding:
+    """Workflow-deterministic mirror of the plugin's candidate builder.
+
+    Same fingerprint inputs as ``quarry_plugins.vuln_classes.secrets`` so a
+    secret found by both the deterministic sweep and an agent gets the same
+    candidate id (dedup then collapses them).
+    """
+    fingerprint = _compute_fingerprint(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=file_path,
+        start_line=line_number,
+        key_name=key_name,
+        evidence_kind="hardcoded_assignment",
+    )
+    root_cause_key = _compute_root_cause_key(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=file_path,
+        sink=key_name,
+    )
+    return CandidateFinding(
+        id=fingerprint[:32],
+        scan_id=scan_id,
+        workspace_id="local",
+        vuln_class=VulnerabilityClass.SECRETS,
+        title=f"Hardcoded secret: {key_name}",
+        hypothesis=f"Variable '{key_name}' in {file_path}:{line_number} "
+        f"contains a hardcoded value that may be a secret.",
+        root_cause_key=root_cause_key,
+        affected_component=file_path,
+        source_refs=[
+            SourceRef(
+                file_path=file_path,
+                start_line=line_number,
+                end_line=line_number,
+                symbol=key_name,
+            )
+        ],
+        evidence_path=[],
+        confidence=Confidence.MEDIUM,
+        created_by="secrets-scanner",
+        created_at=created_at,
+        metadata={
+            "key_name": key_name,
+            "evidence_kind": "hardcoded_assignment",
+        },
+    )
+
+
+def ssrf_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-ssrf-sinks`` activity payload to SSRF candidates.
+
+    Deterministic-sweep parity with ``secret_candidates_from_activity_payload``:
+    the SSRF hunt task is a single model roll and missed the fixture app's
+    obvious urlopen sink in run 8 (24af6f8d) while every model-side safety net
+    silently failed. Sweep candidates are ordinary candidates — exploitability
+    adjudication stays with the agentic ensemble + per-class dynamic
+    evaluator; ``metadata.source == "ssrf-sweep"`` keeps provenance visible.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected SSRF sink payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
+        if record is None:
+            continue
+        sink_name = str(record.get("sink_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(str(record.get("line_number", 0) or 0))
+        url_source = str(record.get("url_source", ""))
+        if not sink_name or not file_path or line_number <= 0:
+            continue
+        fingerprint = _compute_fingerprint(
+            vuln_class=VulnerabilityClass.SSRF,
+            file_path=file_path,
+            start_line=line_number,
+            key_name=sink_name,
+            evidence_kind="outbound_request_sink",
+        )
+        root_cause_key = _compute_root_cause_key(
+            vuln_class=VulnerabilityClass.SSRF,
+            file_path=file_path,
+            sink=sink_name,
+        )
+        candidates.append(
+            CandidateFinding(
+                id=fingerprint[:32],
+                scan_id=scan_id,
+                workspace_id="local",
+                vuln_class=VulnerabilityClass.SSRF,
+                title=f"Outbound request sink: {sink_name}({url_source or '...'})",
+                hypothesis=f"'{sink_name}' in {file_path}:{line_number} issues an "
+                f"outbound server-side request whose destination is the variable "
+                f"'{url_source}' — if that value is influenced by untrusted input "
+                f"without scheme/host validation, this is exploitable SSRF.",
+                root_cause_key=root_cause_key,
+                affected_component=file_path,
+                source_refs=[
+                    SourceRef(
+                        file_path=file_path,
+                        start_line=line_number,
+                        end_line=line_number,
+                        symbol=sink_name,
+                    )
+                ],
+                evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
+                confidence=Confidence.MEDIUM,
+                created_by="ssrf-sweep",
+                created_at=created_at,
+                metadata={
+                    "source": "ssrf-sweep",
+                    "evidence_kind": "outbound_request_sink",
+                    "sink_name": sink_name,
+                    "url_source": url_source,
+                },
+            )
+        )
+    return candidates
+
+
+def skipped_task_records(
+    tasks: list[Any],
+    candidates: list[CandidateFinding],
+    finals: list[FinalFinding],
+    *,
+    _promoted_classes: set[VulnerabilityClass] | None = None,
+) -> list[dict[str, str]]:
+    """Coverage-ledger skipped rows: distinguish hunt failure from promotion failure.
+
+    A task is only "no finding from hunt agent" when no candidate of its class
+    ever existed. When candidates existed but none made it to final, the honest
+    reason is "candidate not promoted" — blaming the hunter hides validation
+    and dynamic-probe defects (the 2caa3abc lesson: ledger said "no finding"
+    while three high-confidence candidates sat in needs_proof/rejected).
+    """
+    promoted_classes = _promoted_classes
+    if promoted_classes is None:
+        promoted_classes = {f.vuln_class for f in finals}
+    candidate_classes = {c.vuln_class for c in candidates}
+    records: list[dict[str, str]] = []
+    for t in tasks:
+        task_class = getattr(t, "vuln_class", None)
+        if task_class is None:
+            continue
+        if task_class in promoted_classes:
+            continue
+        if task_class in candidate_classes:
+            records.append(
+                {
+                    "task_id": str(getattr(t, "id", "")),
+                    "vuln_class": task_class.value,
+                    "scope": str(getattr(t, "scope", "") or ""),
+                    "reason": "candidate not promoted",
+                }
+            )
+        else:
+            records.append(
+                {
+                    "task_id": str(getattr(t, "id", "")),
+                    "vuln_class": task_class.value,
+                    "scope": str(getattr(t, "scope", "") or ""),
+                    "reason": "no finding from hunt agent",
+                }
+            )
+    return records
+
+
+def sync_candidate_accumulator(
+    accumulator: list[CandidateFinding],
+    updated: CandidateFinding,
+) -> None:
+    """Replace *updated* in *accumulator* by id (append when absent).
+
+    The needs_proof branch annotates a candidate with its live_verdict but never
+    synced it back, so TRACER later re-persisted the stale row and clobbered the
+    annotation (run 4: needs_proof rows in the DB lost their live_verdict).
+    """
+    for idx, existing in enumerate(accumulator):
+        if existing.id == updated.id:
+            accumulator[idx] = updated
+            return
+    accumulator.append(updated)
+
+
+def promotion_exhaustion_reason(
+    *,
+    dynamic_active: bool,
+    live_verdict: str,
+    proof_enabled: bool,
+) -> str | None:
+    """Why a needs_proof finding has no remaining promotion path (or None when
+    one exists).  Surfaced on the finding.needs_proof event so dead-ends are
+    visible in the audit trail instead of silently parking findings.
+
+    - corroborated + prove enabled  → PROVE can still promote (no dead end)
+    - inconclusive + no prove       → the 2caa3abc ssrf dead end
+    - no dynamic + no prove         → pipeline never had a promotion path for it
+    """
+    if dynamic_active and live_verdict == "corroborated" and proof_enabled:
+        return None
+    if dynamic_active and live_verdict == "inconclusive" and not proof_enabled:
+        return (
+            "dynamic probe inconclusive and proof disabled — "
+            "no remaining promotion path for this finding"
+        )
+    if not dynamic_active and not proof_enabled:
+        return "no dynamic validation and proof disabled for this scan"
+    return None
