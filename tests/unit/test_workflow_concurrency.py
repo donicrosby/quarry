@@ -1132,13 +1132,13 @@ FIXTURE_REPO = Path("examples/vulnerable-fastapi").resolve()
 _SKIP_REASON = "examples/vulnerable-fastapi not present"
 
 
-_CAL_NOW = datetime(2026, 9, 11, tzinfo=UTC)
+_NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
 
 _state_lock = threading.Lock()
 
 
-_CAL_CURRENT_SCAN_ID: list[str] = ["cal-fanout"]
+_current_scan_id: list[str] = ["cal-fanout"]
 
 
 _hunt_call_count: list[int] = [0]
@@ -1158,11 +1158,12 @@ def _candidate_payload(finding_id: str, scan_id: str) -> dict[str, object]:
         "confidence": "high",
         "status": "candidate",
         "created_by": "hunt-agent",
-        "created_at": _CAL_NOW.isoformat(),
+        "created_at": _NOW.isoformat(),
         "metadata": {},
     }
 
 
+@activity.defn(name="hunt-vuln-class")
 def _one_finding_per_task_hunt_activity(
     task: object,
     repo_path: str | None = None,
@@ -1182,7 +1183,7 @@ def _one_finding_per_task_hunt_activity(
     with _state_lock:
         n = _hunt_call_count[0]
         _hunt_call_count[0] += 1
-        scan_id = _CAL_CURRENT_SCAN_ID[0]
+        scan_id = _current_scan_id[0]
     return {
         "findings": [_candidate_payload(f"cf-{scan_id}-{n}", scan_id)],
         "coverage_gaps": [],
@@ -1229,6 +1230,7 @@ def _calibrate_payload() -> dict[str, object]:
     }
 
 
+@activity.defn(name="calibrate-finding")
 def _counting_calibrate_activity(
     finding: object,
     repo_path: str | None = None,
@@ -1263,6 +1265,7 @@ def _counting_calibrate_activity(
     return _calibrate_payload()
 
 
+@activity.defn(name="tracer-finding")
 def _indeterminate_tracer_activity(
     finding: object,
     call_graph: object,
@@ -1360,7 +1363,7 @@ async def _run_calibrate_fan_out_scan(
     db_path = tmp_path / "quarry.db"
     output_dir = tmp_path / "output"
     with _state_lock:
-        _CAL_CURRENT_SCAN_ID[0] = scan_id
+        _current_scan_id[0] = scan_id
         _hunt_call_count[0] = 0
     executor = ThreadPoolExecutor(max_workers=8)
     worker = _build_fan_out_worker(temporal_client, f"{scan_id}-queue", executor)

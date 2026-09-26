@@ -187,6 +187,28 @@ def test_scan_defaults_dynamic_validate_max_concurrent_parses_from_toml(tmp_path
     assert cfg.scan_defaults.dynamic_validate_max_concurrent == 2
 
 
+def test_scan_defaults_trace_and_calibrate_max_concurrent_defaults(tmp_path: Path) -> None:
+    """Tracer and calibrate fan-out knobs resolve from scan_defaults (trace=4, calibrate=4)."""
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert cfg.scan_defaults.trace_max_concurrent == 4
+    assert cfg.scan_defaults.calibrate_max_concurrent == 4
+
+
+def test_scan_defaults_trace_and_calibrate_max_concurrent_parse_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\n"
+        "trace_max_concurrent = 2\n"
+        "calibrate_max_concurrent = 3\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.trace_max_concurrent == 2
+    assert cfg.scan_defaults.calibrate_max_concurrent == 3
+
+
 def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "quarry.toml"
     toml_path.write_text(
