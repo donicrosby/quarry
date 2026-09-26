@@ -166,17 +166,22 @@ def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
     cfg = load_quarry_config(path=empty_toml)
     assert cfg.scan_defaults.hunt_max_iterations == 12
     assert cfg.scan_defaults.hunt_max_concurrent == 8
+    assert cfg.scan_defaults.validate_max_concurrent == 8
 
 
 def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "quarry.toml"
     toml_path.write_text(
-        "[scan_defaults]\nhunt_max_iterations = 6\nhunt_max_concurrent = 3\n",
+        "[scan_defaults]\n"
+        "hunt_max_iterations = 6\n"
+        "hunt_max_concurrent = 3\n"
+        "validate_max_concurrent = 4\n",
         encoding="utf-8",
     )
     cfg = load_quarry_config(path=toml_path)
     assert cfg.scan_defaults.hunt_max_iterations == 6
     assert cfg.scan_defaults.hunt_max_concurrent == 3
+    assert cfg.scan_defaults.validate_max_concurrent == 4
 
 
 # ---------------------------------------------------------------------------

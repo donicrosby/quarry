@@ -133,6 +133,10 @@ async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext
     from quarry.panel_config import load_quarry_config
 
     assert scan_input.activity_max_attempts == load_quarry_config().retry.max_attempts
+    # Fan-out knobs resolve from scan_defaults (scan-stage-fanout).
+    assert scan_input.validate_max_concurrent == (
+        load_quarry_config().scan_defaults.validate_max_concurrent
+    )
 
 
 async def test_resume_scan_returns_404_for_unknown_scan(scan_api: ScanApiTestContext) -> None:
