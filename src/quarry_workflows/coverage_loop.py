@@ -122,37 +122,6 @@ def loop_stop_reason(
     return None
 
 
-def should_continue(
-    round_index: int,
-    max_rounds: int,
-    new_task_count: int,
-    over_budget: bool,
-    *,
-    new_finding_count: int | None = None,
-    cumulative_findings: int = 0,
-    coverage_yield_threshold: float = 0.0,
-) -> bool:
-    """Whether to run another coverage-loop round.
-
-    *round_index* is the round that just completed (0-based). Thin wrapper over
-    :func:`loop_stop_reason`; see it for the criteria and their precedence.
-    Omitting the keyword-only finding arguments reproduces the pre-rising-bar
-    behavior (convergence, round cap, budget only).
-    """
-    return (
-        loop_stop_reason(
-            round_index,
-            max_rounds,
-            new_task_count,
-            over_budget,
-            new_finding_count=new_finding_count,
-            cumulative_findings=cumulative_findings,
-            coverage_yield_threshold=coverage_yield_threshold,
-        )
-        is None
-    )
-
-
 _NON_WORD = re.compile(r"[^a-zA-Z0-9]+")
 
 

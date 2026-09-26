@@ -171,7 +171,6 @@ def _run_debater(
         repo_root=Path(repo_path),
         role="validate",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
     registry = get_registry()
     prompt = build_prompt(
@@ -308,7 +307,6 @@ def validate_impl(
         repo_root=Path(repo_path),
         role="validate",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     registry = get_registry()

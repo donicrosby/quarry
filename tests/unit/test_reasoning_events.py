@@ -178,7 +178,6 @@ class TestLoopEventEmission:
     """
 
     def _make_runner(self, tmp_path: Any) -> Any:
-        from quarry_models.types import BudgetSpec
         from quarry_tools.builtins import BUILTIN_REGISTRY
         from quarry_tools.runner import ToolRunner
 
@@ -186,7 +185,6 @@ class TestLoopEventEmission:
             repo_root=tmp_path,
             role="hunt",
             registry=BUILTIN_REGISTRY,
-            budget_spec=BudgetSpec(max_cost_usd=10.0),
         )
 
     def test_accepted_action_emits_action_proposed_event(self, tmp_path: Any) -> None:

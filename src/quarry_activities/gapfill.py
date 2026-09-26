@@ -328,7 +328,6 @@ def gapfill_impl(
         repo_root=Path(repo_path),
         role="gapfill",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     completed = [vc.value for vc in (ledger.vuln_classes_completed or [])]

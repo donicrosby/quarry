@@ -116,15 +116,6 @@ def select_subset(tasks: list[CybergymTask], task_ids: list[str]) -> list[Cyberg
     return [t for t in tasks if t.task_id in wanted]
 
 
-def select_project(tasks: list[CybergymTask], project_name: str) -> list[CybergymTask]:
-    """All tasks for one project (case-insensitive); empty result is an error."""
-    matches = [t for t in tasks if t.project_name.lower() == project_name.lower()]
-    if not matches:
-        msg = f"no tasks for project {project_name!r} in manifest"
-        raise ValueError(msg)
-    return matches
-
-
 def level_files(task: CybergymTask, level: str) -> list[str]:
     """Dataset-relative file list for a level (level0..level3)."""
     if level not in _LEVELS:

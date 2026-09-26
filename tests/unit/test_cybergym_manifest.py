@@ -19,7 +19,6 @@ from quarry_benchmark.cybergym import (
     load_manifest,
     materialize,
     runner_command,
-    select_project,
     select_subset,
 )
 
@@ -83,14 +82,6 @@ class TestSubsetSelection:
         tasks = load_manifest(FIXTURE)
         with pytest.raises(ValueError, match="arvo:404"):
             select_subset(tasks, ["arvo:1065", "arvo:404"])
-
-    def test_select_project_case_insensitive(self) -> None:
-        tasks = load_manifest(FIXTURE)
-        assert [t.task_id for t in select_project(tasks, "FILE")] == ["arvo:1065"]
-
-    def test_select_project_unknown_raises(self) -> None:
-        with pytest.raises(ValueError, match="no-such-project"):
-            select_project(load_manifest(FIXTURE), "no-such-project")
 
 
 class TestLevelFiles:

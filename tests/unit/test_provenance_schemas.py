@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from quarry.schemas import (
     FindingProvenance,
     ModelPanelEntry,
-    ReportProvenance,
     ScanManifest,
     SourceRef,
     ToolInvocation,
@@ -57,7 +56,7 @@ def test_tool_invocation_round_trips() -> None:
     assert loaded.exit_code == 0
 
 
-def test_finding_and_report_provenance() -> None:
+def test_finding_provenance() -> None:
     finding = FindingProvenance(
         finding_fingerprint="secrets:app.py:KEY",
         scan_id="scan-1",
@@ -67,16 +66,5 @@ def test_finding_and_report_provenance() -> None:
         tool_invocation_ids=["tool-1"],
         source_refs=[SourceRef(file_path="app.py", start_line=9)],
     )
-    report = ReportProvenance(
-        report_id="report-1",
-        scan_id="scan-1",
-        manifest_id="manifest-1",
-        finding_fingerprints=["secrets:app.py:KEY"],
-        inputs_hash="e" * 64,
-        generated_at=datetime.now(UTC),
-    )
-
     loaded_finding = FindingProvenance.model_validate_json(finding.model_dump_json())
-    loaded_report = ReportProvenance.model_validate_json(report.model_dump_json())
     assert loaded_finding.model_invocation_ids == []
-    assert loaded_report.inputs_hash == "e" * 64

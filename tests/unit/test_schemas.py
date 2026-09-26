@@ -6,7 +6,6 @@ from quarry.schemas import (
     ArtifactRef,
     CandidateFinding,
     Confidence,
-    GapfillTask,
     ModelPanelEntry,
     ProofArtifact,
     RedactionStatus,
@@ -136,20 +135,10 @@ def test_proof_agent_gapfill_models_construct() -> None:
         status="completed",
         created_at=created_at,
     )
-    gapfill = GapfillTask(
-        id="gap-1",
-        scan_id="scan-1",
-        workspace_id="local",
-        vuln_class=VulnerabilityClass.SECRETS,
-        scope="app.py",
-        reason="no findings",
-        created_at=created_at,
-    )
 
     assert proof.proof_type == "static"
     assert task.source == "recon"
     assert task.gapfill_pass == 0
-    assert gapfill.gapfill_pass == 1
     assert TriageLabel.TP.value == "tp"
 
 

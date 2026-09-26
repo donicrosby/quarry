@@ -216,7 +216,7 @@ class RunScanInput(BaseModel):
     dedup_max_iterations: int = 8
     # Cap on iterative-coverage-loop rounds (ADR-022). Default 3; the loop
     # halts sooner on convergence (no new gapfill/feedback tasks) or budget
-    # exhaustion. See coverage_loop.should_continue.
+    # exhaustion. See coverage_loop.loop_stop_reason.
     max_coverage_rounds: int = 3
     # Rising-bar early stop: minimum fraction of cumulative findings a round must
     # add to justify the next one. 0.0 disables the rule. Default 0.0 here (not

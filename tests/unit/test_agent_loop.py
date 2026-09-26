@@ -32,7 +32,6 @@ def _make_runner(tmp_path: Path) -> ToolRunner:
         repo_root=tmp_path,
         role="recon",
         registry=BUILTIN_REGISTRY,
-        budget_spec=BudgetSpec(max_cost_usd=10.0),
     )
 
 

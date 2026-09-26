@@ -88,14 +88,6 @@ def severity_rank(severity: Severity) -> int:
     return _SEVERITY_ORDER[severity]
 
 
-def severity_for_priority(priority: int) -> Severity:
-    """Inverse of the severity → priority mapping (clamped to 1–5)."""
-    for severity, prio in _SEVERITY_TO_PRIORITY.items():
-        if prio == max(1, min(5, priority)):
-            return severity
-    return Severity.MEDIUM
-
-
 class CalibrateResult(BaseModel):
     """Model output schema for the calibrate agent loop.
 
@@ -208,7 +200,6 @@ def calibrate_impl(
         repo_root=Path(repo_path),
         role="calibrate",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     registry = get_registry()

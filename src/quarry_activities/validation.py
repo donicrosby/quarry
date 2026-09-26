@@ -12,11 +12,10 @@ This is intentionally simple and deterministic. No LLM review, no entropy analys
 import json
 import re
 from dataclasses import dataclass
-from typing import Literal, cast
 
 from temporalio import activity
 
-from quarry.schemas import CandidateFinding, ValidationResult, utc_now
+from quarry.schemas import CandidateFinding
 from quarry_activities.inputs import PromoteFindingInput, ValidateCandidateInput
 
 SECRET_NAME_INDICATORS = re.compile(
@@ -26,10 +25,6 @@ SECRET_NAME_INDICATORS = re.compile(
 
 ALLOWLIST_VALUES: frozenset[str] = frozenset()
 
-ALLOWLIST_PATTERNS = re.compile(
-    r"^example|^sample|^test_|^dummy|^fake|^mock",
-    re.IGNORECASE,
-)
 
 PLACEHOLDER_VALUES = frozenset(
     {
@@ -137,32 +132,6 @@ def _validate_secret_candidate_impl(
         verdict="validated",
         reasons=reasons,
         checks_run=checks_run,
-    )
-
-
-def to_validation_result(
-    secret_result: SecretValidationResult,
-    candidate: CandidateFinding,
-    scan_id: str,
-) -> ValidationResult:
-    """Map the deterministic secret result onto the canonical ValidationResult schema.
-
-    The secret validator only ever emits ``validated`` or ``rejected``; both are
-    valid canonical verdicts, so this mapping is lossless.
-    """
-    verdict = cast(
-        Literal["validated", "rejected", "needs_proof", "inconclusive"],
-        secret_result.verdict,
-    )
-    return ValidationResult(
-        id=f"{candidate.id}-validation",
-        candidate_finding_id=candidate.id,
-        scan_id=scan_id,
-        verdict=verdict,
-        reasons=list(secret_result.reasons),
-        checks_run=list(secret_result.checks_run),
-        cross_vendor=False,
-        created_at=utc_now(),
     )
 
 

@@ -25,7 +25,6 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
-from quarry_models.types import BudgetSpec
 from quarry_tools.registry import load_registry
 from quarry_tools.runner import ToolCallRecord, ToolRunner
 
@@ -43,7 +42,6 @@ def _runner(
         repo_root=tmp_path,
         role="dynamic_validate",
         registry=load_registry(),
-        budget_spec=BudgetSpec(max_cost_usd=10.0),
         allowed_hosts=allowed_hosts,
         scope_exclusions=scope_exclusions,
         auth_profile_set=auth_profile_set,

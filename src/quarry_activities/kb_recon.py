@@ -349,7 +349,6 @@ def kb_recon_impl(
         repo_root=root,
         role="recon",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget_spec,
     )
 
     registry = get_registry()

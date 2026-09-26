@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from quarry.schemas import AuthProfile, AuthProfileKind, AuthProfileSet
-from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolCallRecord, ToolRunner
 from quarry_tools.spec import ToolRegistry
 
@@ -42,12 +41,10 @@ def _make_runner(
     tmp_path: Path,
     auth_profile_set: AuthProfileSet | None = None,
 ) -> ToolRunner:
-    budget = BudgetSpec(max_cost_usd=10.0)
     return ToolRunner(
         repo_root=tmp_path,
         role="dynamic_validate",
         registry=_http_registry(),
-        budget_spec=budget,
         auth_profile_set=auth_profile_set,
     )
 

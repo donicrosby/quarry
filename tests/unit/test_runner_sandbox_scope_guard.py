@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from quarry.schemas import ScopeExclusion
-from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolCallRecord, ToolRunner
 
 # ---------------------------------------------------------------------------
@@ -46,12 +45,10 @@ def _make_runner(
     role: str = "prove",
     scope_exclusions: list[ScopeExclusion] | None = None,
 ) -> ToolRunner:
-    budget = BudgetSpec(max_cost_usd=10.0)
     return ToolRunner(
         repo_root=tmp_path,
         role=role,
         registry=_sandbox_registry(),  # type: ignore[arg-type]
-        budget_spec=budget,
         scope_exclusions=scope_exclusions or [],
     )
 
@@ -227,12 +224,10 @@ def test_command_exclusion_does_not_affect_static_tools(tmp_path: Path) -> None:
             block_dynamic=True,
         )
     ]
-    budget = BudgetSpec(max_cost_usd=10.0)
     runner = ToolRunner(
         repo_root=tmp_path,
         role="hunt",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget,
         scope_exclusions=exclusions,
     )
     test_file = tmp_path / "file.txt"

@@ -1,7 +1,7 @@
 """Tests for the ADR-022 iterative coverage loop pure helpers.
 
 Written RED first — these fail until src/quarry_workflows/coverage_loop.py
-exists with cell_key, dedup_new_tasks, should_continue, and build_feedback_tasks.
+exists with cell_key, dedup_new_tasks, and build_feedback_tasks.
 
 All functions under test are pure (no I/O, no datetime.now()/uuid4() calls)
 because they run directly inside sandboxed Temporal workflow code — see
@@ -160,39 +160,6 @@ class TestDedupNewTasks:
         from quarry_workflows.coverage_loop import dedup_new_tasks
 
         assert dedup_new_tasks([], set()) == []
-
-
-# ---------------------------------------------------------------------------
-# should_continue
-# ---------------------------------------------------------------------------
-
-
-class TestShouldContinue:
-    def test_continues_when_new_tasks_and_rounds_remain(self) -> None:
-        from quarry_workflows.coverage_loop import should_continue
-
-        assert should_continue(round_index=0, max_rounds=3, new_task_count=2, over_budget=False)
-
-    def test_convergence_stops_the_loop(self) -> None:
-        from quarry_workflows.coverage_loop import should_continue
-
-        assert not should_continue(round_index=0, max_rounds=3, new_task_count=0, over_budget=False)
-
-    def test_round_cap_stops_the_loop(self) -> None:
-        from quarry_workflows.coverage_loop import should_continue
-
-        # round_index=2 is the last round when max_rounds=3 (0, 1, 2) — no round 3.
-        assert not should_continue(round_index=2, max_rounds=3, new_task_count=5, over_budget=False)
-
-    def test_budget_exhaustion_stops_the_loop(self) -> None:
-        from quarry_workflows.coverage_loop import should_continue
-
-        assert not should_continue(round_index=0, max_rounds=3, new_task_count=5, over_budget=True)
-
-    def test_budget_exhaustion_wins_even_at_round_zero_with_tasks(self) -> None:
-        from quarry_workflows.coverage_loop import should_continue
-
-        assert not should_continue(round_index=0, max_rounds=5, new_task_count=10, over_budget=True)
 
 
 # ---------------------------------------------------------------------------

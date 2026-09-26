@@ -75,7 +75,6 @@ def _runner(tmp_path: Path, role: str) -> ToolRunner:
         repo_root=tmp_path,
         role=role,
         registry=load_registry(),
-        budget_spec=BudgetSpec(max_cost_usd=10.0),
     )
 
 
@@ -139,7 +138,6 @@ class TestUnauthorizedDenialTracking:
         from pydantic import BaseModel
 
         from quarry_models.loop import ToolCallRequest, run_agent_loop
-        from quarry_models.types import BudgetSpec
         from quarry_tools.builtins import BUILTIN_REGISTRY
         from quarry_tools.runner import ToolRunner
 
@@ -168,7 +166,6 @@ class TestUnauthorizedDenialTracking:
             repo_root=tmp_path,
             role="dynamic_validate",  # allowed; swap registry to deny instead
             registry={k: v for k, v in BUILTIN_REGISTRY.items()},
-            budget_spec=BudgetSpec(max_cost_usd=10.0),
         )
         # Force-deny by mutating the registry entry's roles
         tool = dict(BUILTIN_REGISTRY)["read_file"]
@@ -197,7 +194,6 @@ class TestUnauthorizedDenialTracking:
         from pydantic import BaseModel
 
         from quarry_models.loop import run_agent_loop
-        from quarry_models.types import BudgetSpec
         from quarry_tools.builtins import BUILTIN_REGISTRY
         from quarry_tools.runner import ToolRunner
 
@@ -214,7 +210,6 @@ class TestUnauthorizedDenialTracking:
             repo_root=tmp_path,
             role="dynamic_validate",
             registry=BUILTIN_REGISTRY,
-            budget_spec=BudgetSpec(max_cost_usd=10.0),
         )
         result = run_agent_loop(
             client=_ImmediateAnswer(),  # type: ignore[arg-type]
@@ -242,7 +237,6 @@ class TestToolAccessDeniedEvent:
             dynamic_validate_impl,
         )
         from quarry_models.mock_client import MockModelClient
-        from quarry_models.types import BudgetSpec
 
         finding = _make_dyn_finding()
         events: list[tuple[str, dict[str, Any]]] = []
@@ -283,7 +277,6 @@ class TestToolAccessDeniedEvent:
             dynamic_validate_impl,
         )
         from quarry_models.mock_client import MockModelClient
-        from quarry_models.types import BudgetSpec
 
         finding = _make_dyn_finding()
         events: list[tuple[str, dict[str, Any]]] = []

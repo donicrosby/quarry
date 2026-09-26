@@ -1,7 +1,7 @@
 """Rising-bar finding-yield stop criterion (coverage-loop-rising-bar-stop).
 
 RED first: yield_bar computes an escalating threshold from cumulative findings,
-and should_continue / loop_stop_reason gain a finding_plateau branch that is
+and loop_stop_reason gains a finding_plateau branch that is
 additive to the existing budget / convergence / round-cap criteria.
 """
 
@@ -11,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from quarry_workflows.coverage_loop import loop_stop_reason, should_continue, yield_bar
+from quarry_workflows.coverage_loop import loop_stop_reason, yield_bar
+
+
+def _should_continue(**kw: Any) -> bool:
+    """Boolean adapter over the live API; ``None`` means the loop continues."""
+    return loop_stop_reason(**kw) is None
+
 
 # ── yield_bar ──────────────────────────────────────────────────────────────
 
@@ -50,7 +56,7 @@ def test_yield_bar_is_monotonic() -> None:
     assert bars == sorted(bars)
 
 
-# ── should_continue: finding-plateau branch ────────────────────────────────
+# ── loop_stop_reason: finding-plateau branch ───────────────────────────────
 
 
 def _kwargs(**over: Any) -> dict[str, Any]:
@@ -69,39 +75,39 @@ def _kwargs(**over: Any) -> dict[str, Any]:
 
 def test_yield_below_bar_stops() -> None:
     # C_prev=14 -> bar=3; a round adding 1 is below it.
-    assert not should_continue(**_kwargs(cumulative_findings=14, new_finding_count=1))
+    assert not _should_continue(**_kwargs(cumulative_findings=14, new_finding_count=1))
 
 
 def test_yield_at_bar_continues() -> None:
     # C_prev=14 -> bar=3; exactly 3 clears it.
-    assert should_continue(**_kwargs(cumulative_findings=14, new_finding_count=3))
+    assert _should_continue(**_kwargs(cumulative_findings=14, new_finding_count=3))
 
 
 def test_yield_above_bar_continues() -> None:
-    assert should_continue(**_kwargs(cumulative_findings=14, new_finding_count=9))
+    assert _should_continue(**_kwargs(cumulative_findings=14, new_finding_count=9))
 
 
 def test_zero_yield_stops_even_at_floor() -> None:
-    assert not should_continue(**_kwargs(cumulative_findings=0, new_finding_count=0))
+    assert not _should_continue(**_kwargs(cumulative_findings=0, new_finding_count=0))
 
 
 def test_one_finding_clears_the_floor() -> None:
-    assert should_continue(**_kwargs(cumulative_findings=0, new_finding_count=1))
+    assert _should_continue(**_kwargs(cumulative_findings=0, new_finding_count=1))
 
 
 def test_threshold_zero_disables_the_rule() -> None:
     """With the rule off, a zero-yield round still continues."""
-    assert should_continue(
+    assert _should_continue(
         **_kwargs(coverage_yield_threshold=0.0, cumulative_findings=100, new_finding_count=0)
     )
 
 
 def test_larger_threshold_stops_no_later() -> None:
     """Monotonic in f: if a small f stops, a larger f also stops."""
-    small = should_continue(
+    small = _should_continue(
         **_kwargs(cumulative_findings=20, new_finding_count=3, coverage_yield_threshold=0.10)
     )
-    large = should_continue(
+    large = _should_continue(
         **_kwargs(cumulative_findings=20, new_finding_count=3, coverage_yield_threshold=0.50)
     )
     assert small and not large
@@ -139,7 +145,7 @@ def test_continue_has_no_reason() -> None:
 
 def test_legacy_callers_unaffected() -> None:
     """Omitting the new params preserves the pre-change behavior exactly."""
-    assert should_continue(round_index=0, max_rounds=3, new_task_count=2, over_budget=False)
-    assert not should_continue(round_index=0, max_rounds=3, new_task_count=0, over_budget=False)
-    assert not should_continue(round_index=2, max_rounds=3, new_task_count=5, over_budget=False)
-    assert not should_continue(round_index=0, max_rounds=3, new_task_count=5, over_budget=True)
+    assert _should_continue(round_index=0, max_rounds=3, new_task_count=2, over_budget=False)
+    assert not _should_continue(round_index=0, max_rounds=3, new_task_count=0, over_budget=False)
+    assert not _should_continue(round_index=2, max_rounds=3, new_task_count=5, over_budget=False)
+    assert not _should_continue(round_index=0, max_rounds=3, new_task_count=5, over_budget=True)

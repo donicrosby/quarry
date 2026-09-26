@@ -1,154 +1,79 @@
-"""Assert that activity registration lists in worker and server stay in sync.
+"""Activity registration contract tests.
 
-Written RED first — fails until the dynamic_http activity exists and is
-registered in both quarry_worker.main and quarry_server.app.
+History: activities were hand-listed in THREE places (quarry_server/app.py,
+quarry_worker/main.py, tests/conftest.py). A name scheduled by the workflow
+but missing from the test worker hangs CI (build-call-graph, 2026-09-26 —
+55 minutes lost). The parity test below once compared worker<->server lists
+and could never see the conftest hole.
 
-The two-place gotcha: every activity must be in BOTH:
-  - src/quarry_worker/main.py (quarry-control and quarry-control workers)
-  - src/quarry_server/app.py lifespan (same workers when no_worker=False)
-
-An activity registered in only one place causes non-deterministic "activity not
-registered" failures on whichever worker picks up the task.
+Now every worker registers `discover_activities()` — one auto-discovered
+registry over quarry_activities + quarry_plugins. These tests pin that
+contract: no hand lists may return, and what the workflow schedules by
+string must exist in the registry.
 """
 
 from __future__ import annotations
 
 import ast
-import importlib
+import re
 from pathlib import Path
 
+from quarry_activities.registry import activity_name, discover_activities
 
-def _extract_activity_list_from_file(path: Path) -> set[str]:
-    """Extract the set of activity function names from a Worker(...) call.
-
-    Parses the source file looking for activities=[...] keyword arguments
-    inside Worker(...) constructor calls. Returns the set of all names found.
-    """
-    source = path.read_text()
-    tree = ast.parse(source)
-
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        # Look for Worker(...) calls
-        func_name = ""
-        if isinstance(node.func, ast.Name):
-            func_name = node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            func_name = node.func.attr
-        if func_name != "Worker":
-            continue
-        for kw in node.keywords:
-            if kw.arg == "activities" and isinstance(kw.value, ast.List):
-                for elt in kw.value.elts:
-                    if isinstance(elt, ast.Name):
-                        names.add(elt.id)
-                    elif isinstance(elt, ast.Attribute):
-                        names.add(elt.attr)
-    return names
+REPO_ROOT = Path(__file__).parents[2]
+REGISTRY_FILES = (
+    REPO_ROOT / "src/quarry_server/app.py",
+    REPO_ROOT / "src/quarry_worker/main.py",
+    REPO_ROOT / "tests/conftest.py",
+)
 
 
-REPO_ROOT = Path(__file__).parent.parent.parent
-WORKER_FILE = REPO_ROOT / "src/quarry_worker/main.py"
-SERVER_FILE = REPO_ROOT / "src/quarry_server/app.py"
+def _registered_names() -> set[str]:
+    return {activity_name(fn) for fn in discover_activities()}
 
 
-class TestWorkerRegistrationParity:
-    def test_worker_and_server_activity_lists_are_identical(self) -> None:
-        """Both files must register the same activities."""
-        worker_activities = _extract_activity_list_from_file(WORKER_FILE)
-        server_activities = _extract_activity_list_from_file(SERVER_FILE)
-
-        only_in_worker = worker_activities - server_activities
-        only_in_server = server_activities - worker_activities
-
-        errors: list[str] = []
-        if only_in_worker:
-            missing = sorted(only_in_worker)
-            errors.append(f"Registered in worker only (missing from server): {missing}")
-        if only_in_server:
-            missing = sorted(only_in_server)
-            errors.append(f"Registered in server only (missing from worker): {missing}")
-
-        assert not errors, (
-            "Activity registration parity violation:\n"
-            + "\n".join(str(e) for e in errors)
-            + "\n\nBoth src/quarry_worker/main.py and src/quarry_server/app.py "
-            "must register identical activity lists."
+class TestWorkersUseRegistry:
+    def test_no_hand_written_activity_lists_anywhere(self) -> None:
+        """The three-place list is the footgun. Any `activities=[...]` literal
+        reintroduces it — the only allowed form is activities=discover_activities()."""
+        offenders: list[str] = []
+        for path in REGISTRY_FILES:
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "Worker"
+                ):
+                    for kw in node.keywords:
+                        if kw.arg == "activities" and isinstance(kw.value, ast.List):
+                            offenders.append(str(path))
+        assert not offenders, (
+            f"Hand-written activity lists are banned (use discover_activities()): {offenders}"
         )
 
-    def test_dynamic_http_activity_registered_in_worker(self) -> None:
-        """http_request_activity must appear in the worker's activity list."""
-        worker_activities = _extract_activity_list_from_file(WORKER_FILE)
-        assert "http_request_activity" in worker_activities, (
-            "http_request_activity must be registered in quarry_worker/main.py. "
-            "It runs on the quarry-control task queue."
-        )
+    def test_every_worker_registers_the_registry(self) -> None:
+        for path in REGISTRY_FILES:
+            source = path.read_text()
+            assert "discover_activities()" in source, (
+                f"{path} must register activities via discover_activities()"
+            )
 
-    def test_dynamic_http_activity_registered_in_server(self) -> None:
-        """http_request_activity must appear in the server's activity list."""
-        server_activities = _extract_activity_list_from_file(SERVER_FILE)
-        assert "http_request_activity" in server_activities, (
-            "http_request_activity must be registered in quarry_server/app.py. "
-            "It runs on the quarry-control task queue."
-        )
 
-    def test_dispatch_lifecycle_hooks_activity_registered_in_worker(self) -> None:
-        """dispatch_lifecycle_hooks_activity must appear in the worker's activity list."""
-        worker_activities = _extract_activity_list_from_file(WORKER_FILE)
-        assert "dispatch_lifecycle_hooks_activity" in worker_activities, (
-            "dispatch_lifecycle_hooks_activity must be registered in quarry_worker/main.py. "
-            "It runs on the quarry-control task queue."
-        )
+class TestRegistryContents:
+    def test_registry_is_nontrivial(self) -> None:
+        names = _registered_names()
+        assert len(names) > 30, f"registry suspiciously small: {len(names)}"
 
-    def test_dispatch_lifecycle_hooks_activity_registered_in_server(self) -> None:
-        """dispatch_lifecycle_hooks_activity must appear in the server's activity list."""
-        server_activities = _extract_activity_list_from_file(SERVER_FILE)
-        assert "dispatch_lifecycle_hooks_activity" in server_activities, (
-            "dispatch_lifecycle_hooks_activity must be registered in quarry_server/app.py. "
-            "It runs on the quarry-control task queue."
-        )
+    def test_registry_discovers_plugin_sweep_activities(self) -> None:
+        """The vuln-class sweeps live in quarry_plugins — the walk must cross
+        the package boundary (ADR-025 unified plugin subsystem)."""
+        names = _registered_names()
+        assert "scan-repo-for-secrets" in names
+        assert "scan-repo-for-ssrf-sinks" in names
 
-    def test_all_registered_activities_have_defn_decorator(self) -> None:
-        """Every function in the worker's activities=[] list must have @activity.defn.
-
-        This catches the class of bug where a function is registered but the
-        decorator is missing, causing the worker to crash at startup with
-        'Activity X missing attributes, was it decorated with @activity.defn?'
-        """
-        # Collect (module_path, function_name) from import statements in the worker file
-        source = WORKER_FILE.read_text()
-        tree = ast.parse(source)
-
-        # Build a map: function_name -> module (from `from X import Y` statements)
-        import_map: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                for alias in node.names:
-                    name = alias.asname if alias.asname else alias.name
-                    import_map[name] = node.module
-
-        registered = _extract_activity_list_from_file(WORKER_FILE)
-
-        missing_decorator: list[str] = []
-        for fn_name in sorted(registered):
-            module_name = import_map.get(fn_name)
-            if module_name is None:
-                continue  # locally defined or aliased — skip
-            try:
-                mod = importlib.import_module(module_name)
-                fn = getattr(mod, fn_name, None)
-                if fn is None:
-                    continue
-                # @activity.defn stamps __temporal_activity_definition onto the fn
-                if not hasattr(fn, "__temporal_activity_definition"):
-                    missing_decorator.append(f"{fn_name} (from {module_name})")
-            except Exception:
-                pass  # import errors are a separate concern
-
-        assert not missing_decorator, (
-            "The following activities are registered in the worker but lack "
-            "@activity.defn — the worker will crash at startup:\n"
-            + "\n".join(f"  - {n}" for n in missing_decorator)
-        )
+    def test_activity_names_are_unique_and_kebab_cased(self) -> None:
+        names = sorted(_registered_names())
+        assert len(names) == len(set(names))
+        bad = [n for n in names if not re.fullmatch(r"[a-z][a-z0-9-]*", n)]
+        assert not bad, f"activity names must be kebab-case: {bad}"

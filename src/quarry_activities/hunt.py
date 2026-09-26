@@ -195,7 +195,6 @@ def hunt_impl(
         repo_root=Path(repo_path),
         role="hunt",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     # Resolve KB references at execution time (activity-side I/O; the workflow

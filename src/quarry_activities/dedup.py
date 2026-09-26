@@ -128,7 +128,6 @@ def dedup_impl(
         repo_root=Path(repo_path) if repo_path else Path("."),
         role="gapfill",  # reuses read toolset; no code execution
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     for key, cluster in keyed.items():

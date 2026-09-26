@@ -452,23 +452,6 @@ class RepositorySnapshot(BaseModel):
     created_at: datetime
 
 
-class CodeIndex(BaseModel):
-    id: str
-    scan_id: str
-    snapshot_id: str
-    symbols_ref: ArtifactRef | None = None
-    routes_ref: ArtifactRef | None = None
-    imports_ref: ArtifactRef | None = None
-    dependencies_ref: ArtifactRef | None = None
-    created_at: datetime
-
-
-class Workspace(BaseModel):
-    id: str
-    name: str
-    created_at: datetime
-
-
 class Hunter(BaseModel):
     id: str
     email: str | None = None
@@ -824,20 +807,6 @@ class ProofArtifact(BaseModel):
     created_at: datetime
 
 
-class GapfillTask(BaseModel):
-    id: str
-    scan_id: str
-    workspace_id: str
-    vuln_class: VulnerabilityClass
-    scope: str
-    reason: str
-    nudge_prompt_hint: str | None = None
-    gapfill_pass: int = 1
-    parent_task_id: str | None = None
-    status: str = "pending"
-    created_at: datetime
-
-
 class CoverageGap(BaseModel):
     id: str
     scan_id: str
@@ -910,20 +879,6 @@ class CoverageLedger(BaseModel):
         """Paths of production files neither covered nor excluded (sorted)."""
         return [item.path for item in self.file_coverage if item.status is ProductionFileStatus.GAP]
 
-    def file_excluded_paths(self) -> list[str]:
-        """Paths of files recorded as intentionally excluded (sorted)."""
-        return [
-            item.path
-            for item in self.file_coverage
-            if item.status is ProductionFileStatus.INTENTIONALLY_EXCLUDED
-        ]
-
-    def file_covered_paths(self) -> list[str]:
-        """Paths of production files covered by an investigation (sorted)."""
-        return [
-            item.path for item in self.file_coverage if item.status is ProductionFileStatus.COVERED
-        ]
-
 
 class GroundTruthFinding(BaseModel):
     id: str
@@ -932,15 +887,6 @@ class GroundTruthFinding(BaseModel):
     route: str | None = None
     severity: Severity
     expected_fingerprint_hint: str | None = None
-
-
-class BenchmarkCase(BaseModel):
-    id: str
-    name: str
-    repo_path: str
-    target_url: str | None = None
-    ground_truth_ref: ArtifactRef
-    scan_profile_id: str
 
 
 class ModelInvocation(BaseModel):
@@ -970,26 +916,6 @@ class ModelInvocation(BaseModel):
     estimated_cost: float | None = None
     scrubber_hits: int = 0
     redaction_status: RedactionStatus = RedactionStatus.UNKNOWN
-    created_at: datetime
-
-
-class BudgetPolicy(BaseModel):
-    id: str
-    workspace_id: str
-    max_cost_per_scan: float | None = None
-    max_tokens_per_scan: int | None = None
-    max_model_calls_per_stage: int | None = None
-    max_concurrent_scans: int = 1
-    max_runtime_seconds: int = 1800
-
-
-class IntegrationEvent(BaseModel):
-    id: str
-    scan_id: str
-    workspace_id: str
-    event_type: str
-    finding_id: str | None = None
-    payload_ref: ArtifactRef | None = None
     created_at: datetime
 
 
@@ -1027,25 +953,6 @@ class TicketCreationRequest(BaseModel):
     labels: list[str] = Field(default_factory=_empty_strings)
     finding_fingerprint: str
     report_ref: ArtifactRef | None = None
-
-
-class TicketCreationResult(BaseModel):
-    idempotency_key: str
-    dry_run: bool
-    created: bool
-    external_id: str | None = None
-    url: str | None = None
-    payload_ref: ArtifactRef | None = None
-
-
-class ExternalFindingReference(BaseModel):
-    id: str
-    workspace_id: str
-    finding_fingerprint: str
-    system: str
-    external_id: str
-    url: str | None = None
-    created_at: datetime
 
 
 class ScanManifest(BaseModel):
@@ -1093,15 +1000,6 @@ class FindingProvenance(BaseModel):
     source_refs: list[SourceRef] = Field(default_factory=_empty_source_refs)
 
 
-class ReportProvenance(BaseModel):
-    report_id: str
-    scan_id: str
-    manifest_id: str
-    finding_fingerprints: list[str] = Field(default_factory=_empty_strings)
-    inputs_hash: str
-    generated_at: datetime
-
-
 class DiffLabel(StrEnum):
     INTRODUCED_BY_DIFF = "introduced_by_diff"
     TOUCHED_BY_DIFF = "touched_by_diff"
@@ -1139,10 +1037,6 @@ class ImpactedCodeRegion(BaseModel):
 
 
 def _empty_changed_files() -> list[ChangedFile]:
-    return []
-
-
-def _empty_impacted_regions() -> list[ImpactedCodeRegion]:
     return []
 
 
@@ -1225,22 +1119,6 @@ class GitDiff(BaseModel):
     changed_files: list[ChangedFile] = Field(default_factory=_empty_changed_files)
     total_additions: int = 0
     total_deletions: int = 0
-
-
-class DiffScanInput(BaseModel):
-    repo_path: str
-    base_commit: str
-    head_commit: str
-    db_path: str
-    target_url: str | None = None
-
-
-class DiffScanResult(BaseModel):
-    scan_id: str
-    git_diff: GitDiff
-    impacted_regions: list[ImpactedCodeRegion] = Field(default_factory=_empty_impacted_regions)
-    candidate_finding_count: int = 0
-    final_finding_count: int = 0
 
 
 # ---------------------------------------------------------------------------
