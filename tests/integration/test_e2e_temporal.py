@@ -37,6 +37,7 @@ from quarry_activities.diff import git_diff_commits
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
 from quarry_activities.hunt import hunt_activity
+from quarry_activities.inputs import ScanSecretsInput
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.mapper import map_impacted_regions
 from quarry_activities.provenance import build_scan_manifest_activity
@@ -53,6 +54,7 @@ from quarry_activities.validation import (
 )
 from quarry_persistence import QuarryRepository
 from quarry_plugins.vuln_classes.secrets import scan_repo_for_secrets
+from quarry_plugins.vuln_classes.ssrf import scan_repo_for_ssrf_sinks
 from quarry_workflows import RunScanInput, RunScanWorkflow
 from quarry_workflows.diff_scan import RunDiffScanInput, RunDiffScanWorkflow
 
@@ -126,6 +128,25 @@ def _create_repo_with_secrets(repo_path: Path) -> None:
     _git(repo_path, "commit", "-m", "initial commit")
 
 
+def _create_clean_repo(repo_path: Path) -> None:
+    """A git repo with no planted secrets or sinks.
+
+    The deterministic sweeps (scan-repo-for-secrets / scan-repo-for-ssrf-sinks)
+    find nothing here, so a MockModelClient scan stays pure-agentic and emits
+    no findings — required by tests asserting zero findings / zero integrations.
+    """
+    repo_path.mkdir()
+    _git(repo_path, "init")
+    _git(repo_path, "config", "user.email", "quarry@e2e.test")
+    _git(repo_path, "config", "user.name", "Quarry E2E")
+    (repo_path / "app.py").write_text(
+        'def greet(name: str) -> str:\n    return f"hello {name}"\n',
+        encoding="utf-8",
+    )
+    _git(repo_path, "add", ".")
+    _git(repo_path, "commit", "-m", "initial commit")
+
+
 def _free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -171,6 +192,22 @@ def slow_hunt_activity(
     return []
 
 
+@activity.defn(name="scan-repo-for-secrets")
+def _stub_scan_repo_for_secrets(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
+
+
+@activity.defn(name="scan-repo-for-ssrf-sinks")
+def _stub_scan_repo_for_ssrf_sinks(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
+
+
 @activity.defn(name="recon-subsystem")
 def _pass_through_recon_subsystem(
     assignment: object,
@@ -179,6 +216,9 @@ def _pass_through_recon_subsystem(
     budget_spec: object = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 40,
+    scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
 
@@ -241,7 +281,7 @@ async def test_integrations_emit_runs_events_and_payloads(
 ) -> None:
     """A completed scan delivers dry-run integrations with payload artifacts."""
     repo_path = tmp_path / "repo"
-    _create_repo_with_secrets(repo_path)
+    _create_clean_repo(repo_path)
     db_path = tmp_path / "quarry.db"
     output_dir = tmp_path / "output"
 
@@ -421,6 +461,8 @@ async def test_e2e_cancel_sets_cancelled_status(
         workflows=[RunScanWorkflow],
         activities=[
             create_repository_snapshot,
+            _stub_scan_repo_for_secrets,
+            _stub_scan_repo_for_ssrf_sinks,
             persist_scan_state,
             recon_orchestrator_activity,
             _pass_through_recon_subsystem,
@@ -596,6 +638,7 @@ async def test_e2e_concurrent_scans(
                 persist_scan_state,
                 git_diff_commits,
                 scan_repo_for_secrets,
+                scan_repo_for_ssrf_sinks,
                 map_impacted_regions,
                 validate_secret_candidate,
                 promote_to_final_finding_metadata,

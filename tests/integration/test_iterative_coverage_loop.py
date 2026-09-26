@@ -31,6 +31,7 @@ from quarry.schemas import AgentTask, VulnerabilityClass
 from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.inputs import ScanSecretsInput
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
@@ -66,6 +67,22 @@ def _empty_hunt_activity(
     return []
 
 
+@activity.defn(name="scan-repo-for-secrets")
+def _stub_scan_repo_for_secrets(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
+
+
+@activity.defn(name="scan-repo-for-ssrf-sinks")
+def _stub_scan_repo_for_ssrf_sinks(
+    payload: ScanSecretsInput,
+) -> list[dict[str, object]]:
+    """No-op: these e2e tests exercise workflow plumbing, not sweep detection."""
+    return []
+
+
 @activity.defn(name="recon-subsystem")
 def _passthrough_recon_subsystem(
     assignment: object,
@@ -74,6 +91,9 @@ def _passthrough_recon_subsystem(
     budget_spec: object = None,
     panel_json: str | None = None,
     db_path: str | None = None,
+    max_iterations: int = 40,
+    scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> dict[str, object]:
     from quarry.schemas import SubsystemAssignment
 
@@ -166,6 +186,8 @@ def _build_worker(
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
             create_repository_snapshot,
+            _stub_scan_repo_for_secrets,
+            _stub_scan_repo_for_ssrf_sinks,
             persist_scan_state,
             recon_orchestrator_activity,
             _passthrough_recon_subsystem,
@@ -507,6 +529,8 @@ async def test_reachable_trace_emits_feedback_task_hunted_next_round(
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
             create_repository_snapshot,
+            _stub_scan_repo_for_secrets,
+            _stub_scan_repo_for_ssrf_sinks,
             persist_scan_state,
             recon_orchestrator_activity,
             _passthrough_recon_subsystem,
