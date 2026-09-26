@@ -11,16 +11,7 @@ from unittest.mock import AsyncMock, patch
 from temporalio.contrib.pydantic import pydantic_data_converter
 
 from quarry.config import QuarrySettings
-from quarry_activities.calibrate import calibrate_activity
-from quarry_activities.coverage import build_coverage_ledger_activity
-from quarry_activities.diff import git_diff_commits
-from quarry_activities.dynamic_validate import dynamic_validate_activity
-from quarry_activities.emit_agent_tasks import emit_agent_tasks
-from quarry_activities.exploit import exploit_turn_activity
-from quarry_activities.hunt import hunt_activity
-from quarry_activities.kb_recon import kb_recon_activity
-from quarry_activities.live_recon import live_recon_activity
-from quarry_activities.mapper import map_impacted_regions
+from quarry_activities.registry import activity_name, discover_activities
 from quarry_server.app import create_app, lifespan
 from quarry_workflows import RunDiffScanWorkflow
 
@@ -84,26 +75,16 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert worker.task_queue == QuarrySettings().task_queue
             assert len(worker.workflows) == 4
             assert RunDiffScanWorkflow in worker.workflows
-            assert (
-                len(worker.activities) == 33
-            )  # +4 for http_request, sandbox_exec, prove, tracer (ADR-017); +1 build_call_graph;
-            # +1 dispatch_lifecycle_hooks_activity; -2 orphaned per-class validators removed;
-            # +1 dynamic_validate_activity (agentic dynamic_validate stage, ADR-017);
-            # +1 live_recon_activity + +1 exploit_turn_activity (live-exploitation track);
-            # +1 kb_recon_activity (knowledge-base recon, candidate-precision-and-calibration);
-            # +1 calibrate_activity (severity calibration, candidate-precision-and-calibration);
-            # +1 read_artifact_text_activity (per-class dynamic validation, body resolution)
-            # +1 scan_repo_for_ssrf_sinks (deterministic SSRF sink sweep, run-8 gap fix)
-            assert calibrate_activity in worker.activities
-            assert dynamic_validate_activity in worker.activities
-            assert live_recon_activity in worker.activities
-            assert exploit_turn_activity in worker.activities
-            assert git_diff_commits in worker.activities
-            assert map_impacted_regions in worker.activities
-            assert emit_agent_tasks in worker.activities
-            assert hunt_activity in worker.activities
-            assert kb_recon_activity in worker.activities
-            assert build_coverage_ledger_activity in worker.activities
+            # The registry is the single source of truth: the worker registers
+            # exactly what discover_activities() yields, nothing hand-listed.
+            discovered = discover_activities()
+            assert worker.activities == discovered
+            registered_names = {activity_name(fn) for fn in discovered}
+            # The 2026-09-26 incident: build-call-graph was scheduled by the
+            # workflow but absent from the test worker — CI hung 55 minutes.
+            assert "build-call-graph" in registered_names
+            assert "calibrate-finding" in registered_names
+            assert "validate-candidate-finding" in registered_names
 
         assert worker.cancelled is True
         assert client.closed is True
