@@ -10,7 +10,6 @@ from typing import Any
 
 import pytest
 
-from quarry_models.types import BudgetSpec
 from quarry_tools.errors import ToolSecurityError, ToolUnavailableError, UnauthorizedToolError
 from quarry_tools.runner import ToolRunner
 from quarry_tools.spec import ToolRegistry
@@ -40,8 +39,7 @@ def _make_registry() -> ToolRegistry:
 
 def _make_runner(tmp_path: Path, role: str = "recon") -> ToolRunner:
     registry = _make_registry()
-    budget = BudgetSpec(max_cost_usd=10.0)
-    return ToolRunner(repo_root=tmp_path, role=role, registry=registry, budget_spec=budget)
+    return ToolRunner(repo_root=tmp_path, role=role, registry=registry)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +133,6 @@ def test_grep_raises_tool_unavailable_when_rg_missing(
         repo_root=tmp_path,
         role="recon",
         registry=BUILTIN_REGISTRY,
-        budget_spec=BudgetSpec(),
     )
     with pytest.raises(ToolUnavailableError, match="rg"):
         runner.run("grep", {"pattern": "test", "scope": "."})

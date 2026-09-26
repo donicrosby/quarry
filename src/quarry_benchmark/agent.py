@@ -156,7 +156,6 @@ def reproduce(
         repo_root=task.repo_dir,
         role="prove",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget,
     )
 
     description_text: str | None = None

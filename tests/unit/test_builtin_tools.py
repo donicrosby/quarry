@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from quarry_models.types import BudgetSpec
 from quarry_tools.builtins import BUILTIN_REGISTRY
 from quarry_tools.runner import ToolRunner
 
@@ -19,7 +18,6 @@ def _runner(repo_root: Path, role: str = "recon") -> ToolRunner:
         repo_root=repo_root,
         role=role,
         registry=BUILTIN_REGISTRY,
-        budget_spec=BudgetSpec(max_cost_usd=10.0),
     )
 
 

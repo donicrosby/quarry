@@ -175,7 +175,6 @@ def tracer_impl(
         repo_root=Path(repo_path),
         role="trace",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     registry = get_registry()

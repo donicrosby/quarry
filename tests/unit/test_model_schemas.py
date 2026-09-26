@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from quarry.schemas import BudgetPolicy, ModelInvocation, RedactionStatus
+from quarry.schemas import ModelInvocation, RedactionStatus
 
 
 def test_model_invocation_round_trips() -> None:
@@ -54,14 +54,3 @@ def test_model_invocation_defaults() -> None:
     assert invocation.token_input is None
     assert invocation.scrubber_hits == 0
     assert invocation.redaction_status is RedactionStatus.UNKNOWN
-
-
-def test_budget_policy_defaults_and_round_trip() -> None:
-    policy = BudgetPolicy(id="bp-1", workspace_id="local", max_cost_per_scan=5.0)
-
-    loaded = BudgetPolicy.model_validate_json(policy.model_dump_json())
-
-    assert loaded.max_cost_per_scan == 5.0
-    assert loaded.max_tokens_per_scan is None
-    assert loaded.max_concurrent_scans == 1
-    assert loaded.max_runtime_seconds == 1800

@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 from quarry.schemas import ScopeExclusion
-from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolCallRecord, ToolRunner
 from quarry_tools.spec import ToolRegistry
 
@@ -47,12 +46,10 @@ def _make_runner(
     role: str = "dynamic_validate",
     scope_exclusions: list[ScopeExclusion] | None = None,
 ) -> ToolRunner:
-    budget = BudgetSpec(max_cost_usd=10.0)
     return ToolRunner(
         repo_root=tmp_path,
         role=role,
         registry=_http_registry(),
-        budget_spec=budget,
         scope_exclusions=scope_exclusions or [],
     )
 
@@ -256,12 +253,10 @@ def test_scope_exclusion_does_not_affect_non_dynamic_tool(tmp_path: Path) -> Non
             block_dynamic=True,
         )
     ]
-    budget = BudgetSpec(max_cost_usd=10.0)
     runner = ToolRunner(
         repo_root=tmp_path,
         role="hunt",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget,
         scope_exclusions=exclusions,
     )
     # read_file is not an http_request — the guard should not block it

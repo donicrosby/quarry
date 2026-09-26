@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from quarry.schemas import AuthProfileSet, ScopeExclusion
-from quarry_models.types import BudgetSpec
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
 from quarry_tools.spec import ToolRegistry
 
@@ -175,7 +174,6 @@ class ToolRunner:
         repo_root: Path,
         role: str,
         registry: ToolRegistry,
-        budget_spec: BudgetSpec,
         scope_exclusions: list[ScopeExclusion] | None = None,
         allowed_hosts: list[str] | tuple[str, ...] | None = None,
         auth_profile_set: AuthProfileSet | None = None,
@@ -183,7 +181,6 @@ class ToolRunner:
         self._repo_root = repo_root
         self._role = role
         self._registry = registry
-        self._budget_spec = budget_spec
         self._scope_exclusions: list[ScopeExclusion] = scope_exclusions or []
         self._allowed_hosts: tuple[str, ...] | None = (
             tuple(allowed_hosts) if allowed_hosts is not None else None

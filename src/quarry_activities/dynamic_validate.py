@@ -96,7 +96,6 @@ def dynamic_validate_impl(
         repo_root=Path(repo_path),
         role="dynamic_validate",
         registry=load_registry(),
-        budget_spec=budget_spec,
         scope_exclusions=scope_exclusions,
         allowed_hosts=allowed_hosts,
         auth_profile_set=auth_profile_set,

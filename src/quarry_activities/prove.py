@@ -92,7 +92,6 @@ def prove_impl(
         repo_root=Path(repo_path),
         role="prove",
         registry=load_registry(),
-        budget_spec=budget_spec,
     )
 
     registry = get_registry()

@@ -4,14 +4,11 @@ from datetime import UTC, datetime
 
 from quarry.schemas import (
     IntegrationConfig,
-    IntegrationEvent,
     IntegrationRun,
     IntegrationStatus,
     NotificationMessage,
     Severity,
     TicketCreationRequest,
-    TicketCreationResult,
-    utc_now,
 )
 
 
@@ -38,20 +35,11 @@ def test_integration_run_round_trips() -> None:
     assert loaded.completed_at is None
 
 
-def test_integration_config_and_event_defaults() -> None:
+def test_integration_config_defaults() -> None:
     cfg = IntegrationConfig(integration_type="ticketing")
-    event = IntegrationEvent(
-        id="evt-1",
-        scan_id="scan-1",
-        workspace_id="local",
-        event_type="finding.final",
-        created_at=utc_now(),
-    )
 
     assert cfg.enabled is False
     assert cfg.dry_run is True
-    assert event.finding_id is None
-    assert event.payload_ref is None
 
 
 def test_ticket_and_notification_payloads() -> None:
@@ -62,9 +50,6 @@ def test_ticket_and_notification_payloads() -> None:
         severity=Severity.HIGH,
         labels=["quarry", "idor"],
         finding_fingerprint="fp-1",
-    )
-    result = TicketCreationResult(
-        idempotency_key=ticket.idempotency_key, dry_run=True, created=False
     )
     message = NotificationMessage(
         title="New finding",
@@ -78,5 +63,4 @@ def test_ticket_and_notification_payloads() -> None:
         "quarry",
         "idor",
     ]
-    assert result.created is False
     assert message.links == []

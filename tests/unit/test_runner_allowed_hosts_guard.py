@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from quarry_models.types import BudgetSpec
 from quarry_tools.runner import ToolCallRecord, ToolRunner
 from quarry_tools.spec import ToolRegistry
 
@@ -24,12 +23,10 @@ def _http_registry() -> ToolRegistry:
 
 
 def _make_runner(tmp_path: Path, allowed_hosts: list[str] | None = None) -> ToolRunner:
-    budget = BudgetSpec(max_cost_usd=10.0)
     return ToolRunner(
         repo_root=tmp_path,
         role="dynamic_validate",
         registry=_http_registry(),
-        budget_spec=budget,
         allowed_hosts=allowed_hosts,
     )
 
@@ -88,12 +85,10 @@ def test_no_host_in_inputs_with_non_empty_allowed_hosts_is_allowed(tmp_path: Pat
 def test_guard_does_not_affect_non_http_tools(tmp_path: Path) -> None:
     from quarry_tools.builtins import BUILTIN_REGISTRY
 
-    budget = BudgetSpec(max_cost_usd=10.0)
     runner = ToolRunner(
         repo_root=tmp_path,
         role="hunt",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget,
         allowed_hosts=[],
     )
     test_file = tmp_path / "test.txt"

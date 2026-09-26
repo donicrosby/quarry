@@ -95,16 +95,13 @@ class TestRunInSandboxToolDispatch:
 
 
 def _make_runner(role: str, tmp_path: Path):
-    from quarry_models.types import BudgetSpec
     from quarry_tools.builtins import BUILTIN_REGISTRY
     from quarry_tools.runner import ToolRunner
 
-    budget = BudgetSpec(max_cost_usd=1.0)
     return ToolRunner(
         repo_root=tmp_path,
         role=role,
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget,
     )
 
 

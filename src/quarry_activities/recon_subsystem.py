@@ -111,7 +111,6 @@ def _recon_subsystem_impl(
         repo_root=root,
         role="recon",
         registry=BUILTIN_REGISTRY,
-        budget_spec=budget_spec,
     )
 
     # Resolve the model client from the panel config if provided; otherwise fall

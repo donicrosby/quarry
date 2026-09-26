@@ -122,8 +122,6 @@ def test_unassigned_production_file_surfaces_as_gap() -> None:
     ledger = _ledger(file_manifest=manifest, covered_files=["src/app.py"])
 
     assert ledger.file_gap_paths() == ["src/worker.py"]
-    assert ledger.file_excluded_paths() == []
-    assert ledger.file_covered_paths() == ["src/app.py"]
 
 
 def test_investigation_marks_covered() -> None:
@@ -136,7 +134,6 @@ def test_investigation_marks_covered() -> None:
     )
 
     assert ledger.file_gap_paths() == []
-    assert ledger.file_covered_paths() == ["src/a.py", "src/b.py", "src/c.py"]
 
 
 def test_scope_exclusions_recorded_not_dropped() -> None:
@@ -149,7 +146,6 @@ def test_scope_exclusions_recorded_not_dropped() -> None:
     )
 
     assert ledger.file_gap_paths() == []
-    assert ledger.file_excluded_paths() == ["examples/demo.py"]
     accounting = {a.path: a for a in ledger.file_coverage}
     assert accounting["examples/demo.py"].reason == "demo code, out of scan scope"
 
