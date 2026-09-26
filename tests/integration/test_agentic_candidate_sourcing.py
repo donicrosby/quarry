@@ -51,16 +51,6 @@ def test_secrets_scanner_survives_as_diff_scan_tool() -> None:
     assert callable(scan_repo_for_secrets)
 
 
-def test_worker_registers_no_static_producers() -> None:
-    from quarry_worker.main import run_worker
-
-    source = inspect.getsource(run_worker)
-    for symbol in _FORBIDDEN_WORKER_SYMBOLS:
-        assert symbol not in source, f"static producer {symbol!r} re-registered on the worker"
-    # The agentic candidate source must still be registered.
-    assert "hunt_activity" in source
-
-
 def test_hunt_is_the_sole_candidate_producer() -> None:
     # The hunt activity attributes candidates to the "hunt-agent". No other
     # activity in the main pipeline may create CandidateFinding rows.

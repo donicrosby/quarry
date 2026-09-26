@@ -92,6 +92,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 
 - **pytest-asyncio** in `auto` mode — async tests just work, no decorators needed.
 - **Temporal integration tests** use `temporal_env`, `temporal_client`, `temporal_worker` fixtures from `tests/conftest.py`. These start a `WorkflowEnvironment` with the test server and register all activities + all three workflows (`RunScanWorkflow`, `RunDiffScanWorkflow`, `ReconWorkflow`). Activities are registered automatically via `quarry_activities.registry.discover_activities()` — the same registry the server and standalone workers use; never hand-list activities anywhere (the old three-place list is banned; enforced by `tests/unit/test_worker_registration_parity.py`).
+- **No source-grep registration tests.** Never add a test that greps `app.py`/`main.py`/`conftest.py` source for an activity name (e.g. `assert "x_activity" in source`) — that encoding of the hand-list era broke on every registry refactor and is banned; `tests/unit/test_worker_registration_parity.py` (all workers register exactly `discover_activities()`) and `tests/unit/test_activity_registry.py` (every scheduled name registrable) are the only registration guards.
 - Integration tests create real git repos via `subprocess.run(["git", ...])` in `tmp_path`.
 - ~1850 tests across unit/integration/golden; some are skipped (missing-binary guards for `rg`/`ast-grep`). Do not hard-code test counts here — check `pytest --collect-only -q`.
 
