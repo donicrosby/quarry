@@ -199,9 +199,7 @@ def test_scan_defaults_trace_and_calibrate_max_concurrent_defaults(tmp_path: Pat
 def test_scan_defaults_trace_and_calibrate_max_concurrent_parse_from_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "quarry.toml"
     toml_path.write_text(
-        "[scan_defaults]\n"
-        "trace_max_concurrent = 2\n"
-        "calibrate_max_concurrent = 3\n",
+        "[scan_defaults]\ntrace_max_concurrent = 2\ncalibrate_max_concurrent = 3\n",
         encoding="utf-8",
     )
     cfg = load_quarry_config(path=toml_path)

@@ -58,8 +58,7 @@ from quarry.schemas import (
     Target,
     VulnerabilityClass,
 )
-from quarry_activities.inputs import BuildScanManifestInput, CreateSnapshotInput
-from quarry_activities.inputs import ScanSecretsInput
+from quarry_activities.inputs import BuildScanManifestInput, CreateSnapshotInput, ScanSecretsInput
 from quarry_activities.repo import persist_scan_state
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
@@ -1129,16 +1128,16 @@ class TestTracerFanOutEventOrder:
 FIXTURE_REPO = Path("examples/vulnerable-fastapi").resolve()
 
 
-_SKIP_REASON = "examples/vulnerable-fastapi not present"
+_CAL_SKIP_REASON = "examples/vulnerable-fastapi not present"
 
 
-_NOW = datetime(2026, 9, 11, tzinfo=UTC)
+_CAL_NOW = datetime(2026, 9, 11, tzinfo=UTC)
 
 
 _state_lock = threading.Lock()
 
 
-_current_scan_id: list[str] = ["cal-fanout"]
+_CAL_CURRENT_SCAN_ID: list[str] = ["cal-fanout"]
 
 
 _hunt_call_count: list[int] = [0]
@@ -1158,7 +1157,7 @@ def _candidate_payload(finding_id: str, scan_id: str) -> dict[str, object]:
         "confidence": "high",
         "status": "candidate",
         "created_by": "hunt-agent",
-        "created_at": _NOW.isoformat(),
+        "created_at": _CAL_NOW.isoformat(),
         "metadata": {},
     }
 
@@ -1183,7 +1182,7 @@ def _one_finding_per_task_hunt_activity(
     with _state_lock:
         n = _hunt_call_count[0]
         _hunt_call_count[0] += 1
-        scan_id = _current_scan_id[0]
+        scan_id = _CAL_CURRENT_SCAN_ID[0]
     return {
         "findings": [_candidate_payload(f"cf-{scan_id}-{n}", scan_id)],
         "coverage_gaps": [],
@@ -1363,7 +1362,7 @@ async def _run_calibrate_fan_out_scan(
     db_path = tmp_path / "quarry.db"
     output_dir = tmp_path / "output"
     with _state_lock:
-        _current_scan_id[0] = scan_id
+        _CAL_CURRENT_SCAN_ID[0] = scan_id
         _hunt_call_count[0] = 0
     executor = ThreadPoolExecutor(max_workers=8)
     worker = _build_fan_out_worker(temporal_client, f"{scan_id}-queue", executor)
