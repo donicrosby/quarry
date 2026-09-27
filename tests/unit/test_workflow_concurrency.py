@@ -652,7 +652,12 @@ async def test_budget_exhaustion_stops_new_dispatches_but_keeps_inflight_results
     assert result is not None
 
     dispatched = list(_records)
-    assert dispatched == ["cf-0", "cf-1"], (
+    # Membership (not order) is the contract here: cap == cost increment means
+    # ANY single completion exhausts the budget, and the check-and-charge sits
+    # inside the same semaphore as dispatch, so a late-completing sibling can
+    # never leak a queued dispatch. Order within the first concurrently
+    # dispatched batch is worker-scheduler dependent — do not tighten this.
+    assert sorted(dispatched) == ["cf-0", "cf-1"], (
         f"only the pre-exhaustion candidates may dispatch, got {dispatched}"
     )
 
