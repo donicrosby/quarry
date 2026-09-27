@@ -101,6 +101,12 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
             hunt_max_iterations=quarry_config.scan_defaults.hunt_max_iterations,
             hunt_max_concurrent=quarry_config.scan_defaults.hunt_max_concurrent,
+            validate_max_concurrent=quarry_config.scan_defaults.validate_max_concurrent,
+            trace_max_concurrent=quarry_config.scan_defaults.trace_max_concurrent,
+            calibrate_max_concurrent=quarry_config.scan_defaults.calibrate_max_concurrent,
+            dynamic_validate_max_concurrent=(
+                quarry_config.scan_defaults.dynamic_validate_max_concurrent
+            ),
             validate_max_iterations=quarry_config.scan_defaults.validate_max_iterations,
             gapfill_max_iterations=quarry_config.scan_defaults.gapfill_max_iterations,
             recon_max_iterations=quarry_config.scan_defaults.recon_max_iterations,

@@ -179,6 +179,23 @@ class _RoundOutcome(NamedTuple):
     call_graph: CallGraph | None
 
 
+class _CalibrateOutcome(NamedTuple):
+    """Per-finding result of one gathered CALIBRATE batch (scan-stage-fanout).
+
+    ``calibrated`` is False when the calibration was skipped (non-dict
+    activity payload, unparsable severity) or failed outright (activity
+    exception) — in both cases the finding keeps its raw severity, the
+    best-effort contract. ``error`` carries the failure description for the
+    post-gather ``calibrate.failed`` event; events are emitted after the whole
+    batch resolves, in finding input order, so replay stays deterministic.
+    """
+
+    final: FinalFinding
+    candidate: CandidateFinding
+    calibrated: bool
+    error: str = ""
+
+
 def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
@@ -209,6 +226,24 @@ class RunScanInput(BaseModel):
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
     hunt_max_concurrent: int = 8
+    # Cap on concurrently in-flight per-finding ``tracer-finding`` activities in
+    # the TRACER stage (scan-stage-fanout). Trace is heavier per call than hunt,
+    # so the default stays conservative.
+    trace_max_concurrent: int = 4
+    # Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE
+    # (scan-stage-fanout). Mirrors hunt_max_concurrent; the API layer resolves
+    # it from scan_defaults.
+    validate_max_concurrent: int = 8
+    # Per-finding severity-calibration fan-out bound (scan-stage-fanout): the
+    # validated-findings calibrations are gathered under this semaphore. 4 —
+    # calibration is a full agent loop per finding; keep it conservative like
+    # the tracer bound.
+    calibrate_max_concurrent: int = 4
+    # Pre-hunt inventory sweep (per-class dynamic-validation chains): how many
+    # classes' propose→dispatch→capture chains may overlap. Resolved from
+    # quarry.toml [scan_defaults].dynamic_validate_max_concurrent by the API
+    # layer; 1 restores the historical serial behavior.
+    dynamic_validate_max_concurrent: int = 8
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -1137,159 +1172,232 @@ class RunScanWorkflow:
         exploit_panel_json = panel_json_for_role(scan, "exploit")
 
         # Step 2: per vuln class, drive a stateful propose→dispatch exploit chain.
-        for vuln_class in scan.profile.vuln_classes:
-            steps: list[ExploitStep] = []
-            session_cookies: dict[str, str] = {}
-            for _turn in range(scan_input.validate_max_iterations):
-                prior_steps = [s.model_dump(mode="json") for s in steps]
-                session_summary = "cookies set" if session_cookies else "(no session state yet)"
-                try:
-                    turn_raw = await workflow.execute_activity(
-                        "exploit-turn",
-                        args=[
-                            vuln_class.value,
-                            repo_path,
-                            True,  # authorized — enforced by the gate above
-                            session_summary,
-                            prior_steps,
-                            attack_map,
-                            exploit_panel_json,
-                            scan_input.budget_cap_usd,
-                            scan_input.db_path,
-                            scan_input.validate_max_iterations,
-                            scan_input.scan_seed,
-                            scan.id,
-                            scan_input.target_url,
-                            allowed_hosts,
-                            artifact_root,
-                        ],
-                        start_to_close_timeout=timedelta(hours=1),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
-                    )
-                except Exception as exc:
-                    await _append_workflow_event(
-                        scan_input.db_path,
-                        scan.id,
-                        "live_exploit.failed",
-                        {"stage": "exploit_turn", "error": _describe_failure(exc)},
-                    )
-                    break
-                if not isinstance(turn_raw, dict):
-                    break
-                turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
-                if turn.get("done") or not turn.get("proposed_http_spec"):
-                    break
+        #
+        # The per-class chains are independent — steps and session cookies are
+        # per-class state inside ``_exploit_class_chain`` — so they overlap under
+        # the ``dynamic_validate_max_concurrent`` semaphore (config knob, default
+        # 8; 1 restores the historical serial behavior). gather(
+        # return_exceptions=True) keeps one class's crash from aborting the
+        # others (best-effort track). Registration happens AFTER every chain
+        # resolves, in class order: the proven/created events stay deterministic
+        # for replay, and the per-class fingerprint id makes duplicate
+        # registration impossible even when every chain is in flight at once
+        # (the same safety net the deterministic sweeps use).
+        semaphore = asyncio.Semaphore(max(1, scan_input.dynamic_validate_max_concurrent))
 
-                spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
-                intent = str(turn.get("intent") or "exploit")
-                raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
-                headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
-                if session_cookies:
-                    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
-                spec = HttpRequestSpec(
-                    method=spec_dict.get("method", "GET"),
-                    path=str(spec_dict.get("path", "/")),
-                    headers=headers,
-                    body=spec_dict.get("body"),
-                    auth_profile=spec_dict.get("auth_profile"),
+        async def _exploit_one_class(vuln_class: VulnerabilityClass) -> ExploitChain:
+            async with semaphore:
+                return await self._exploit_class_chain(
+                    scan_input,
+                    scan,
+                    repo_path,
+                    artifact_root,
+                    target_ep,
+                    allowed_hosts,
+                    authorization,
+                    attack_map,
+                    exploit_panel_json,
+                    vuln_class,
                 )
 
-                # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
-                if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
-                    steps.append(
-                        ExploitStep(
-                            order=len(steps),
-                            intent=intent,
-                            request_spec=spec,
-                            dispatched=False,
-                            confirmed=False,
-                            notes="refused: outside rules of engagement",
-                        )
-                    )
-                    continue
+        chains = await asyncio.gather(
+            *[_exploit_one_class(vc) for vc in scan.profile.vuln_classes],
+            return_exceptions=True,
+        )
 
-                inp = HttpRequestActivityInput(
-                    spec_json=spec.model_dump_json(),
-                    target_endpoint_json=target_ep.model_dump_json(),
-                    allowed_hosts=allowed_hosts,
-                    artifact_store_path=artifact_root,
-                    scan_id=scan.id,
-                    candidate_finding_id=f"live-exploit-{vuln_class.value}",
-                    auth_profile_set_json=scan_input.auth_profiles_json,
+        # Registration pass (class order, post-gather): a proven chain becomes a
+        # first-class candidate carrying the per-class fingerprint id, so an
+        # overlapped/resumed chain can never register the same fingerprint twice.
+        registered_ids = {c.id for c in candidate_findings}
+        for vuln_class, chain_result in zip(scan.profile.vuln_classes, chains, strict=True):
+            if isinstance(chain_result, BaseException):
+                # One class's chain failed (timeout, crash); record it, keep the rest.
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.failed",
+                    {"stage": "exploit_chain", "error": _describe_failure(chain_result)},
                 )
-                try:
-                    capture_raw = await workflow.execute_activity(
-                        "http-request",
-                        args=[inp],
-                        start_to_close_timeout=timedelta(minutes=2),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
-                    capture = HttpResponseCapture.model_validate(capture_raw)
-                except Exception:
-                    # A failed dispatch ends this class's chain; other classes continue.
-                    break
-
-                success_raw = turn.get("success")
-                check = SuccessCheck.model_validate(success_raw) if success_raw else None
-                confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
-
-                # Thread any Set-Cookie into the carried session for later turns (D2).
-                set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
-                if set_cookie:
-                    pair = set_cookie.split(";", 1)[0]
-                    if "=" in pair:
-                        name, value = pair.split("=", 1)
-                        session_cookies[name] = value
-
-                steps.append(
-                    ExploitStep(
-                        order=len(steps),
-                        intent=intent,
-                        request_spec=spec,
-                        request_artifact_id=capture.request_artifact_ref,
-                        response_artifact_id=capture.body_artifact_ref,
-                        status_code=capture.status_code,
-                        confirmed=confirmed,
-                        notes=str(turn.get("reasoning") or ""),
-                    )
-                )
-                if confirmed:
-                    break  # we have our proof
-
-            chain = ExploitChain(
-                scan_id=scan.id,
-                workspace_id=scan.workspace_id,
-                vuln_class=vuln_class,
-                steps=steps,
-                proven=any(s.confirmed for s in steps),
-                summary=f"live exploitation chain for {vuln_class.value}",
-            )
+                continue
             candidate = exploit_chain_to_candidate(
-                chain,
-                finding_id=str(workflow.uuid4()),
+                chain_result,
+                finding_id=_live_exploit_fingerprint(vuln_class)[:32],
                 title=f"Live-proven {vuln_class.value} via chained exploitation",
                 hypothesis="Confirmed against the running target by a chained live exploit.",
                 created_by="exploit-agent",
                 created_at=workflow.now(),
             )
-            if candidate is not None:
-                await _persist_scan_state(
-                    scan_input.db_path,
-                    "save_candidate_finding",
-                    {"finding": _model_json_dict(candidate)},
+            if candidate is None or candidate.id in registered_ids:
+                continue  # unproven chain ("prove by doing") or already registered
+            registered_ids.add(candidate.id)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_candidate_finding",
+                {"finding": _model_json_dict(candidate)},
+            )
+            candidate_findings.append(candidate)
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "live_exploit.proven",
+                {
+                    "finding_id": candidate.id,
+                    "vuln_class": vuln_class.value,
+                    "step_count": str(len(chain_result.steps)),
+                },
+            )
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "finding.candidate_created",
+                {"finding_id": candidate.id, "source": "live-exploit"},
+            )
+
+    async def _exploit_class_chain(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        target_ep: TargetEndpoint,
+        allowed_hosts: tuple[str, ...],
+        authorization: TargetAuthorization,
+        attack_map: list[Any],
+        exploit_panel_json: str | None,
+        vuln_class: VulnerabilityClass,
+    ) -> ExploitChain:
+        """One class's stateful propose→dispatch exploit chain (step 2 above).
+
+        Per-class state (``steps``, ``session_cookies``) lives entirely inside
+        this call — overlapped classes share no mutable state.
+        """
+        steps: list[ExploitStep] = []
+        session_cookies: dict[str, str] = {}
+        for _turn in range(scan_input.validate_max_iterations):
+            prior_steps = [s.model_dump(mode="json") for s in steps]
+            session_summary = "cookies set" if session_cookies else "(no session state yet)"
+            try:
+                turn_raw = await workflow.execute_activity(
+                    "exploit-turn",
+                    args=[
+                        vuln_class.value,
+                        repo_path,
+                        True,  # authorized — enforced by the gate above
+                        session_summary,
+                        prior_steps,
+                        attack_map,
+                        exploit_panel_json,
+                        scan_input.budget_cap_usd,
+                        scan_input.db_path,
+                        scan_input.validate_max_iterations,
+                        scan_input.scan_seed,
+                        scan.id,
+                        scan_input.target_url,
+                        allowed_hosts,
+                        artifact_root,
+                    ],
+                    start_to_close_timeout=timedelta(hours=1),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
                 )
-                candidate_findings.append(candidate)
+            except Exception as exc:
                 await _append_workflow_event(
                     scan_input.db_path,
                     scan.id,
-                    "live_exploit.proven",
-                    {
-                        "finding_id": candidate.id,
-                        "vuln_class": vuln_class.value,
-                        "step_count": str(len(chain.steps)),
-                    },
+                    "live_exploit.failed",
+                    {"stage": "exploit_turn", "error": _describe_failure(exc)},
                 )
+                break
+            if not isinstance(turn_raw, dict):
+                break
+            turn: dict[str, Any] = cast("dict[str, Any]", turn_raw)
+            if turn.get("done") or not turn.get("proposed_http_spec"):
+                break
+
+            spec_dict: dict[str, Any] = cast("dict[str, Any]", turn["proposed_http_spec"])
+            intent = str(turn.get("intent") or "exploit")
+            raw_headers: dict[str, Any] = cast("dict[str, Any]", spec_dict.get("headers") or {})
+            headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
+            if session_cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
+            spec = HttpRequestSpec(
+                method=spec_dict.get("method", "GET"),
+                path=str(spec_dict.get("path", "/")),
+                headers=headers,
+                body=spec_dict.get("body"),
+                auth_profile=spec_dict.get("auth_profile"),
+            )
+
+            # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
+            if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
+                steps.append(
+                    ExploitStep(
+                        order=len(steps),
+                        intent=intent,
+                        request_spec=spec,
+                        dispatched=False,
+                        confirmed=False,
+                        notes="refused: outside rules of engagement",
+                    )
+                )
+                continue
+
+            inp = HttpRequestActivityInput(
+                spec_json=spec.model_dump_json(),
+                target_endpoint_json=target_ep.model_dump_json(),
+                allowed_hosts=allowed_hosts,
+                artifact_store_path=artifact_root,
+                scan_id=scan.id,
+                candidate_finding_id=f"live-exploit-{vuln_class.value}",
+                auth_profile_set_json=scan_input.auth_profiles_json,
+            )
+            try:
+                capture_raw = await workflow.execute_activity(
+                    "http-request",
+                    args=[inp],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+                capture = HttpResponseCapture.model_validate(capture_raw)
+            except Exception:
+                # A failed dispatch ends this class's chain; other classes continue.
+                break
+
+            success_raw = turn.get("success")
+            check = SuccessCheck.model_validate(success_raw) if success_raw else None
+            confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
+
+            # Thread any Set-Cookie into the carried session for later turns (D2).
+            set_cookie = capture.headers.get("set-cookie") or capture.headers.get("Set-Cookie")
+            if set_cookie:
+                pair = set_cookie.split(";", 1)[0]
+                if "=" in pair:
+                    name, value = pair.split("=", 1)
+                    session_cookies[name] = value
+
+            steps.append(
+                ExploitStep(
+                    order=len(steps),
+                    intent=intent,
+                    request_spec=spec,
+                    request_artifact_id=capture.request_artifact_ref,
+                    response_artifact_id=capture.body_artifact_ref,
+                    status_code=capture.status_code,
+                    confirmed=confirmed,
+                    notes=str(turn.get("reasoning") or ""),
+                )
+            )
+            if confirmed:
+                break  # we have our proof
+
+        return ExploitChain(
+            scan_id=scan.id,
+            workspace_id=scan.workspace_id,
+            vuln_class=vuln_class,
+            steps=steps,
+            proven=any(s.confirmed for s in steps),
+            summary=f"live exploitation chain for {vuln_class.value}",
+        )
 
     async def _run_round(
         self,
@@ -1570,58 +1678,141 @@ class RunScanWorkflow:
             validate_panel_json = panel_json_for_role(scan, "validate")
             # Candidates already promoted by the deterministic secret gate above.
             already_final = {f.id for f in final_findings}
-            for candidate in list(candidate_findings[hunt_new_start:]):
-                if val_over_budget:
-                    break  # budget exhausted: stop validating, continue the scan
-                if candidate.triage_label == "oos":
-                    continue  # skip OOS findings
-                if candidate.id in already_final:
-                    continue  # already promoted deterministically
-                try:
-                    validate_payload = await workflow.execute_activity(
-                        "validate-candidate-finding",
-                        args=[
-                            candidate.model_dump(mode="json"),
-                            repo_path,
-                            None,
-                            val_budget_remaining,
-                            validate_panel_json,
-                            scan_input.db_path,
-                            scan_input.validate_max_iterations,
-                            scan_input.scan_seed,
-                            artifact_root,
-                            kb_root_index_key,
-                        ],
-                        start_to_close_timeout=timedelta(hours=4),
-                        heartbeat_timeout=timedelta(minutes=3),
-                        retry_policy=self._retry_policy,
+            # Snapshot the eligible candidates BEFORE dispatch: candidates
+            # promoted by a sibling validation mid-flight must not be
+            # re-validated, and no cross-candidate mutation happens while the
+            # batch is in the air (post-gather loop below is the only writer).
+            eligible_candidates = [
+                candidate
+                for candidate in list(candidate_findings[hunt_new_start:])
+                if candidate.triage_label != "oos" and candidate.id not in already_final
+            ]
+
+            validate_max_concurrent = max(1, scan_input.validate_max_concurrent)
+            validate_semaphore = asyncio.Semaphore(validate_max_concurrent)
+            # Shared mid-batch budget tracker (workflow-local, mutated only
+            # inside semaphore-guarded closures): what stage-local spend is
+            # still allowed. None = uncapped. The validate activity itself
+            # enforces the real cap on the model loop; this gate only decides
+            # whether a queued candidate may dispatch at all.
+            val_remaining_spend: list[float] | None = (
+                [val_budget_remaining] if val_budget_remaining is not None else None
+            )
+
+            async def _validate_one_candidate(
+                candidate: CandidateFinding,
+            ) -> tuple[CandidateFinding, dict[str, Any] | None, Exception | None]:
+                """Validate a single candidate under the stage semaphore.
+
+                Returns ``(candidate, payload, failure)``. The failure slot is
+                an alias for ``return_exceptions=True`` isolation: the
+                exception travels in the result tuple, never out of the
+                closure, so one candidate crashing cannot fail the gathered
+                batch. Checked *inside* the closure (after acquiring the
+                semaphore) so a dispatched batch cannot blow through the
+                budget cap — once the budget is spent, queued dispatches
+                resolve without a model call.
+                """
+                async with validate_semaphore:
+                    if val_remaining_spend is not None and val_remaining_spend[0] <= 0.0:
+                        # Budget exhausted mid-batch: skip without dispatching.
+                        return (candidate, None, None)
+                    try:
+                        validate_payload = await workflow.execute_activity(
+                            "validate-candidate-finding",
+                            args=[
+                                candidate.model_dump(mode="json"),
+                                repo_path,
+                                None,
+                                val_budget_remaining,
+                                validate_panel_json,
+                                scan_input.db_path,
+                                scan_input.validate_max_iterations,
+                                scan_input.scan_seed,
+                                artifact_root,
+                                kb_root_index_key,
+                            ],
+                            start_to_close_timeout=timedelta(hours=4),
+                            heartbeat_timeout=timedelta(minutes=3),
+                            retry_policy=self._retry_policy,
+                        )
+                    except Exception as exc:
+                        # One finding's validation failing must not fail the
+                        # scan — but record it so the degradation is visible,
+                        # not silent. Emit in input order post-gather.
+                        return (candidate, None, exc)
+                    if val_remaining_spend is not None:
+                        # Charge a conservative flat increment per completed
+                        # validation so queued siblings stop once the cap is
+                        # reached (the activity enforces the precise spend).
+                        val_remaining_spend[0] = max(
+                            0.0, val_remaining_spend[0] - _VALIDATE_COST_INCREMENT_USD
+                        )
+                    payload: dict[str, Any] | None = (
+                        cast("dict[str, Any]", validate_payload)
+                        if isinstance(validate_payload, dict)
+                        else None
                     )
-                except Exception as exc:
-                    # One finding's validation failing must not fail the scan —
-                    # but record it so the degradation is visible, not silent.
+                    return (candidate, payload, None)
+
+            # Freshly validated findings awaiting severity calibration; the
+            # calibrations are gathered as one bounded batch after the loop
+            # (scan-stage-fanout) so their events land in finding input order.
+            pending_calibrations: list[tuple[FinalFinding, CandidateFinding]] = []
+
+            # return_exceptions=True: the worker closures already capture their
+            # own failures; this is a second belt-and-braces layer so a bug in
+            # the closure itself degrades to a per-candidate event instead of
+            # failing the scan.
+            validate_results = await asyncio.gather(
+                *[_validate_one_candidate(c) for c in eligible_candidates],
+                return_exceptions=True,
+            )
+
+            # Post-gather: emit events in candidate INPUT order (deterministic
+            # replay), not completion order. The per-candidate verdict branches
+            # below are the serial flow, unchanged.
+            for result_item, candidate in zip(validate_results, eligible_candidates, strict=True):
+                if isinstance(result_item, BaseException):
+                    # Closure-level bug: record and keep the rest.
                     await _append_workflow_event(
                         scan_input.db_path,
                         scan.id,
                         "validate.failed",
-                        {"finding_id": candidate.id, "error": _describe_failure(exc)},
+                        {
+                            "finding_id": candidate.id,
+                            "error": _describe_failure(result_item),
+                        },
                     )
                     continue
+                candidate, validate_payload, failure = result_item
+                if failure is not None:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "validate.failed",
+                        {"finding_id": candidate.id, "error": _describe_failure(failure)},
+                    )
+                    continue
+                if validate_payload is None:
+                    # Budget exhausted before this candidate dispatched.
+                    continue
                 # Explicit 4-way verdict branch — never silently drop any verdict.
-                verdict = ""
-                if isinstance(validate_payload, dict):
-                    payload_dict = cast("dict[str, Any]", validate_payload)
-                    verdict = str(payload_dict.get("verdict", "")).lower()
-                    # Mirror the ensemble credibility posterior (design D3) onto the
-                    # candidate so it flows to whichever report section it lands in.
-                    credibility = payload_dict.get("credibility")
-                    ensemble = payload_dict.get("ensemble")
-                    if credibility is not None or ensemble:
-                        candidate = candidate.model_copy(
-                            update={
-                                "credibility": credibility,
-                                "ensemble": ensemble or [],
-                            }
-                        )
+                # validate_payload is dict[str, Any] here (the None budget-skip
+                # path already continued above).
+                payload_dict = validate_payload
+                verdict = str(payload_dict.get("verdict", "")).lower()
+                # Mirror the ensemble credibility posterior (design D3) onto the
+                # candidate so it flows to whichever report section it lands in.
+                credibility = payload_dict.get("credibility")
+                ensemble = payload_dict.get("ensemble")
+                if credibility is not None or ensemble:
+                    candidate = candidate.model_copy(
+                        update={
+                            "credibility": credibility,
+                            "ensemble": ensemble or [],
+                        }
+                    )
 
                 if verdict == "validated":
                     # Promote to FinalFinding (confirmed vulnerability).
@@ -1632,9 +1823,9 @@ class RunScanWorkflow:
                     # severity/priority by marginal attacker capability and
                     # records which catalogue rules fired. Raw severity is
                     # retained on the finding; calibration never overwrites it.
-                    final, candidate = await self._calibrate_validated_finding(
-                        scan_input, scan, repo_path, artifact_root, final, candidate
-                    )
+                    # Queue it for the bounded batch gather below — calibration
+                    # itself runs after the whole candidate loop resolves.
+                    pending_calibrations.append((final, candidate))
                     # Keep the accumulator in sync so later stages (TRACER,
                     # report) persist the calibrated candidate, not the stale
                     # pre-calibration object.
@@ -1919,6 +2110,82 @@ class RunScanWorkflow:
                         "finding.rejected",
                         {"finding_id": candidate.id, "verdict": verdict or "unknown"},
                     )
+
+            # ── CALIBRATE batch fan-out (scan-stage-fanout) ──────────────────
+            # Calibrate every freshly validated finding under one bounded
+            # gather (calibrate_max_concurrent semaphore). The candidate loop
+            # above only queues work; this gather is the stage's single
+            # dispatch point. return_exceptions stays False because the
+            # per-finding closure never raises (best-effort contract: a
+            # failure keeps the raw severity and is recorded below) — a
+            # calibration outage must never drop or block a validated finding.
+            calibrate_semaphore = asyncio.Semaphore(scan_input.calibrate_max_concurrent)
+
+            async def _calibrate_with_bound(
+                final_in: FinalFinding,
+                candidate_in: CandidateFinding,
+            ) -> _CalibrateOutcome:
+                async with calibrate_semaphore:
+                    return await self._calibrate_one_finding(
+                        scan_input, scan, repo_path, artifact_root, final_in, candidate_in
+                    )
+
+            calibrate_outcomes = await asyncio.gather(
+                *[
+                    _calibrate_with_bound(final_f, cand_f)
+                    for final_f, cand_f in pending_calibrations
+                ]
+            )
+
+            # Post-gather, in finding INPUT order (deterministic replay): sync
+            # accumulators with the calibrated objects, then emit the lifecycle
+            # event — success first (finding.calibrated), failure second
+            # (calibrate.failed) — so an absent finding.calibrated always means
+            # the finding kept its raw severity.
+            for pair_in, outcome in zip(pending_calibrations, calibrate_outcomes, strict=True):
+                cand_in = pair_in[1]
+                final = outcome.final
+                candidate = outcome.candidate
+                if outcome.calibrated:
+                    # Keep the accumulators in sync so later stages (TRACER,
+                    # report, sinks) see the calibrated final/candidate, and
+                    # re-persist the final: the pre-gather save above stored the
+                    # raw finding, so the calibrated one must overwrite it here
+                    # (same persisted state the serial flow produced).
+                    for idx, existing in enumerate(candidate_findings):
+                        if existing.id == candidate.id:
+                            candidate_findings[idx] = candidate
+                            break
+                    for idx, existing in enumerate(final_findings):
+                        if existing.id == final.id:
+                            final_findings[idx] = final
+                            break
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.calibrated",
+                        {
+                            "finding_id": final.id,
+                            "calibrated_severity": (
+                                final.calibrated_severity.value
+                                if final.calibrated_severity is not None
+                                else ""
+                            ),
+                            "firing_rule_ids": ",".join(final.firing_rule_ids),
+                        },
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "calibrate.failed",
+                        {"finding_id": cand_in.id, "error": outcome.error},
+                    )
             await _persist_scan_stage(scan_input.db_path, scan.id, "AGENTIC_VALIDATE")
             await _append_workflow_event(
                 scan_input.db_path,
@@ -2192,9 +2459,13 @@ class RunScanWorkflow:
                 call_graph = CallGraph.model_validate(call_graph_raw)
                 tracer_panel_json = panel_json_for_role(scan, "trace")
                 final_findings_by_id = {f.id: f for f in final_findings}
-                for finding in pending_trace:
-                    try:
-                        trace_raw = await workflow.execute_activity(
+                # Fan-out cap: no more than trace_max_concurrent tracer-finding
+                # activities in flight at once (scan-stage-fanout).
+                trace_semaphore = asyncio.Semaphore(scan_input.trace_max_concurrent)
+
+                async def _trace_one(finding: CandidateFinding) -> Any:
+                    async with trace_semaphore:
+                        return await workflow.execute_activity(
                             "tracer-finding",
                             args=[
                                 finding.model_dump(mode="json"),
@@ -2212,48 +2483,63 @@ class RunScanWorkflow:
                             heartbeat_timeout=timedelta(minutes=3),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )
-                        trace = Trace.model_validate(
-                            trace_raw if isinstance(trace_raw, dict) else trace_raw
-                        )
-                        apply_trace_severity_reranking(finding, trace)
-                        await _persist_scan_state(
-                            scan_input.db_path,
-                            "save_trace",
-                            {"trace": _model_json_dict(trace)},
-                        )
-                        await _persist_scan_state(
-                            scan_input.db_path,
-                            "save_candidate_finding",
-                            {"finding": _model_json_dict(finding)},
-                        )
-                        updated_final = sync_final_finding_trace(
-                            finding, trace, final_findings_by_id
-                        )
-                        if updated_final is not None:
-                            await _persist_scan_state(
-                                scan_input.db_path,
-                                "save_final_finding",
-                                {"finding": _model_json_dict(updated_final)},
-                            )
-                        traced_finding_ids.add(finding.id)
-                        if trace.reachable == ReachabilityVerdict.REACHABLE:
-                            reachable_traces.append(trace)
-                        await _append_workflow_event(
-                            scan_input.db_path,
-                            scan.id,
-                            "tracer.verdict",
-                            {
-                                "finding_id": finding.id,
-                                "verdict": trace.reachable.value,
-                            },
-                        )
-                    except Exception as exc:
+
+                # return_exceptions=True: one tracer failing (timeout, crash)
+                # must not fail the scan — its per-finding result becomes the
+                # Exception and the post-gather loop records tracer.failed.
+                trace_results = await asyncio.gather(
+                    *[_trace_one(f) for f in pending_trace],
+                    return_exceptions=True,
+                )
+
+                # Post-gather, in finding INPUT order: persistence, severity
+                # re-ranking inputs, reachable-trace accumulation, and event
+                # emission stay deterministic for replay.
+                for finding, trace_result in zip(pending_trace, trace_results, strict=True):
+                    if isinstance(trace_result, BaseException):
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
                             "tracer.failed",
-                            {"finding_id": finding.id, "error": _describe_failure(exc)},
+                            {
+                                "finding_id": finding.id,
+                                "error": _describe_failure(trace_result),
+                            },
                         )
+                        continue
+                    trace = Trace.model_validate(
+                        trace_result if isinstance(trace_result, dict) else trace_result
+                    )
+                    apply_trace_severity_reranking(finding, trace)
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_trace",
+                        {"trace": _model_json_dict(trace)},
+                    )
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_candidate_finding",
+                        {"finding": _model_json_dict(finding)},
+                    )
+                    updated_final = sync_final_finding_trace(finding, trace, final_findings_by_id)
+                    if updated_final is not None:
+                        await _persist_scan_state(
+                            scan_input.db_path,
+                            "save_final_finding",
+                            {"finding": _model_json_dict(updated_final)},
+                        )
+                    traced_finding_ids.add(finding.id)
+                    if trace.reachable == ReachabilityVerdict.REACHABLE:
+                        reachable_traces.append(trace)
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "tracer.verdict",
+                        {
+                            "finding_id": finding.id,
+                            "verdict": trace.reachable.value,
+                        },
+                    )
             await _persist_scan_stage(scan_input.db_path, scan.id, "TRACER")
             await _append_workflow_event(
                 scan_input.db_path,
@@ -2264,7 +2550,7 @@ class RunScanWorkflow:
 
         return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
 
-    async def _calibrate_validated_finding(
+    async def _calibrate_one_finding(
         self,
         scan_input: "RunScanInput",
         scan: Scan,
@@ -2272,15 +2558,18 @@ class RunScanWorkflow:
         artifact_root: str,
         final: FinalFinding,
         candidate: CandidateFinding,
-    ) -> tuple[FinalFinding, CandidateFinding]:
-        """Calibrate a freshly validated finding (severity-calibration capability).
+    ) -> _CalibrateOutcome:
+        """Dispatch one ``calibrate-finding`` activity (fan-out closure body).
 
-        Dispatches the ``calibrate-finding`` activity and mirrors its calibrated
-        severity/priority + firing-rule ids onto BOTH the FinalFinding that is
-        reported and the CandidateFinding that is persisted. The hunter's raw
-        severity is never modified. Best-effort: on activity failure the
-        finding keeps its raw severity (a calibration outage must never drop or
-        block a validated finding — rollback note in the change design).
+        Semantics are exactly the historical per-finding behaviour: on
+        activity failure (or a skipped calibration) the finding keeps its raw
+        severity (``calibrated=False``) and the failure is reported for the
+        post-gather ``calibrate.failed`` event — never raised into the scan.
+        On success the calibrated severity/priority + firing-rule ids are
+        mirrored onto BOTH the FinalFinding that is reported and the
+        CandidateFinding that is persisted, and the calibration is persisted
+        here inside the closure (persistence order is not externally
+        observable; event order is — events are emitted post-gather).
         """
         calibrate_panel_json = panel_json_for_role(scan, "calibrate")
         try:
@@ -2303,21 +2592,32 @@ class RunScanWorkflow:
                 retry_policy=self._retry_policy,
             )
         except Exception as exc:
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "calibrate.failed",
-                {"finding_id": final.id, "error": _describe_failure(exc)},
+            # Best-effort contract: a calibration outage must never drop or
+            # block a validated finding — rollback note in the change design.
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error=_describe_failure(exc),
             )
-            return (final, candidate)
 
         if not isinstance(calibrate_raw, dict):
-            return (final, candidate)
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error="calibrate-finding returned a non-dict payload",
+            )
         payload = cast("dict[str, Any]", calibrate_raw)
 
         calibrated = _severity_from_activity(payload.get("calibrated_severity"))
         if calibrated is None:
-            return (final, candidate)
+            return _CalibrateOutcome(
+                final=final,
+                candidate=candidate,
+                calibrated=False,
+                error="calibrate-finding returned an unparsable calibrated severity",
+            )
 
         priority_raw = payload.get("calibrated_priority")
         priority = int(priority_raw) if isinstance(priority_raw, (int, str)) else None
@@ -2351,17 +2651,11 @@ class RunScanWorkflow:
             "save_candidate_finding",
             {"finding": _model_json_dict(candidate)},
         )
-        await _append_workflow_event(
-            scan_input.db_path,
-            scan.id,
-            "finding.calibrated",
-            {
-                "finding_id": final.id,
-                "calibrated_severity": calibrated.value,
-                "firing_rule_ids": ",".join(firing_rule_ids),
-            },
+        return _CalibrateOutcome(
+            final=final,
+            candidate=candidate,
+            calibrated=True,
         )
-        return (final, candidate)
 
     async def _record_manifest(self, scan_input: "RunScanInput", scan: Scan) -> ScanManifest:
         payload = await workflow.execute_activity(
@@ -2898,6 +3192,13 @@ async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]
         msg = f"Unexpected final findings payload: {type(payload).__name__}"
         raise TypeError(msg)
     return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
+
+
+# Conservative per-validation charge used by the AGENTIC_VALIDATE fan-out's
+# mid-batch budget gate (scan-stage-fanout). The validate activity enforces the
+# precise model-loop spend; this flat increment only decides whether a queued
+# candidate may dispatch once the stage-local cap is spent.
+_VALIDATE_COST_INCREMENT_USD = 0.05
 
 
 def budget_decision(cap: float | None, spent: float) -> tuple[bool, float | None]:
@@ -3813,6 +4114,23 @@ def _secret_candidate_from_match_record(
             "key_name": key_name,
             "evidence_kind": "hardcoded_assignment",
         },
+    )
+
+
+def _live_exploit_fingerprint(vuln_class: VulnerabilityClass) -> str:
+    """Deterministic per-class fingerprint id for live-proven inventory candidates.
+
+    Same ``compute_fingerprint`` safety net the deterministic sweeps use: the id
+    is derived from the class's probed target (the one deterministic probe per
+    class the chain drives), so an overlapped or resumed chain can never
+    register the same fingerprint twice — a repeat registration collapses onto
+    the existing candidate id instead of minting a second candidate.
+    """
+    return _compute_fingerprint(
+        vuln_class=vuln_class,
+        file_path="app.py",
+        start_line=42,
+        end_line=43,
     )
 
 

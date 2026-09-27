@@ -193,6 +193,18 @@ class ScanDefaultsConfig(BaseModel):
     focus_classes: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     hunt_max_iterations: int = 12
     hunt_max_concurrent: int = 8
+    # Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE
+    # (scan-stage-fanout). Same shape as hunt_max_concurrent.
+    validate_max_concurrent: int = 8
+    # Per-finding tracer fan-out bound (scan-stage-fanout): resolved from
+    # quarry.toml [scan_defaults] by the API layer; mirrors RunScanInput.
+    trace_max_concurrent: int = 4
+    # Per-finding severity-calibration fan-out bound (scan-stage-fanout).
+    calibrate_max_concurrent: int = 4
+    # Pre-hunt inventory sweep (per-class dynamic-validation chains): how many
+    # classes' propose→dispatch→capture chains may overlap. Default 8; 1 restores
+    # the historical serial per-class behavior.
+    dynamic_validate_max_concurrent: int = 8
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
     recon_max_iterations: int = 40

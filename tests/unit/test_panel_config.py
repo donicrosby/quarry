@@ -166,17 +166,60 @@ def test_scan_defaults_hunt_keys_have_expected_defaults(tmp_path: Path) -> None:
     cfg = load_quarry_config(path=empty_toml)
     assert cfg.scan_defaults.hunt_max_iterations == 12
     assert cfg.scan_defaults.hunt_max_concurrent == 8
+    assert cfg.scan_defaults.validate_max_concurrent == 8
+
+
+def test_scan_defaults_dynamic_validate_max_concurrent_defaults_to_8(tmp_path: Path) -> None:
+    """New inventory-fanout knob defaults to 8 (scan-stage-fanout slice 4)."""
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert cfg.scan_defaults.dynamic_validate_max_concurrent == 8
+
+
+def test_scan_defaults_dynamic_validate_max_concurrent_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\ndynamic_validate_max_concurrent = 2\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.dynamic_validate_max_concurrent == 2
+
+
+def test_scan_defaults_trace_and_calibrate_max_concurrent_defaults(tmp_path: Path) -> None:
+    """Tracer and calibrate fan-out knobs resolve from scan_defaults (trace=4, calibrate=4)."""
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert cfg.scan_defaults.trace_max_concurrent == 4
+    assert cfg.scan_defaults.calibrate_max_concurrent == 4
+
+
+def test_scan_defaults_trace_and_calibrate_max_concurrent_parse_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\ntrace_max_concurrent = 2\ncalibrate_max_concurrent = 3\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.trace_max_concurrent == 2
+    assert cfg.scan_defaults.calibrate_max_concurrent == 3
 
 
 def test_scan_defaults_hunt_keys_parse_from_toml(tmp_path: Path) -> None:
     toml_path = tmp_path / "quarry.toml"
     toml_path.write_text(
-        "[scan_defaults]\nhunt_max_iterations = 6\nhunt_max_concurrent = 3\n",
+        "[scan_defaults]\n"
+        "hunt_max_iterations = 6\n"
+        "hunt_max_concurrent = 3\n"
+        "validate_max_concurrent = 4\n",
         encoding="utf-8",
     )
     cfg = load_quarry_config(path=toml_path)
     assert cfg.scan_defaults.hunt_max_iterations == 6
     assert cfg.scan_defaults.hunt_max_concurrent == 3
+    assert cfg.scan_defaults.validate_max_concurrent == 4
 
 
 # ---------------------------------------------------------------------------

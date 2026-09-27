@@ -118,6 +118,23 @@ limiting, and multi-vendor (Anthropic / Bedrock) options.
 Never store API keys in `quarry.toml` — Quarry rejects the file at startup if it
 finds credential-like keys.
 
+#### Tuning scan concurrency
+
+Stage-level fan-out within a scan is bounded by `scan_defaults` knobs in
+`quarry.toml`:
+
+| Knob | Stage | Default |
+|---|---|---|
+| `hunt_max_concurrent` | Per-class hunt tasks | 8 |
+| `validate_max_concurrent` | Candidate validations | 8 |
+| `trace_max_concurrent` | Per-finding reachability traces | 4 |
+| `calibrate_max_concurrent` | Per-finding severity calibrations | 4 |
+| `dynamic_validate_max_concurrent` | Pre-hunt per-class dynamic-validation sweep | 8 |
+
+Each bound is enforced by a semaphore in the workflow; a higher value increases
+parallelism but not total model invocations. Per-role `rpm` token buckets
+(see `quarry.toml.example`) remain the global rate guard on top of these bounds.
+
 ### Re-render a report (replay)
 
 Re-render a report from stored state without re-running the scan or making model calls:
