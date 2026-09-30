@@ -774,7 +774,33 @@ class RunScanWorkflow:
         # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
         # "round_cap". Stays None only if the loop body never ran (no tasks).
         loop_stop_reason_final: str | None = None
-        for round_index in range(scan_input.max_coverage_rounds):
+
+        # ADR-D3 (cruft-purge 2.2): round-scoped resume. The persisted stage
+        # marker decodes to the round cursor: plain round-0 markers resume the
+        # loop at round 0 (old behavior), ROUND:<n>:TRACER markers resume at
+        # round n+1 with the persisted task queue, and post-loop markers skip
+        # the loop entirely (report re-runs over persisted state).
+        start_round = _round_cursor_from_stage(completed_stage)
+        if start_round > 0:
+            reloaded_tasks = await _load_agent_tasks(scan_input.db_path, scan.id)
+            requeued = [t for t in reloaded_tasks if t.round_index >= start_round]
+            if requeued:
+                round_tasks = requeued
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "loop.resumed",
+                {
+                    "from_round": str(start_round),
+                    "requeued_task_count": str(len(requeued)),
+                },
+            )
+        elif start_round == LOOP_DONE:
+            round_tasks = []
+
+        for round_index in range(
+            start_round if start_round > 0 else 0, scan_input.max_coverage_rounds
+        ):
             round_completed_stage = completed_stage if round_index == 0 else None
             await _append_workflow_event(
                 scan_input.db_path,
@@ -917,6 +943,10 @@ class RunScanWorkflow:
                 "gapfill.completed",
                 {"gapfill_task_count": str(len(gapfill_tasks))},
             )
+            # SPEC-D1 (cruft-purge 2.1): GAPFILL is canonical — persist it.
+            # Emission-only stage; the marker just records "emission done",
+            # re-hunting happens in the next round via the loop below.
+            await _persist_scan_stage(scan_input.db_path, scan.id, "GAPFILL")
 
             # ── Reachability-feedback edge (trace-driven) ────────────────────
             feedback_tasks: list[AgentTask] = []
@@ -935,6 +965,16 @@ class RunScanWorkflow:
             ]
             next_tasks = dedup_new_tasks(next_tasks_raw, hunted_cells)
             all_agent_tasks.extend(next_tasks)
+
+            # ADR-D3 (cruft-purge 2.2): persist re-queue tasks BEFORE the next
+            # round hunts them, so a crash in round n+1 reloads this exact
+            # queue instead of restarting the scan. Merge-idempotent.
+            for task in next_tasks:
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_agent_task",
+                    {"task": task.model_dump(mode="json")},
+                )
 
             spent_after_round = (
                 await _scan_cost_so_far(scan_input.db_path, scan.id)
@@ -989,6 +1029,9 @@ class RunScanWorkflow:
             final_findings,
             artifact_root,
         )
+        # SPEC-D1 (cruft-purge 2.1): COVERAGE is canonical — persist it before
+        # advancing to REPORT so a crash between the two resumes past it.
+        await _persist_scan_stage(scan_input.db_path, scan.id, "COVERAGE")
 
         self._current_stage = "REPORT"
         reporting_scan = scan.model_copy(
@@ -1655,6 +1698,12 @@ class RunScanWorkflow:
                         )
 
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
+            # SPEC-D1 (cruft-purge 2.1): VALIDATION is a canonical stage in
+            # COMPLETED_STAGE_ORDER — persist-before-advance applies. The
+            # deterministic secrets gate ran inside the HUNT block above, so
+            # this marker records "hunt's validation sub-work finished". The
+            # HUNT gate above already covers re-entry safety on resume.
+            await _persist_scan_stage(scan_input.db_path, scan.id, "VALIDATION")
 
         # ── AGENTIC_VALIDATE stage ───────────────────────────────────────────
         # Adversarial review of each CandidateFinding new this round (ADR-021).
@@ -2540,7 +2589,7 @@ class RunScanWorkflow:
                             "verdict": trace.reachable.value,
                         },
                     )
-            await _persist_scan_stage(scan_input.db_path, scan.id, "TRACER")
+            await _persist_scan_stage(scan_input.db_path, scan.id, f"ROUND:{round_index}:TRACER")
             await _append_workflow_event(
                 scan_input.db_path,
                 scan.id,
@@ -3301,6 +3350,31 @@ def _stage_completed(current_stage: str | None, stage: str) -> bool:
     current_order = COMPLETED_STAGE_ORDER.get(current_stage, -1)
     stage_order = COMPLETED_STAGE_ORDER[stage]
     return current_order >= stage_order
+
+
+# Sentinel for the round-resume cursor: the coverage loop already reached its
+# terminal (COVERAGE or later), so a resumed scan must skip the loop entirely.
+LOOP_DONE = -1
+
+
+def _round_cursor_from_stage(current_stage: str | None) -> int:
+    """Decode the persisted stage marker into the coverage-loop round cursor.
+
+    Plain canonical markers (SNAPSHOT..TRACER) date from round 0 — the loop
+    starts at round 1 on resume. Round-scoped markers ('ROUND:<n>:<STAGE>',
+    persisted at each round's TRACER completion) resume at round n+1.
+    Post-loop stages (COVERAGE and later) return LOOP_DONE: the loop already
+    finished and must not re-run.
+    """
+    if current_stage is None:
+        return 0
+    if current_stage.startswith("ROUND:"):
+        _, index, _stage = current_stage.split(":", 2)
+        return int(index)
+    order = COMPLETED_STAGE_ORDER.get(current_stage, -1)
+    if order >= COMPLETED_STAGE_ORDER["COVERAGE"]:
+        return LOOP_DONE
+    return 0
 
 
 def should_dispatch_lifecycle_hooks(profile: ScanProfile) -> bool:

@@ -12,6 +12,7 @@ from temporalio import activity
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from quarry.schemas import (
+    AgentTask,
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
@@ -226,12 +227,16 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 for invocation in repository.load_model_invocations(payload["scan_id"])
             ]
         case "save_agent_task":
-            # No-op for now — tasks are re-derived from ArchitectureDoc on resume.
-            pass
+            # Real persistence (ADR-D3 round-resume, cruft-purge 2.2): the
+            # coverage loop's re-queue tasks must survive a crash so a resume
+            # can rebuild the round > 0 queue instead of restarting the scan.
+            repository.save_agent_task(AgentTask.model_validate(payload["task"]))
         case "load_agent_tasks":
-            # Agent tasks are re-derived from the ArchitectureDoc on resume.
-            # Return empty list; the workflow will re-run emit-agent-tasks if needed.
-            return []
+            # Tasks reloaded in deterministic (round_index, id) order.
+            return [
+                task.model_dump(mode="json")
+                for task in repository.load_agent_tasks(payload["scan_id"])
+            ]
         case "append_event":
             repository.append_event(WorkflowEvent.model_validate(payload["event"]))
         case "save_artifact_ref":
