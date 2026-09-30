@@ -15,9 +15,7 @@ from temporalio.worker import Worker
 
 from quarry.config import QuarrySettings
 from quarry_activities.registry import discover_activities
-from quarry_workflows import RunDiffScanWorkflow, RunScanWorkflow
-from quarry_workflows.commit_stage import CommitStageWorkflow
-from quarry_workflows.recon import ReconWorkflow
+from quarry_workflows.registry import discover_workflows
 
 
 class _AsyncCloseable(Protocol):
@@ -50,7 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         worker = Worker(
             client,
             task_queue=settings.task_queue,
-            workflows=[RunScanWorkflow, RunDiffScanWorkflow, ReconWorkflow, CommitStageWorkflow],
+            workflows=discover_workflows(),
             activities=discover_activities(),
             activity_executor=activity_executor,
             graceful_shutdown_timeout=timedelta(seconds=30),
