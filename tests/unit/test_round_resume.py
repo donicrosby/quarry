@@ -7,9 +7,9 @@ re-derive tasks from the ArchitectureDoc, or duplicate candidates.
 
 from __future__ import annotations
 
-from quarry_workflows.run_scan import (  # pyright: ignore[reportPrivateUsage]
+from quarry_workflows.run_scan import (
     LOOP_DONE,
-    _round_cursor_from_stage,
+    _round_cursor_from_stage,  # pyright: ignore[reportPrivateUsage]
 )
 
 
