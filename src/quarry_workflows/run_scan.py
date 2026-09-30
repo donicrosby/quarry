@@ -56,12 +56,14 @@ from quarry.schemas import (
     ScanStatus,
     Severity,
     SourceRef,
+    Subsystem,
     SubsystemAssignment,
     SuccessCheck,
     Target,
     TargetAuthorization,
     TargetEndpoint,
     Trace,
+    TriageLabel,
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
@@ -575,15 +577,13 @@ class RunScanWorkflow:
 
             # Step 3: synthesise into ArchitectureDoc
             # Build typed Subsystem list from payloads for synthesis activity
-            from quarry.schemas import Subsystem as _Subsystem
-
-            subsystems: list[_Subsystem] = []
+            subsystems: list[Subsystem] = []
             for sp in subsystem_payloads:
-                if isinstance(sp, _Subsystem):
+                if isinstance(sp, Subsystem):
                     subsystems.append(sp)
                 elif isinstance(sp, dict):
                     try:
-                        subsystems.append(_Subsystem.model_validate(sp))
+                        subsystems.append(Subsystem.model_validate(sp))
                     except Exception as exc:
                         await _append_workflow_event(
                             scan_input.db_path,
@@ -1573,7 +1573,7 @@ class RunScanWorkflow:
                         for exc in scan.profile.scope_exclusions
                     )
                     if is_oos:
-                        candidate = candidate.model_copy(update={"triage_label": "oos"})
+                        candidate = candidate.model_copy(update={"triage_label": TriageLabel.OOS})
                     await _persist_scan_state(
                         scan_input.db_path,
                         "save_candidate_finding",
@@ -1734,7 +1734,7 @@ class RunScanWorkflow:
             eligible_candidates = [
                 candidate
                 for candidate in list(candidate_findings[hunt_new_start:])
-                if candidate.triage_label != "oos" and candidate.id not in already_final
+                if candidate.triage_label != TriageLabel.OOS and candidate.id not in already_final
             ]
 
             validate_max_concurrent = max(1, scan_input.validate_max_concurrent)
@@ -3069,11 +3069,6 @@ def run_scan(scan_input: RunScanInput) -> RunScanResult:
     )
 
 
-def run_fake_scan(scan_input: RunScanInput) -> RunScanResult:
-    """Legacy entry point kept for backward compatibility."""
-    return run_scan(scan_input)
-
-
 def _append_event(
     repository: QuarryRepository,
     scan_id: str,
@@ -3870,13 +3865,11 @@ def build_prove_dispatch_inputs(
 
     Pure function — no I/O, safe to call from within workflow code.
     """
-    import json as _json
-
     exec_inputs: list[Any] = []
     for spec_dict in proposed_exec_specs:
         exec_inputs.append(
             SandboxExecActivityInput(
-                spec_json=_json.dumps(spec_dict),
+                spec_json=json.dumps(spec_dict),
                 target_endpoint_json=target_endpoint_json,
                 allowed_hosts=allowed_hosts,
                 artifact_store_path=artifact_root,
@@ -3890,7 +3883,7 @@ def build_prove_dispatch_inputs(
         for spec_dict in proposed_http_specs:
             http_inputs.append(
                 HttpRequestActivityInput(
-                    spec_json=_json.dumps(spec_dict),
+                    spec_json=json.dumps(spec_dict),
                     target_endpoint_json=target_endpoint_json,
                     allowed_hosts=allowed_hosts,
                     artifact_store_path=artifact_root,

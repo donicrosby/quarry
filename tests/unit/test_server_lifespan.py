@@ -14,6 +14,7 @@ from quarry.config import QuarrySettings
 from quarry_activities.registry import activity_name, discover_activities
 from quarry_server.app import create_app, lifespan
 from quarry_workflows import RunDiffScanWorkflow
+from quarry_workflows.registry import discover_workflows
 
 
 class RecordingTemporalClient:
@@ -73,7 +74,12 @@ async def test_lifespan_starts_worker_with_shared_temporal_client() -> None:
             assert app.state.temporal_client is client
             assert worker.client is client
             assert worker.task_queue == QuarrySettings().task_queue
-            assert len(worker.workflows) == 4
+            # The registry is the single source of truth: the worker registers
+            # exactly what discover_workflows() yields, nothing hand-listed
+            # (mirrors the discover_activities() pattern for the same reason —
+            # a hand-counted literal goes stale silently).
+            discovered_workflows = discover_workflows()
+            assert worker.workflows == discovered_workflows
             assert RunDiffScanWorkflow in worker.workflows
             # The registry is the single source of truth: the worker registers
             # exactly what discover_activities() yields, nothing hand-listed.

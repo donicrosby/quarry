@@ -16,6 +16,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from quarry.schemas import EnvProfile
+
+# Wire strings for the env_profile tool-schema enum and dispatch default are
+# owned by the spec-backed EnvProfile enum (quarry.schemas) — the JSON wire
+# format is exactly the enum's values.
+_ENV_PROFILE_ENUM = [e.value for e in EnvProfile]
+_DEFAULT_ENV_PROFILE = EnvProfile.NONE.value
+
 
 class _RunInSandboxTool:
     """Packages a SandboxExecSpec for dispatch to the quarry-control worker."""
@@ -48,7 +56,7 @@ class _RunInSandboxTool:
             },
             "env_profile": {
                 "type": "string",
-                "enum": ["none", "repo_readonly"],
+                "enum": _ENV_PROFILE_ENUM,
                 "description": "Named environment profile; 'none' (default) = empty env",
             },
             "cwd": {
@@ -87,7 +95,7 @@ class _RunInSandboxTool:
             "command": inputs.get("command"),
             "args": inputs.get("args", []),
             "stdin": inputs.get("stdin"),
-            "env_profile": inputs.get("env_profile", "none"),
+            "env_profile": inputs.get("env_profile", _DEFAULT_ENV_PROFILE),
             "cwd": inputs.get("cwd", "."),
             "input_files": inputs.get("input_files", {}),
             "timeout_seconds": inputs.get("timeout_seconds", 30),
