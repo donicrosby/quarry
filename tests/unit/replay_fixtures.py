@@ -127,8 +127,7 @@ def build_repo(tmp_path: Path) -> Path:
     (repo / "app").mkdir(parents=True, exist_ok=True)
     (repo / "app" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "app" / "app.py").write_text(
-        'AWS_SECRET = "AKIAIOSFODNN7EXAMPLE"\n\n\ndef handler(event):\n'
-        '    return {"ok": True}\n',
+        'AWS_SECRET = "AKIAIOSFODNN7EXAMPLE"\n\n\ndef handler(event):\n    return {"ok": True}\n',
         encoding="utf-8",
     )
     (repo / "app" / "util.py").write_text(

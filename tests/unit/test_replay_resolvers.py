@@ -231,9 +231,7 @@ class TestProveResolver:
         repo = build_repo(tmp_path)
         candidate = make_candidate("scan-replay-1", status="candidate")
         prove_me = make_candidate("scan-replay-1", status="needs_proof")
-        db_path = build_scan_db(
-            tmp_path / "quarry.db", repo, candidates=[candidate, prove_me]
-        )
+        db_path = build_scan_db(tmp_path / "quarry.db", repo, candidates=[candidate, prove_me])
         resolved = resolve_prove_inputs(
             db_path=db_path,
             scan_id="scan-replay-1",

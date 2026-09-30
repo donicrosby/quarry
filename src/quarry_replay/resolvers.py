@@ -15,26 +15,27 @@ scripts/replay_validate.py) so real spend never silently hits the mock panel.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
-from uuid import uuid4
 
-from quarry.panel_config import ModelTier, Provider, RoleConfig, TierKind, load_quarry_config, resolve_panel
+from quarry.panel_config import (
+    ModelTier,
+    Provider,
+    RoleConfig,
+    load_quarry_config,
+    resolve_panel,
+)
 from quarry.schemas import (
     AgentTask,
     ArchitectureDoc,
-    ArtifactKind,
     CallGraph,
     CandidateFinding,
     CoverageLedger,
     FindingStatus,
     Scan,
     SubsystemAssignment,
-    VulnerabilityClass,
 )
 from quarry_persistence import QuarryRepository
 from quarry_tools.call_graph_python import build_python_call_graph
@@ -213,7 +214,9 @@ def _metadata_str(scan: Scan, key: str) -> str | None:
     return str(raw) if isinstance(raw, str) and raw else None
 
 
-def _panel_for_scan_role(scan: Scan, role: str, *, mock: bool, panel_name: str | None) -> PanelSelection:
+def _panel_for_scan_role(
+    scan: Scan, role: str, *, mock: bool, panel_name: str | None
+) -> PanelSelection:
     """Resolve the panel from the scan's own snapshot when replaying without --mock.
 
     Real scans freeze their panel into ``scan.panel_snapshot`` (ModelPanelEntry
@@ -265,10 +268,7 @@ def resolve_validate_inputs(
     if vuln_class:
         candidates = [c for c in candidates if c.vuln_class.value == vuln_class]
     if not candidates:
-        msg = (
-            f"no candidate findings for scan={scan_id} "
-            f"class={vuln_class or '(any)'} in {db_path}"
-        )
+        msg = f"no candidate findings for scan={scan_id} class={vuln_class or '(any)'} in {db_path}"
         raise ReplayResolutionError(msg)
     panel = _resolve_panel_selection(
         role="validate",
