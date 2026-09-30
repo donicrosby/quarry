@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from quarry.schemas import (
+    AgentTask,
     ArchitectureDoc,
     ArtifactRef,
     CandidateFinding,
@@ -167,6 +168,19 @@ class ModelInvocationRecord(Base):
     scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
     invocation_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AgentTaskRecord(Base):
+    __tablename__ = "agent_tasks"
+
+    # AgentTask.id is uuid4 per emission; merge-on-save (upsert by id) keeps an
+    # activity retry idempotent. round_index is stored separately so the
+    # coverage loop's reload can order tasks deterministically (ADR-D3).
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scan_id: Mapped[str] = mapped_column(String, ForeignKey("scans.id"), nullable=False)
+    round_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="recon")
+    task_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 @dataclass(frozen=True)
@@ -384,6 +398,34 @@ class QuarryRepository:
                 select(TraceRecord).where(TraceRecord.scan_id == scan_id)
             ).all()
             return [Trace.model_validate_json(record.trace_json) for record in records]
+
+    def save_agent_task(self, task: AgentTask) -> None:
+        """Persist a coverage-loop agent task (merge on id — retry idempotent).
+
+        Carries round_index + source as columns so the workflow's round-resume
+        reload (ADR-D3, cruft-purge 2.2) can rebuild the task queue
+        deterministically without re-deriving it from the ArchitectureDoc.
+        """
+        with session_scope(self.engine) as session:
+            session.merge(
+                AgentTaskRecord(
+                    id=task.id,
+                    scan_id=task.scan_id,
+                    round_index=task.round_index,
+                    source=task.source,
+                    task_json=task.model_dump_json(),
+                )
+            )
+
+    def load_agent_tasks(self, scan_id: str) -> list[AgentTask]:
+        """All persisted tasks for a scan, ordered by (round_index, id)."""
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(AgentTaskRecord)
+                .where(AgentTaskRecord.scan_id == scan_id)
+                .order_by(AgentTaskRecord.round_index, AgentTaskRecord.id)
+            ).all()
+            return [AgentTask.model_validate_json(record.task_json) for record in records]
 
     def save_integration_run(self, run: IntegrationRun) -> None:
         with session_scope(self.engine) as session:
