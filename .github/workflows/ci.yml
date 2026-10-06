@@ -43,6 +43,22 @@ jobs:
       - name: pyright (strict)
         run: uv run pyright
 
+  # cruft-purge §7.1: dead-code gate. Deliberately separate from `static`:
+  # uvx-ephemeral vulture (no uv sync) keeps it fast, and the allowlist lives
+  # in ci/ so vulture never needs to enter the pinned dev group.
+  dead-code:
+    name: vulture dead-code (src/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: vulture
+        run: uvx --from 'vulture==2.16' vulture src ci/vulture_allowlist.py --min-confidence 60
+
   # Unit + golden suite, split across 4 free 4-core runners by pytest-shard
   # (deterministic hash split, no stored durations state to rot). Same
   # --dist loadfile per shard: file-affinity for sandbox-fork tests is preserved
