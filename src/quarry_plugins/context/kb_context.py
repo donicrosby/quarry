@@ -16,8 +16,8 @@ content, so it lives in the OSS tree.
 
 from __future__ import annotations
 
+from quarry.plugin_types import PluginType
 from quarry.schemas import AgentTask, VulnerabilityClass
-from quarry_plugins.base import PluginType
 
 # Priority above the domain stubs (100): KB records are scan-specific compiled
 # context and should lead the assembled context blocks.

@@ -11,7 +11,8 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 
-from quarry_plugins.base import Plugin, PluginType
+from quarry.plugin_types import PluginType
+from quarry_plugins.base import Plugin
 
 _log = logging.getLogger(__name__)
 

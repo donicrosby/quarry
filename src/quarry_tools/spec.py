@@ -1,24 +1,9 @@
-"""ToolSpec protocol and ToolRegistry type."""
+"""Back-compat re-exports for the tool contracts.
 
-from __future__ import annotations
+ToolSpec and ToolRegistry live in the dependency-free leaf
+quarry.plugin_types (cruft-purge §4.7); pre-hoist import paths keep working.
+"""
 
-from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from quarry.plugin_types import ToolRegistry, ToolSpec
 
-
-@runtime_checkable
-class ToolSpec(Protocol):
-    """Contract every tool must satisfy."""
-
-    name: str
-    description: str
-    input_schema: dict[str, Any]  # JSON Schema describing the inputs dict
-    roles: list[str]  # Agent roles allowed to call this tool
-
-    def run(self, inputs: dict[str, Any], repo_root: Path) -> str:
-        """Execute the tool and return its text output."""
-        ...
-
-
-# A plain dict keyed by tool name — no entry-points loading yet.
-ToolRegistry = dict[str, ToolSpec]
+__all__ = ["ToolRegistry", "ToolSpec"]

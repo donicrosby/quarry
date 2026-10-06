@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from typing import cast
 
-from quarry_plugins.base import PluginType
+from quarry.plugin_types import PluginType, ToolRegistry, ToolSpec
 from quarry_plugins.registry import load_plugins, plugins_of_type
 from quarry_tools.builtins import BUILTIN_REGISTRY
-from quarry_tools.spec import ToolRegistry, ToolSpec
 
 
 def load_registry() -> ToolRegistry:

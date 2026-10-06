@@ -9,11 +9,11 @@ Capability-specific behavior lives in sub-protocols: ``ToolPlugin`` and
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from quarry.plugin_types import FindingSink, PluginType, ToolSpec
 from quarry.schemas import (
     AgentTask,
     FinalFinding,
@@ -23,18 +23,19 @@ from quarry.schemas import (
     VulnerabilityClass,
 )
 from quarry_artifacts.local import LocalArtifactStore
-from quarry_integrations.base import FindingSink
-from quarry_tools.spec import ToolSpec
 
-
-class PluginType(StrEnum):
-    TOOL = "tool"
-    FINDING_SINK = "finding_sink"
-    LIFECYCLE_HOOK = "lifecycle_hook"
-    CONTEXT_INJECTOR = "context_injector"
-    TICKETING = "ticketing"
-    METRICS = "metrics"
-    MODEL_PROVIDER = "model_provider"
+__all__ = [
+    "ContextInjectorPlugin",
+    "FindingSink",
+    "FindingSinkPlugin",
+    "HookContext",
+    "LifecycleEvent",
+    "LifecycleHookPlugin",
+    "Plugin",
+    "PluginType",
+    "ToolPlugin",
+    "ToolSpec",
+]
 
 
 @runtime_checkable

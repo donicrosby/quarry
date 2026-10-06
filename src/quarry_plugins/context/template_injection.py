@@ -7,8 +7,8 @@ product lives in a private repo, never here (portability boundary).
 
 from __future__ import annotations
 
+from quarry.plugin_types import PluginType
 from quarry.schemas import AgentTask, VulnerabilityClass
-from quarry_plugins.base import PluginType
 
 _TARGET_REPO_TYPE = "template-heavy"
 

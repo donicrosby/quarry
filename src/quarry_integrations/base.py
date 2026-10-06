@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
 from uuid import uuid4
 
+# Back-compat re-export (cruft-purge §4.7): FindingSink lives in the
+# dependency-free leaf quarry.plugin_types; pre-hoist import paths keep working.
+from quarry.plugin_types import FindingSink as FindingSink
 from quarry.schemas import (
     ArtifactRef,
     FinalFinding,
@@ -32,12 +34,6 @@ class DeliveryContext:
     dry_run: bool
     artifact_store: LocalArtifactStore | None = None
     already_delivered: set[str] = field(default_factory=_empty_str_set)
-
-
-class FindingSink(Protocol):
-    name: str
-
-    def deliver(self, finding: FinalFinding, ctx: DeliveryContext) -> IntegrationRun: ...
 
 
 def make_run(

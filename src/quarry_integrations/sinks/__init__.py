@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from typing import cast
 
-from quarry_integrations.base import FindingSink
+from quarry.plugin_types import FindingSink, PluginType
 from quarry_integrations.sinks.file_sink import FileSink
 from quarry_integrations.sinks.jira_dry_run import JiraDryRunSink
 from quarry_integrations.sinks.noop import NoopSink
 from quarry_integrations.sinks.slack_dry_run import SlackDryRunSink
-from quarry_plugins.base import PluginType
 from quarry_plugins.registry import load_plugins, plugins_of_type
 
 __all__ = [

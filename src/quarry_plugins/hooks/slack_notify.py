@@ -12,6 +12,7 @@ import os
 
 import httpx
 
+from quarry.plugin_types import PluginType
 from quarry.schemas import (
     ArtifactKind,
     FinalFinding,
@@ -22,7 +23,7 @@ from quarry.schemas import (
 )
 from quarry_integrations.base import already_delivered_run, build_idempotency_key, make_run
 from quarry_models.redaction import scrub
-from quarry_plugins.base import HookContext, LifecycleEvent, PluginType
+from quarry_plugins.base import HookContext, LifecycleEvent
 
 _WEBHOOK_TIMEOUT_SECONDS = 5.0
 
