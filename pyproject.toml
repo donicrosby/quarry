@@ -84,7 +84,7 @@ target-version = "py312"
 line-length = 100
 # examples/ are intentional vulnerability fixtures (scan targets) — never lint or
 # reformat them (it would alter seeded code and shift golden line numbers).
-extend-exclude = ["tests/fixtures", "examples"]
+extend-exclude = ["tests/fixtures", "examples", "ci/vulture_allowlist.py"]  # allowlist is dead references by design
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -112,4 +112,42 @@ extraPaths = ["src", "scripts"]
 venv = ".venv"
 venvPath = "."
 reportUnknownMemberType = "none"
+
+# cruft-purge §7.1 — dead-code gate config for the CI `dead-code` job.
+# Class-wide structural patterns live here; per-symbol real-cruft entries
+# punted to §4 follow-up live in ci/vulture_allowlist.py.
+[tool.vulture]
+min_confidence = 60
+paths = ["src", "ci/vulture_allowlist.py"]
+exclude = ["*/scip_pb2.py"]
+ignore_decorators = [
+    "@field_validator",
+    "@model_validator",
+    "@activity.defn",
+    "@workflow.defn",
+    "@workflow.run",
+    "@workflow.query",
+    "@workflow.signal",
+    "@app.*",
+    "@*.get",
+    "@*.post",
+    "@*.put",
+    "@*.delete",
+    "@*.patch",
+    "@click.*",
+    "@*.command",
+    "@*.callback",
+    "@tui.command",
+    "@tui.callback",
+    "@pytest.fixture",
+]
+ignore_names = [
+    "model_config",
+    "input_schema",     # ToolSpec JSON-schema class attr, read via getattr(TOOL,...)
+    "activity",         # temporalio.activity module, used by @activity.defn decorators
+    "emit_agent_tasks", # invoked as workflow.execute_activity(...) in run_scan.py
+    "get_scan_events",  # SSE handler; referenced from tests via closure
+    # textual framework protocol (message handlers, actions, layout, CSS)
+    "compose", "on_*", "action_*", "BINDINGS", "CSS", "TITLE",
+]
 
