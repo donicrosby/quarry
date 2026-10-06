@@ -49,7 +49,7 @@ Code-only change (`skip_specs: true`). The full test suite (unit + integration +
 ## 5. `run_scan.py` decomposition (4307 LOC — grew from ~3989)
 > Preconditions: §2.2 (round-resume) landed. Constraint: run_scan.py is the import hub — keep back-compat re-export shims (`:112-130`), migrate the 6 golden tests deliberately. Seam pattern proven: `coverage_loop.py`/`prove_stage.py`/`tracer_stage.py`/`dynamic_validate_stage.py` already extracted; `_RoundOutcome` NamedTuple accumulator convention is the interface.
 
-- [ ] 5.1 Extract candidate-source/sweep wiring into its own module
+- [x] 5.1 Extract candidate-source/sweep wiring into its own module — DONE: `secret_candidates_from_activity_payload` + `ssrf_candidates_from_activity_payload` + closure helper `_secret_candidate_from_match_record` moved VERBATIM (byte-identical, diff-audited) into new seam `src/quarry_workflows/candidate_sources.py`; run_scan.py keeps back-compat re-export shims so the 6 golden tests + conftest + integration importers pass UNMIGRATED. `_live_exploit_fingerprint` deliberately STAYS in run_scan.py (live-proven inventory chain, not candidate-source sweep wiring). run_scan.py 4374 → 4205 LOC
 - [ ] 5.2 Extract streaming dedup + validation pool (falls out of §3)
 - [ ] 5.3 Extract coverage-ledger operations
 - [ ] 5.4 Extract promotion wiring + event emission
