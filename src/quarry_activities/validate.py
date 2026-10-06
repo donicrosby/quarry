@@ -28,6 +28,7 @@ from quarry.schemas import (
     ChecklistOutcome,
     CredibilityLevel,
     EnsembleJudgement,
+    JudgementVerdict,
     Provider,
     ValidationResult,
     VulnerabilityClass,
@@ -215,7 +216,7 @@ def _run_debater(
     final = result.final_answer
     if isinstance(final, ChecklistRefuteResponse):
         checklist = enforce_checklist_invariants(
-            verdict="rejected" if final.refuted else "validated",
+            verdict="rejected" if final.refuted else JudgementVerdict.VALIDATED,
             checklist=final.checklist,
         )
         return final, checklist
@@ -447,7 +448,7 @@ def validate_impl(
                 tier=TierKind.DEBATER.value,
                 provider=debater_tier.provider.value,
                 model=debater_tier.model,
-                verdict="refuted" if refuted else "unrefuted",
+                verdict=JudgementVerdict.REFUTED if refuted else JudgementVerdict.UNREFUTED,
                 refuted=refuted,
                 model_invocation_id=_last_invocation_id(debater_client),
             )
@@ -458,7 +459,11 @@ def validate_impl(
         id=str(uuid.uuid4()),
         candidate_finding_id=finding.id,
         scan_id=finding.scan_id,
-        verdict=verdict,  # type: ignore[arg-type]
+        verdict=verdict,  # type: ignore[arg-type]  # narrowed by the guards above:
+        # :364-366 only accept {"validated","rejected","needs_proof"} and :434-443
+        # only ever assign Literal members; tightening ``verdict`` to the Literal is
+        # ValidationResult-scope, not EnsembleJudgement-scope (cruft-purge §2.5
+        # non-goals), so the ignore is justified, not dead.
         reasons=reasons,
         cross_vendor=cross_vendor,
         cross_vendor_disagreement=cross_vendor,
