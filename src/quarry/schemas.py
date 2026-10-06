@@ -579,6 +579,24 @@ class ScanSummary(BaseModel):
     error: str | None = None
 
 
+class JudgementVerdict(StrEnum):
+    """Vocabulary of an ``EnsembleJudgement`` verdict (MDASH, design D3).
+
+    Reasoner-tier judgements emit ``VALIDATED``/``REJECTED``; debater-tier
+    judgements emit ``REFUTED``/``UNREFUTED``. Schema-level typing only — the
+    tier/verdict pairing is enforced by the writers, not by a cross-field
+    validator. Parse-boundary tolerance: unknown/empty model-derived verdict
+    strings are accepted verbatim rather than raising, so a novel verdict never
+    kills a scan mid-parse (AGENTS.md tolerance rule); recognised values are
+    normalised (stripped/lowercased) into the enum.
+    """
+
+    VALIDATED = "validated"
+    REJECTED = "rejected"
+    REFUTED = "refuted"
+    UNREFUTED = "unrefuted"
+
+
 class EnsembleJudgement(BaseModel):
     """One model's contribution to a finding's ensemble credibility (design D3).
 
@@ -587,13 +605,33 @@ class EnsembleJudgement(BaseModel):
     the credibility posterior back to provenance-tracked model calls.
     """
 
+    model_config = ConfigDict(use_enum_values=True)
+
     role: str
     tier: str  # TierKind value: "reasoner" / "debater" / "counterpoint"
     provider: str
     model: str
-    verdict: str  # e.g. "validated" / "rejected" / "refuted" / "unrefuted"
+    # JudgementVerdict when recognised; ``use_enum_values`` stores the bare
+    # string so JSON stays byte-identical to the pre-typing wire format.
+    verdict: JudgementVerdict | str
     refuted: bool | None = None  # set only for debater judgements
     model_invocation_id: str | None = None
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _tolerate_unknown_verdict(cls, value: object) -> object:
+        """Coerce model-derived verdict strings without ever raising.
+
+        Recognised ``JudgementVerdict`` values are normalised (stripped,
+        lowercased) so pydantic's enum coercion lands them; unknown or empty
+        strings pass through verbatim so a novel/empty model verdict is
+        retained for audit instead of aborting the parse.
+        """
+        if isinstance(value, str):
+            stripped = value.strip().lower()
+            if stripped in {member.value for member in JudgementVerdict}:
+                return stripped
+        return value
 
 
 def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
