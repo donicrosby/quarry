@@ -118,6 +118,10 @@ limiting, and multi-vendor (Anthropic / Bedrock) options.
 Never store API keys in `quarry.toml` — Quarry rejects the file at startup if it
 finds credential-like keys.
 
+For the full map of every knob — prompt template versions, panel resolution,
+`scan_defaults` fields, budget enforcement — see
+[`docs/config-inventory.md`](docs/config-inventory.md).
+
 #### Tuning scan concurrency
 
 Stage-level fan-out within a scan is bounded by `scan_defaults` knobs in
