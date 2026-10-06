@@ -248,14 +248,35 @@ class ScanDefaultsConfig(BaseModel):
 
 
 class RetryConfig(BaseModel):
-    """How many times each Temporal activity is attempted before giving up.
+    """Activity retry policy: counts plus the seconds-scale backoff intervals.
 
     ``max_attempts`` counts the initial try plus retries (Temporal semantics):
     e.g. ``4`` means one attempt + three retries. The default sits in the
     recommended 3–5 range; values below 1 are clamped to 1 (at least one try).
+
+    The interval knobs (cruft-purge §3.7) retune retries from minutes-scale to
+    seconds-scale: ``initial_interval_seconds`` starts the exponential ladder,
+    ``backoff_coefficient`` grows it, ``maximum_interval_seconds`` caps each
+    wait (Temporal ``maximum_interval``), and ``jitter_fraction`` spreads
+    retries symmetrically so concurrent workers don't re-stampede the provider.
+    Defaults produce worst-case waits (4s, 8s, 16s, 30s, 30s…) — under a
+    minute per activity retry cycle versus the minutes-scale sleeps a
+    Retry-After-honoring client can produce.
+
+    ``calibrate_start_to_close_seconds`` is the per-attempt StartToClose
+    budget for the ``calibrate-finding`` agent-loop activity: it must cover a
+    full loop (up to 10 model turns × turn timeout) at observed chutes
+    latency, and is config-backed so the number is documented, not hardcoded
+    (see §1.2 baseline note: a 61s attempt budget failed during an OOM window
+    even though healthy calibrations completed in 4–29s).
     """
 
     max_attempts: int = 4
+    initial_interval_seconds: float = Field(default=2.0, ge=0.0)
+    backoff_coefficient: float = Field(default=2.0, ge=1.0)
+    maximum_interval_seconds: float | None = Field(default=30.0, ge=0.0)
+    jitter_fraction: float = Field(default=0.2, ge=0.0, le=0.5)
+    calibrate_start_to_close_seconds: int = Field(default=300, ge=1)
 
     @field_validator("max_attempts")
     @classmethod
