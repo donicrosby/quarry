@@ -293,3 +293,22 @@ def test_role_config_turn_timeout_default_panel_is_120() -> None:
     resolved = resolve_panel(cfg, None)
     for role_cfg in resolved.values():
         assert role_cfg.turn_timeout_seconds == 120
+
+
+def test_scan_defaults_prove_max_concurrent_default(tmp_path: Path) -> None:
+    """Prove fan-out knob resolves from scan_defaults (default 4, the #54 tracer/
+    calibrate default — PROVE is a full agent loop + sandbox per attempt)."""
+    empty_toml = tmp_path / "quarry.toml"
+    empty_toml.write_text("", encoding="utf-8")
+    cfg = load_quarry_config(path=empty_toml)
+    assert cfg.scan_defaults.prove_max_concurrent == 4
+
+
+def test_scan_defaults_prove_max_concurrent_parses_from_toml(tmp_path: Path) -> None:
+    toml_path = tmp_path / "quarry.toml"
+    toml_path.write_text(
+        "[scan_defaults]\nprove_max_concurrent = 2\n",
+        encoding="utf-8",
+    )
+    cfg = load_quarry_config(path=toml_path)
+    assert cfg.scan_defaults.prove_max_concurrent == 2

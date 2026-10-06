@@ -104,6 +104,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             validate_max_concurrent=quarry_config.scan_defaults.validate_max_concurrent,
             trace_max_concurrent=quarry_config.scan_defaults.trace_max_concurrent,
             calibrate_max_concurrent=quarry_config.scan_defaults.calibrate_max_concurrent,
+            prove_max_concurrent=quarry_config.scan_defaults.prove_max_concurrent,
             dynamic_validate_max_concurrent=(
                 quarry_config.scan_defaults.dynamic_validate_max_concurrent
             ),

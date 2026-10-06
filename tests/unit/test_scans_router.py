@@ -137,6 +137,10 @@ async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext
     assert scan_input.validate_max_concurrent == (
         load_quarry_config().scan_defaults.validate_max_concurrent
     )
+    # Prove fan-out knob resolves from scan_defaults too (cruft-purge 3.2).
+    assert scan_input.prove_max_concurrent == (
+        load_quarry_config().scan_defaults.prove_max_concurrent
+    )
 
 
 async def test_resume_scan_returns_404_for_unknown_scan(scan_api: ScanApiTestContext) -> None:

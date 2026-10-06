@@ -246,6 +246,28 @@ class _CalibrateOutcome(NamedTuple):
     error: str = ""
 
 
+class _ProveOutcome(NamedTuple):
+    """Per-finding result of one gathered PROVE batch (cruft-purge §3.2).
+
+    The closure runs the historical per-finding attempt loop (up to
+    ``PROVE_MAX_ATTEMPTS`` prove-finding + sandbox-exec / http-request
+    dispatches) and returns everything the serial loop mutated, so the
+    post-gather loop can apply it in finding INPUT order:
+
+    - ``finding``: the candidate annotated with ``metadata["prove_verdict"]``
+      (or the input finding unchanged when the whole loop crashed).
+    - ``proof_artifacts``: this finding's captures, in attempt order.
+    - ``failure``: the loop-level exception, if any — the fan-out's
+      ``return_exceptions=True`` belt-and-braces alias. ``None`` on success
+      (including the not_proved/needs_manual_review outcomes, which are
+      normal results of the attempt loop, not failures).
+    """
+
+    finding: CandidateFinding
+    proof_artifacts: list[ProofArtifact]
+    failure: Exception | None = None
+
+
 def _empty_run_vuln_classes() -> list[VulnerabilityClass]:
     return []
 
@@ -284,6 +306,13 @@ class RunScanInput(BaseModel):
     # (scan-stage-fanout). Mirrors hunt_max_concurrent; the API layer resolves
     # it from scan_defaults.
     validate_max_concurrent: int = 8
+    # Semaphore bound on concurrent per-finding PROVE attempt loops
+    # (cruft-purge §3.2). Each in-flight finding holds one prove-finding agent
+    # loop plus its sandbox-exec / http-request capture children, so the
+    # default mirrors the per-finding tracer/calibrate bound (4) rather than
+    # the candidate-validate bound (8). 1 restores the historical serial
+    # behavior; the API layer resolves it from scan_defaults.
+    prove_max_concurrent: int = 4
     # Per-finding severity-calibration fan-out bound (scan-stage-fanout): the
     # validated-findings calibrations are gathered under this semaphore. 4 —
     # calibration is a full agent loop per finding; keep it conservative like
@@ -2382,145 +2411,244 @@ class RunScanWorkflow:
                     else None
                 )
                 # Prove live-corroborated leads first (dynamic_validate verdict).
-                for finding in prioritize_by_live_verdict(filter_needs_proof(round_needs_proof)):
-                    final_verdict = "not_proved"
-                    prior_attempts: list[dict[str, Any]] = []
-                    for attempt in range(PROVE_MAX_ATTEMPTS):
-                        try:
-                            prove_raw = await workflow.execute_activity(
-                                "prove-finding",
-                                args=[
-                                    finding.model_dump(mode="json"),
-                                    repo_path,
-                                    None,
-                                    pv_budget_remaining,
-                                    prove_panel_json,
-                                    scan_input.db_path,
-                                    20,
-                                    scan_input.scan_seed,
-                                    prior_attempts or None,
-                                    artifact_root,
-                                ],
-                                start_to_close_timeout=timedelta(hours=2),
-                                heartbeat_timeout=timedelta(minutes=3),
-                                retry_policy=RetryPolicy(maximum_attempts=1),
-                            )
-                            prove_dict = cast("dict[str, Any]", prove_raw)
-                            exec_inputs, http_inputs = build_prove_dispatch_inputs(
-                                proposed_exec_specs=prove_dict.get("proposed_exec_specs", []),
-                                proposed_http_specs=prove_dict.get("proposed_http_specs", []),
-                                scan_id=scan.id,
-                                finding_id=finding.id,
-                                artifact_root=artifact_root,
-                                target_endpoint_json=_target_endpoint_json,
-                                allowed_hosts=scan_input.allowed_hosts,
-                            )
-                            exec_caps: list[SandboxExecCapture] = []
-                            http_caps: list[HttpResponseCapture] = []
-                            for exec_inp in exec_inputs:
-                                try:
-                                    exec_raw = await workflow.execute_activity(
-                                        "sandbox-exec",
-                                        args=[exec_inp],
-                                        start_to_close_timeout=timedelta(minutes=10),
-                                        retry_policy=RetryPolicy(maximum_attempts=1),
-                                    )
-                                    cap = (
-                                        exec_raw
-                                        if isinstance(exec_raw, SandboxExecCapture)
-                                        else SandboxExecCapture.model_validate(exec_raw)
-                                    )
-                                    exec_caps.append(cap)
-                                    proof_artifacts.append(
-                                        build_proof_artifact(
-                                            finding,
-                                            cap,
-                                            "cli_exec",
-                                            scan.id,
-                                            workflow.now(),
-                                        )
-                                    )
-                                except Exception:
-                                    pass
-                            for http_inp in http_inputs:
-                                try:
-                                    http_raw = await workflow.execute_activity(
-                                        "http-request",
-                                        args=[http_inp],
-                                        start_to_close_timeout=timedelta(minutes=2),
-                                        retry_policy=RetryPolicy(maximum_attempts=1),
-                                    )
-                                    cap_h = (
-                                        http_raw
-                                        if isinstance(http_raw, HttpResponseCapture)
-                                        else HttpResponseCapture.model_validate(http_raw)
-                                    )
-                                    http_caps.append(cap_h)
-                                    proof_artifacts.append(
-                                        build_proof_artifact(
-                                            finding,
-                                            cap_h,
-                                            "dynamic_http",
-                                            scan.id,
-                                            workflow.now(),
-                                        )
-                                    )
-                                except Exception:
-                                    pass
-                            outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
-                            if outcome_verdict == "proved":
-                                final_verdict = "proved"
-                                break
-                            if outcome_verdict == "needs_manual_review":
-                                final_verdict = "needs_manual_review"
-                                await _append_workflow_event(
-                                    scan_input.db_path,
-                                    scan.id,
-                                    "prove.needs_manual_review",
-                                    {
-                                        "finding_id": finding.id,
-                                        "reason": "sandbox_timeout",
-                                        "attempt": str(attempt + 1),
-                                    },
+                # Per-finding fan-out (cruft-purge §3.2, mirroring
+                # scan-stage-fanout): each finding's attempt loop dispatches
+                # under the prove_max_concurrent semaphore; per-finding
+                # failure isolation via return_exceptions; lifecycle events
+                # are emitted post-gather in finding INPUT order (the
+                # prioritized order, deterministic replay). The attempt loop
+                # itself — PROVE_MAX_ATTEMPTS with prior-attempt feedback — is
+                # unchanged from the serial flow; only its concurrency changed.
+                prove_targets = prioritize_by_live_verdict(filter_needs_proof(round_needs_proof))
+                prove_semaphore = asyncio.Semaphore(max(1, scan_input.prove_max_concurrent))
+
+                async def _prove_one_finding(
+                    finding: CandidateFinding,
+                ) -> _ProveOutcome:
+                    """Run one finding's PROVE attempt loop under the semaphore.
+
+                    Semantics are exactly the historical per-finding behaviour:
+                    up to PROVE_MAX_ATTEMPTS rounds of prove-finding + capture
+                    dispatches, proved/needs_manual_review breaking early,
+                    prior-attempt feedback between attempts, per-capture
+                    failures tolerated (best-effort), and one final
+                    prove_verdict annotation. The finding's proof artifacts
+                    travel in the outcome instead of appending to the shared
+                    accumulator mid-flight (post-gather loop is the only
+                    writer); a loop-level failure is recorded in the outcome
+                    and never raised into the gathered batch.
+                    """
+                    local_artifacts: list[ProofArtifact] = []
+                    async with prove_semaphore:
+                        final_verdict = "not_proved"
+                        prior_attempts: list[dict[str, Any]] = []
+                        for attempt in range(PROVE_MAX_ATTEMPTS):
+                            try:
+                                prove_raw = await workflow.execute_activity(
+                                    "prove-finding",
+                                    args=[
+                                        finding.model_dump(mode="json"),
+                                        repo_path,
+                                        None,
+                                        pv_budget_remaining,
+                                        prove_panel_json,
+                                        scan_input.db_path,
+                                        20,
+                                        scan_input.scan_seed,
+                                        prior_attempts or None,
+                                        artifact_root,
+                                    ],
+                                    start_to_close_timeout=timedelta(hours=2),
+                                    heartbeat_timeout=timedelta(minutes=3),
+                                    retry_policy=RetryPolicy(maximum_attempts=1),
                                 )
-                                break
-                            prior_attempts.append(
-                                build_prior_attempt_record(
-                                    attempt,
-                                    prove_dict.get("verdict", "inconclusive"),
-                                    prove_dict.get("reasons", []),
+                                prove_dict = cast("dict[str, Any]", prove_raw)
+                                exec_inputs, http_inputs = build_prove_dispatch_inputs(
+                                    proposed_exec_specs=prove_dict.get("proposed_exec_specs", []),
+                                    proposed_http_specs=prove_dict.get("proposed_http_specs", []),
+                                    scan_id=scan.id,
+                                    finding_id=finding.id,
+                                    artifact_root=artifact_root,
+                                    target_endpoint_json=_target_endpoint_json,
+                                    allowed_hosts=scan_input.allowed_hosts,
                                 )
-                            )
-                        except Exception as exc:
+                                exec_caps: list[SandboxExecCapture] = []
+                                http_caps: list[HttpResponseCapture] = []
+                                for exec_inp in exec_inputs:
+                                    try:
+                                        exec_raw = await workflow.execute_activity(
+                                            "sandbox-exec",
+                                            args=[exec_inp],
+                                            start_to_close_timeout=timedelta(minutes=10),
+                                            retry_policy=RetryPolicy(maximum_attempts=1),
+                                        )
+                                        cap = (
+                                            exec_raw
+                                            if isinstance(exec_raw, SandboxExecCapture)
+                                            else SandboxExecCapture.model_validate(exec_raw)
+                                        )
+                                        exec_caps.append(cap)
+                                        local_artifacts.append(
+                                            build_proof_artifact(
+                                                finding,
+                                                cap,
+                                                "cli_exec",
+                                                scan.id,
+                                                workflow.now(),
+                                            )
+                                        )
+                                    except Exception:
+                                        pass
+                                for http_inp in http_inputs:
+                                    try:
+                                        http_raw = await workflow.execute_activity(
+                                            "http-request",
+                                            args=[http_inp],
+                                            start_to_close_timeout=timedelta(minutes=2),
+                                            retry_policy=RetryPolicy(maximum_attempts=1),
+                                        )
+                                        cap_h = (
+                                            http_raw
+                                            if isinstance(http_raw, HttpResponseCapture)
+                                            else HttpResponseCapture.model_validate(http_raw)
+                                        )
+                                        http_caps.append(cap_h)
+                                        local_artifacts.append(
+                                            build_proof_artifact(
+                                                finding,
+                                                cap_h,
+                                                "dynamic_http",
+                                                scan.id,
+                                                workflow.now(),
+                                            )
+                                        )
+                                    except Exception:
+                                        pass
+                                outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
+                                if outcome_verdict == "proved":
+                                    final_verdict = "proved"
+                                    break
+                                if outcome_verdict == "needs_manual_review":
+                                    final_verdict = "needs_manual_review"
+                                    await _append_workflow_event(
+                                        scan_input.db_path,
+                                        scan.id,
+                                        "prove.needs_manual_review",
+                                        {
+                                            "finding_id": finding.id,
+                                            "reason": "sandbox_timeout",
+                                            "attempt": str(attempt + 1),
+                                        },
+                                    )
+                                    break
+                                prior_attempts.append(
+                                    build_prior_attempt_record(
+                                        attempt,
+                                        prove_dict.get("verdict", "inconclusive"),
+                                        prove_dict.get("reasons", []),
+                                    )
+                                )
+                            except Exception as exc:
+                                # Record the failure and keep the attempt
+                                # loop's contract: the finding is annotated
+                                # not_proved below, in input order.
+                                return _ProveOutcome(
+                                    finding=finding,
+                                    proof_artifacts=local_artifacts,
+                                    failure=exc,
+                                )
+                        else:
+                            # All PROVE_MAX_ATTEMPTS ran without a
+                            # proved/timeout/error.
+                            final_verdict = "needs_manual_review"
                             await _append_workflow_event(
                                 scan_input.db_path,
                                 scan.id,
-                                "prove.failed",
+                                "prove.needs_manual_review",
                                 {
                                     "finding_id": finding.id,
-                                    "error": _describe_failure(exc),
+                                    "reason": "max_attempts_exhausted",
+                                    "attempt": str(PROVE_MAX_ATTEMPTS),
                                 },
                             )
-                            break
-                    else:
-                        # All PROVE_MAX_ATTEMPTS ran without a proved/timeout/error.
-                        final_verdict = "needs_manual_review"
+                        annotated = finding.model_copy(
+                            update={
+                                "metadata": {
+                                    **finding.metadata,
+                                    "prove_verdict": final_verdict,
+                                }
+                            }
+                        )
+                        return _ProveOutcome(
+                            finding=annotated,
+                            proof_artifacts=local_artifacts,
+                            failure=None,
+                        )
+
+                # return_exceptions=True: the worker closures already capture
+                # their own failures; this is a second belt-and-braces layer so
+                # a bug in the closure itself degrades to a per-finding event
+                # instead of failing the scan (scan-stage-fanout pattern).
+                prove_results = await asyncio.gather(
+                    *[_prove_one_finding(f) for f in prove_targets],
+                    return_exceptions=True,
+                )
+
+                # Post-gather, in finding INPUT (prioritized) order: merge
+                # proof artifacts into the shared accumulator, sync the
+                # candidate list, and emit the lifecycle events —
+                # prove.failed first (if any), then prove.verdict — so event
+                # order is deterministic for replay.
+                for target_finding, prove_result in zip(prove_targets, prove_results, strict=True):
+                    if isinstance(prove_result, BaseException):
+                        # Closure-level bug: record and keep the rest.
                         await _append_workflow_event(
                             scan_input.db_path,
                             scan.id,
-                            "prove.needs_manual_review",
+                            "prove.failed",
                             {
-                                "finding_id": finding.id,
-                                "reason": "max_attempts_exhausted",
-                                "attempt": str(PROVE_MAX_ATTEMPTS),
+                                "finding_id": target_finding.id,
+                                "error": _describe_failure(prove_result),
                             },
                         )
-                    finding.metadata["prove_verdict"] = final_verdict
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "prove.verdict",
+                            {
+                                "finding_id": target_finding.id,
+                                "verdict": "not_proved",
+                            },
+                        )
+                        continue
+                    outcome = prove_result
+                    if outcome.failure is not None:
+                        await _append_workflow_event(
+                            scan_input.db_path,
+                            scan.id,
+                            "prove.failed",
+                            {
+                                "finding_id": target_finding.id,
+                                "error": _describe_failure(outcome.failure),
+                            },
+                        )
+                    proof_artifacts.extend(outcome.proof_artifacts)
+                    # Sync the accumulator so later stages (TRACER, report)
+                    # see the prove-annotated candidate.
+                    for idx, existing in enumerate(candidate_findings):
+                        if existing.id == outcome.finding.id:
+                            candidate_findings[idx] = outcome.finding
+                            break
                     await _append_workflow_event(
                         scan_input.db_path,
                         scan.id,
                         "prove.verdict",
-                        {"finding_id": finding.id, "verdict": final_verdict},
+                        {
+                            "finding_id": outcome.finding.id,
+                            "verdict": str(
+                                outcome.finding.metadata.get("prove_verdict", "not_proved")
+                            ),
+                        },
                     )
             await _persist_scan_stage(scan_input.db_path, scan.id, "PROVE")
             await _append_workflow_event(

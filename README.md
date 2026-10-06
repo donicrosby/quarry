@@ -133,6 +133,7 @@ Stage-level fan-out within a scan is bounded by `scan_defaults` knobs in
 | `validate_max_concurrent` | Candidate validations | 8 |
 | `trace_max_concurrent` | Per-finding reachability traces | 4 |
 | `calibrate_max_concurrent` | Per-finding severity calibrations | 4 |
+| `prove_max_concurrent` | Per-finding PROVE attempt loops | 4 |
 | `dynamic_validate_max_concurrent` | Pre-hunt per-class dynamic-validation sweep | 8 |
 
 Each bound is enforced by a semaphore in the workflow; a higher value increases

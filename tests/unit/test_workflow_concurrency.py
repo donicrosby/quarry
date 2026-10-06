@@ -34,6 +34,7 @@ no network / DB beyond the scan's own SQLite file in ``tmp_path``.
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +64,10 @@ from quarry_activities.repo import persist_scan_state
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
 
+# Per-finding sleep overrides for the prove fan-out fake (set per test; cleared
+# by _reset_tracker). Defined here because _reset_tracker clears it.
+_prove_sleep_overrides: dict[str, float] = {}
+
 _NOW = datetime(2026, 9, 26, tzinfo=UTC)
 
 # Serial floor (seconds) for the 6-candidate failing-first timing test.  A
@@ -90,6 +95,7 @@ def _reset_tracker() -> None:
         _current[0] = 0
         _peak[0] = 0
         _records.clear()
+        _prove_sleep_overrides.clear()
 
 
 def _record_start(finding_id: str) -> None:
@@ -1433,3 +1439,545 @@ async def test_calibrate_fan_out_respects_max_concurrent(
     assert _calibrate_peak[0] >= 2, (
         "calibrations never overlapped (peak == 1) — fan-out is not exercised"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PROVE per-finding fan-out (cruft-purge §3.2) — concurrency contracts
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Mirrors the scan-stage-fanout (#54) contracts onto the PROVE stage: the
+# per-finding attempts (prove-finding + its sandbox-exec / http-request
+# captures) gather under a prove_max_concurrent semaphore; failures isolate
+# per finding; prove.verdict events land in finding INPUT order.
+#
+# Workflow seeding shape: the validate fake promotes NOTHING (all candidates
+# resolve needs_proof), so PROVE receives every candidate this round — the
+# stage under test — while TRACER and the coverage loop see empty work.
+
+
+# (finding_id, started, ended) wall-clock execution windows per prove activity.
+_prove_windows: list[tuple[str, float, float]] = []
+# Open execution windows keyed by activity execution (activity_type:id:attempt).
+_prove_open: dict[str, float] = {}
+# Which finding ids the fake prove-finding activity raises for.
+_prove_fail_findings: list[str] = []
+# Sleep overrides per finding id, so verdicts can complete out of input order.
+_prove_lock = threading.Lock()
+# Number of prove-finding ATTEMPTS per finding id — pins the per-finding retry
+# budget (PROVE_MAX_ATTEMPTS) across the fan-out. Keyed by (finding_id, attempt)
+# index order; the dict values are the attempt payloads seen per finding.
+_prove_attempt_payloads: dict[str, list[list[dict[str, Any]] | None]] = {}
+# Finding ids whose SECOND attempt proposes one exec spec (retry-refine path).
+_prove_attempt2_spec_findings: list[str] = []
+
+
+def _reset_prove_tracker() -> None:
+    with _prove_lock:
+        _prove_windows.clear()
+        _prove_open.clear()
+        _prove_fail_findings.clear()
+        _prove_sleep_overrides.clear()
+        _prove_attempt_payloads.clear()
+        _prove_attempt2_spec_findings.clear()
+
+
+def _prove_peak_overlap() -> int:
+    """Max prove-finding-activity execution windows overlapping any instant.
+
+    Windows are recorded INSIDE the activity (see ``_track_enter``/``_track_exit``),
+    so time queued behind the workflow semaphore is never counted — a window
+    spans only actual activity execution. End events sort before start events
+    at identical timestamps so an exact hand-off is not counted as overlap
+    (same shape as _peak_overlap).
+    """
+    with _prove_lock:
+        windows = list(_prove_windows)
+    events: list[tuple[float, int]] = []
+    for _fid, started, ended in windows:
+        events.append((started, 1))
+        events.append((ended, -1))
+    events.sort(key=lambda e: (e[0], e[1]))
+    current = 0
+    peak = 0
+    for _t, delta in events:
+        current += delta
+        peak = max(peak, current)
+    return peak
+
+
+def _track_enter(activity_type: str) -> str:
+    """Record an activity execution's start (call inside the activity)."""
+    ctx = activity.info()
+    key = f"{activity_type}:{ctx.activity_id}:{ctx.attempt}"
+    with _prove_lock:
+        _prove_open[key] = time.monotonic()
+    return key
+
+
+def _track_exit(key: str) -> None:
+    """Record an activity execution's end (call inside the activity)."""
+    with _prove_lock:
+        started = _prove_open.pop(key, None)
+        if started is not None:
+            _prove_windows.append((key.split(":", 1)[0], started, time.monotonic()))
+
+
+@activity.defn(name="prove-finding")
+def _instrumented_prove_activity(
+    finding: object,
+    repo_path: str | None = None,
+    panel: object = None,
+    budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
+    prior_attempts: list[dict[str, Any]] | None = None,
+    artifact_root: str | None = None,
+) -> dict[str, object]:
+    """Fake prove activity: no specs proposed, optional fail/stagger per id.
+
+    Returns an empty ProveResponse-shaped dict, so the workflow dispatches no
+    sandbox-exec / http-request children — one prove activity per attempt is
+    the whole in-flight surface the contracts below measure. For finding ids
+    listed in ``_prove_attempt2_spec_findings`` the SECOND attempt (detected
+    via ``prior_attempts``) proposes one exec spec, exercising the retry
+    feedback loop end to end.
+    """
+    finding_id = _finding_id(finding)
+    with _prove_lock:
+        fail = finding_id in _prove_fail_findings
+        delay = _prove_sleep_overrides.get(finding_id, 0.0)
+        _prove_attempt_payloads.setdefault(finding_id, []).append(
+            list(prior_attempts) if prior_attempts else None
+        )
+        refine_on_attempt2 = finding_id in _prove_attempt2_spec_findings
+    win = _track_enter("prove-finding")
+    if delay:
+        time.sleep(delay)
+    _track_exit(win)
+    if fail:
+        msg = f"simulated prove crash: {finding_id}"
+        raise RuntimeError(msg)
+    attempt_index = len(_prove_attempt_payloads.get(finding_id, []))
+    if refine_on_attempt2 and attempt_index >= 2:
+        return {
+            "proposed_exec_specs": [
+                {"command": "echo", "args": [finding_id], "timeout_seconds": 5}
+            ],
+            "proposed_http_specs": [],
+            "verdict": "inconclusive",
+        }
+    return {"proposed_exec_specs": [], "proposed_http_specs": [], "verdict": "inconclusive"}
+
+
+@activity.defn(name="sandbox-exec")
+def _stub_sandbox_exec(input: object) -> dict[str, object]:
+    """Exit-0 capture — a proposed spec proves the finding on that attempt."""
+    from quarry.schemas import RedactionStatus
+
+    return {
+        "exit_code": 0,
+        "stdout_artifact_ref": "stdout-stub",
+        "stderr_artifact_ref": "stderr-stub",
+        "elapsed_ms": 5,
+        "scrubber_hits": 0,
+        "redaction_status": RedactionStatus.NOT_REQUIRED.value,
+        "timed_out": False,
+    }
+
+
+@activity.defn(name="http-request")
+def _stub_http_request(input: object) -> dict[str, object]:
+    """No-op http capture — the prove fakes propose no http specs."""
+    from quarry.schemas import RedactionStatus
+
+    return {
+        "status_code": 200,
+        "request_artifact_ref": "request-stub",
+        "body_artifact_ref": "body-stub",
+        "elapsed_ms": 5,
+        "scrubber_hits": 0,
+        "redaction_status": RedactionStatus.NOT_REQUIRED.value,
+    }
+
+
+async def _seed_needs_proof_scan(
+    db_path: Path,
+    scan_id: str,
+    finding_ids: list[str],
+) -> str:
+    """Persist a RUNNING scan whose candidates the fake validator will park as
+    NEEDS_PROOF, so the PROVE stage receives every finding this round."""
+    scan = Scan(
+        id=scan_id,
+        workspace_id="ws-1",
+        target_id="tgt-1",
+        requested_by="tester",
+        profile=ScanProfile(
+            id="test-profile",
+            name="Test",
+            vuln_classes=[VulnerabilityClass.COMMAND_INJECTION],
+        ),
+        status=ScanStatus.RUNNING,
+        created_at=_NOW,
+        metadata={"current_stage": "VALIDATION"},
+    )
+    target = Target(
+        id="tgt-1",
+        workspace_id="ws-1",
+        repo_path="/tmp/repo",
+        target_kind="local_repo",
+        created_at=_NOW,
+    )
+    repository = QuarryRepository(db_path)
+    repository.create_scan(scan, target)
+    for fid in finding_ids:
+        candidate = CandidateFinding(
+            id=fid,
+            scan_id=scan_id,
+            workspace_id="ws-1",
+            vuln_class=VulnerabilityClass.COMMAND_INJECTION,
+            title=f"Finding {fid}",
+            hypothesis="Reachable sink without sanitization.",
+            affected_component=f"src/handlers_{fid}.py:1",
+            confidence=Confidence.HIGH,
+            severity=Severity.HIGH,
+            created_by="hunt-agent",
+            created_at=_NOW,
+        )
+        repository.save_candidate_finding(candidate)
+    return scan_id
+
+
+async def _run_prove_scan(
+    temporal_client: Client,
+    tmp_path: Path,
+    *,
+    finding_ids: list[str],
+    scan_id: str,
+    prove_max_concurrent: int,
+) -> Path:
+    """Run RunScanWorkflow with every candidate parked at NEEDS_PROVE.
+
+    The validate fake returns ``needs_proof`` for every candidate, so the
+    PROVE stage (proof_enabled=True) is the only model-backed work: the
+    concurrency tracker measures the prove fan-out in isolation. TRACER sees
+    no pending findings (candidates stay NEEDS_PROOF, not traced); the
+    coverage loop converges after round 0 (gapfill emits nothing).
+    """
+    db_path = tmp_path / "quarry.db"
+    output_dir = tmp_path / "output"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    scan_id = await _seed_needs_proof_scan(db_path, scan_id, finding_ids)
+    task_queue = f"quarry-prove-conc-{scan_id}"
+
+    activity_executor = ThreadPoolExecutor(max_workers=8)
+    worker = Worker(
+        temporal_client,
+        task_queue=task_queue,
+        workflows=[RunScanWorkflow],
+        activities=[
+            persist_scan_state,
+            _needs_proof_validator,
+            _instrumented_prove_activity,
+            _stub_build_call_graph,
+            _stub_tracer_finding,
+            _stub_calibrate_finding,
+            _stub_gapfill_coverage,
+            _stub_build_coverage_ledger,
+            _stub_render_report,
+            _stub_dispatch_lifecycle_hooks,
+            _stub_deduplicate_findings,
+            _stub_sandbox_exec,
+            _stub_http_request,
+            _stub_build_scan_manifest,
+            _stub_create_snapshot,
+        ],
+        activity_executor=activity_executor,
+        graceful_shutdown_timeout=timedelta(seconds=10),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+
+    try:
+        async with worker:
+            await temporal_client.execute_workflow(
+                RunScanWorkflow.run,
+                RunScanInput(
+                    repo_path="/tmp/repo",
+                    scan_id=scan_id,
+                    db_path=str(db_path),
+                    output_dir=str(output_dir),
+                    resume=True,
+                    proof_enabled=True,
+                    prove_max_concurrent=prove_max_concurrent,
+                ),
+                id=scan_id,
+                task_queue=task_queue,
+            )
+    finally:
+        activity_executor.shutdown(wait=True)
+    return db_path
+
+
+@activity.defn(name="validate-candidate-finding")
+def _needs_proof_validator(
+    finding: object,
+    repo_path: str | None = None,
+    panel: object = None,
+    budget_cap_usd: float | None = None,
+    panel_json: str | None = None,
+    db_path: str | None = None,
+    max_iterations: int = 20,
+    scan_seed: int | None = None,
+    artifact_root: str | None = None,
+    kb_root_index_key: str | None = None,
+) -> dict[str, object]:
+    """Fake validator that parks every candidate as NEEDS_PROOF."""
+    return {
+        "verdict": "needs_proof",
+        "credibility": "unrefuted",
+        "ensemble": [],
+        "reasons": [],
+    }
+
+
+class TestProveFanOut:
+    async def test_verdicts_emitted_in_finding_input_order(
+        self, temporal_client: Client, tmp_path: Path
+    ) -> None:
+        """prove.verdict events follow finding INPUT order, not completion order."""
+        _reset_prove_tracker()
+        finding_ids = [f"pf-{i}" for i in range(5)]
+        with _prove_lock:
+            # Later findings finish first (shorter sleeps earlier in the list
+            # would match completion to input; instead stagger so completion
+            # order is the REVERSE of input order).
+            for i, fid in enumerate(finding_ids):
+                _prove_sleep_overrides[fid] = 0.05 * (len(finding_ids) - i)
+
+        db_path = await _run_prove_scan(
+            temporal_client,
+            tmp_path,
+            finding_ids=finding_ids,
+            scan_id="scan-prove-order",
+            prove_max_concurrent=8,
+        )
+
+        repo = QuarryRepository(db_path)
+        events = repo.load_events("scan-prove-order")
+        verdict_ids = [
+            str(e.payload.get("finding_id")) for e in events if e.event_type == "prove.verdict"
+        ]
+        assert verdict_ids == finding_ids, (
+            f"prove.verdict events must follow finding input order, got {verdict_ids}"
+        )
+        # Sanity: the executions genuinely overlapped (fan-out is real, not
+        # serialized), so a completion-ordered emission cannot pass above.
+        assert _prove_peak_overlap() >= 2, "prove activities never overlapped"
+
+    async def test_failure_is_isolated_and_verdict_still_emitted(
+        self, temporal_client: Client, tmp_path: Path
+    ) -> None:
+        """A prove-finding crash emits prove.failed + prove.verdict(not_proved)
+        for that finding only; siblings still prove; the scan completes."""
+        _reset_prove_tracker()
+        finding_ids = ["pf-1", "pf-2", "pf-3"]
+        with _prove_lock:
+            _prove_fail_findings.append("pf-2")
+
+        db_path = await _run_prove_scan(
+            temporal_client,
+            tmp_path,
+            finding_ids=finding_ids,
+            scan_id="scan-prove-fail",
+            prove_max_concurrent=2,
+        )
+
+        repo = QuarryRepository(db_path)
+        events = repo.load_events("scan-prove-fail")
+        types = [e.event_type for e in events]
+        assert "scan.failed" not in types, "one prove failure must not fail the scan"
+        assert types.count("prove.completed") == 1
+
+        failed_ids = [
+            str(e.payload.get("finding_id")) for e in events if e.event_type == "prove.failed"
+        ]
+        assert failed_ids == ["pf-2"], f"expected prove.failed for pf-2 only, got {failed_ids}"
+
+        verdicts = {
+            str(e.payload.get("finding_id")): str(e.payload.get("verdict"))
+            for e in events
+            if e.event_type == "prove.verdict"
+        }
+        assert set(verdicts) == {"pf-1", "pf-2", "pf-3"}, (
+            f"every finding — including the failed one — needs a verdict, got {verdicts}"
+        )
+        assert verdicts["pf-2"] == "not_proved", (
+            f"the failed finding's verdict must be not_proved, got {verdicts}"
+        )
+        assert verdicts["pf-1"] in {"not_proved", "needs_manual_review", "proved"}
+        assert verdicts["pf-3"] in {"not_proved", "needs_manual_review", "proved"}
+        # The scan completed and every finding got exactly one verdict event.
+        assert len([e for e in events if e.event_type == "prove.verdict"]) == 3
+
+    async def test_concurrency_cap_respected_and_engaged(
+        self, temporal_client: Client, tmp_path: Path
+    ) -> None:
+        """prove_max_concurrent=2 with 6 findings ⇒ peak in-flight == 2, all 6 attempted."""
+        _reset_prove_tracker()
+        finding_ids = [f"pf-{i}" for i in range(6)]
+        with _prove_lock:
+            for fid in finding_ids:
+                _prove_sleep_overrides[fid] = 0.15
+
+        db_path = await _run_prove_scan(
+            temporal_client,
+            tmp_path,
+            finding_ids=finding_ids,
+            scan_id="scan-prove-cap",
+            prove_max_concurrent=2,
+        )
+
+        peak = _prove_peak_overlap()
+        assert peak == 2, (
+            f"peak in-flight prove activities was {peak}, expected exactly 2 "
+            "(== proves the cap is enforced AND actually engaged)"
+        )
+
+        repo = QuarryRepository(db_path)
+        events = repo.load_events("scan-prove-cap")
+        verdict_ids = [
+            str(e.payload.get("finding_id")) for e in events if e.event_type == "prove.verdict"
+        ]
+        assert sorted(verdict_ids) == sorted(finding_ids), (
+            f"the bound throttles, never drops: all 6 findings need verdicts, got {verdict_ids}"
+        )
+
+    async def test_retry_semantics_preserved_per_finding(
+        self, temporal_client: Client, tmp_path: Path
+    ) -> None:
+        """Under fan-out, a finding still gets its full per-finding attempt loop.
+
+        A finding that proposes no specs attempts the model-configured budget
+        (PROVE_MAX_ATTEMPTS = 3) with ``prior_attempts`` growing 0 → 1 → 2
+        (verdict + reasons recorded between attempts) and ends at
+        needs_manual_review (max_attempts_exhausted). A sibling that proposes a
+        proving exec spec on its second attempt stops at 2 attempts with verdict
+        ``proved`` — retry-refine and early-success semantics survive the gather.
+        """
+        _reset_prove_tracker()
+        finding_ids = ["pf-loop", "pf-refine"]
+        with _prove_lock:
+            _prove_attempt2_spec_findings.append("pf-refine")
+
+        db_path = await _run_prove_scan(
+            temporal_client,
+            tmp_path,
+            finding_ids=finding_ids,
+            scan_id="scan-prove-retry",
+            prove_max_concurrent=2,
+        )
+
+        repo = QuarryRepository(db_path)
+        events = repo.load_events("scan-prove-retry")
+        verdicts = {
+            e.payload.get("finding_id"): (
+                str(e.payload.get("verdict")),
+                e.payload.get("reason"),
+            )
+            for e in events
+            if e.event_type in {"prove.verdict", "prove.needs_manual_review"}
+        }
+
+        # pf-loop: full budget, then max_attempts_exhausted.
+        from quarry_workflows.run_scan import PROVE_MAX_ATTEMPTS
+
+        loop_attempts = _prove_attempt_payloads["pf-loop"]
+        assert len(loop_attempts) == PROVE_MAX_ATTEMPTS, (
+            f"expected the full per-finding budget ({PROVE_MAX_ATTEMPTS} attempts), "
+            f"got {len(loop_attempts)}"
+        )
+        assert [len(a) if a else 0 for a in loop_attempts] == [0, 1, 2], (
+            "prior_attempts must grow 0 → 1 → 2 across the finding's attempts, "
+            f"got {[len(a) if a else 0 for a in loop_attempts]}"
+        )
+        exhausted = [
+            e
+            for e in events
+            if e.event_type == "prove.needs_manual_review"
+            and e.payload.get("finding_id") == "pf-loop"
+        ]
+        assert len(exhausted) == 1, f"pf-loop must exhaust its budget once, got {verdicts}"
+        assert exhausted[0].payload.get("reason") == "max_attempts_exhausted"
+
+        # pf-refine: attempt 1 inconclusive → attempt 2 proposes a proving exec
+        # spec → proved (early success stops the loop at 2 attempts).
+        refine_attempts = _prove_attempt_payloads["pf-refine"]
+        assert len(refine_attempts) == 2, (
+            f"pf-refine should stop at 2 attempts (proved on the second), "
+            f"got {len(refine_attempts)}"
+        )
+        assert verdicts.get("pf-refine", ("",))[0] == "proved", (
+            f"pf-refine must prove via its attempt-2 exec spec, got {verdicts}"
+        )
+        # And the whole scan still completed.
+        assert "prove.completed" in [e.event_type for e in events]
+        assert "scan.failed" not in [e.event_type for e in events]
+
+
+# ── Structural wiring contracts (the test_tracer_stage_sync.py shape) ───────
+#
+# The full gathered dispatch is exercised end to end above; these pin the
+# wiring: the knob exists on RunScanInput with the proven default, the PROVE
+# block gathers under a semaphore reading it, and the post-gather loop emits
+# events in finding input order.
+
+
+def _prove_block_source() -> str:
+    """Extract the PROVE stage block from ``RunScanWorkflow._run_round``."""
+    from quarry_workflows.run_scan import RunScanWorkflow
+
+    src = inspect.getsource(
+        RunScanWorkflow._run_round  # type: ignore[reportPrivateUsage]
+    )
+    marker = "# ── PROVE stage"
+    start = src.index(marker)
+    end = src.index("# ── TRACER stage", start)
+    return src[start:end]
+
+
+class TestProveFanOutWiring:
+    def test_input_field_defaults_to_four(self) -> None:
+        from quarry_workflows import RunScanInput
+
+        assert RunScanInput(repo_path="/tmp/repo").prove_max_concurrent == 4
+
+    def test_input_field_is_settable(self) -> None:
+        from quarry_workflows import RunScanInput
+
+        assert RunScanInput(repo_path="/tmp/repo", prove_max_concurrent=2).prove_max_concurrent == 2
+
+    def test_prove_block_gathers_under_semaphore(self) -> None:
+        block = _prove_block_source()
+        assert "asyncio.Semaphore(" in block, (
+            "the per-finding prove attempts must be bounded by a semaphore"
+        )
+        assert "scan_input.prove_max_concurrent" in block, (
+            "the semaphore bound must read scan_input.prove_max_concurrent"
+        )
+        assert "asyncio.gather(" in block, (
+            "the per-finding prove loops must be gathered (asyncio.gather), "
+            "not awaited one at a time"
+        )
+        assert "return_exceptions=True" in block, (
+            "per-finding failure isolation requires gather(..., return_exceptions=True)"
+        )
+
+    def test_prove_block_emits_events_in_finding_input_order(self) -> None:
+        """Post-gather emission zips results onto the prioritized findings so
+        verdict/failed events follow finding input order, not completion order."""
+        block = _prove_block_source()
+        assert "zip(prove_targets" in block, (
+            "post-gather emission must zip prove results onto the findings in input order"
+        )

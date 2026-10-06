@@ -186,7 +186,7 @@ Eleven roles, all `Provider.MOCK / mock-v1 / rpm=30`
 
 ### 3.1 `ScanDefaultsConfig` field reference
 
-`src/quarry/panel_config.py:190-242`. All fields are consumed by the API
+`src/quarry/panel_config.py:190-248`. All fields are consumed by the API
 layer and forwarded into `RunScanInput` at
 `src/quarry_server/routers/scans.py:102-124`.
 
@@ -198,21 +198,22 @@ layer and forwarded into `RunScanInput` at
 | `validate_max_concurrent` | 8 (`:198`) | Semaphore bound on concurrent candidate validations in AGENTIC_VALIDATE. |
 | `trace_max_concurrent` | 4 (`:201`) | Per-finding tracer fan-out bound. |
 | `calibrate_max_concurrent` | 4 (`:203`) | Per-finding severity-calibration fan-out bound. |
-| `dynamic_validate_max_concurrent` | 8 (`:207`) | Pre-hunt inventory sweep: how many classes' propose→dispatch→capture chains may overlap. `1` restores historical serial behavior. |
-| `validate_max_iterations` | 20 (`:208`) | Iteration cap per validation loop. |
-| `gapfill_max_iterations` | 20 (`:209`) | Iteration cap per gapfill loop. |
-| `recon_max_iterations` | 40 (`:210`) | Iteration cap for recon loops. |
-| `dedup_max_iterations` | 8 (`:211`) | Iteration cap for the dedup pass. |
-| `max_coverage_rounds` | 3 (`:215`) | Cap on iterative coverage-loop rounds (ADR-022); loop halts sooner on convergence or budget exhaustion. |
-| `coverage_yield_threshold` | 0.15, range [0.0, 1.0] (`:222`) | Rising-bar early stop: a round must add ≥ `max(1, ceil(f × cumulative_findings))` new distinct findings to justify another round. `0.0` disables. |
-| `exploratory_injection_fraction` | 0.3, range [0.0, 0.5] (`:229-231`; bound `EXPLORATORY_INJECTION_MAX_FRACTION = 0.5` at `:44`) | Fraction of each gapfill pass spent on open-ended exploratory investigations. `0.0` disables. |
-| `seed` | None (`:234`) | Fixed scan seed; None derives a deterministic seed from the scan_id UUID (resolved at `src/quarry_server/routers/scans.py:117`). |
-| `plugins_active` | `[]` (`:238`) | Names of context-injector plugins active for scans. Disabled-by-default invariant: empty = no plugins. |
-| `vendor_allowlist` | `[]` (`:242`) | Allowed model vendors for the panel; empty = unrestricted. Enforced fail-fast by `enforce_vendor_allowlist` before any model call (`src/quarry_server/routers/scans.py:61`). |
+| `prove_max_concurrent` | 4 (`:208`) | Per-finding PROVE attempt-loop fan-out bound (cruft-purge §3.2). |
+| `dynamic_validate_max_concurrent` | 8 (`:212`) | Pre-hunt inventory sweep: how many classes' propose→dispatch→capture chains may overlap. `1` restores historical serial behavior. |
+| `validate_max_iterations` | 20 (`:213`) | Iteration cap per validation loop. |
+| `gapfill_max_iterations` | 20 (`:214`) | Iteration cap per gapfill loop. |
+| `recon_max_iterations` | 40 (`:215`) | Iteration cap for recon loops. |
+| `dedup_max_iterations` | 8 (`:216`) | Iteration cap for the dedup pass. |
+| `max_coverage_rounds` | 3 (`:220`) | Cap on iterative coverage-loop rounds (ADR-022); loop halts sooner on convergence or budget exhaustion. |
+| `coverage_yield_threshold` | 0.15, range [0.0, 1.0] (`:227`) | Rising-bar early stop: a round must add ≥ `max(1, ceil(f × cumulative_findings))` new distinct findings to justify another round. `0.0` disables. |
+| `exploratory_injection_fraction` | 0.3, range [0.0, 0.5] (`:234-236`; bound `EXPLORATORY_INJECTION_MAX_FRACTION = 0.5` at `:44`) | Fraction of each gapfill pass spent on open-ended exploratory investigations. `0.0` disables. |
+| `seed` | None (`:239`) | Fixed scan seed; None derives a deterministic seed from the scan_id UUID (resolved at `src/quarry_server/routers/scans.py:117`). |
+| `plugins_active` | `[]` (`:243`) | Names of context-injector plugins active for scans. Disabled-by-default invariant: empty = no plugins. |
+| `vendor_allowlist` | `[]` (`:247`) | Allowed model vendors for the panel; empty = unrestricted. Enforced fail-fast by `enforce_vendor_allowlist` before any model call (`src/quarry_server/routers/scans.py:61`). |
 
 Adjacent config blocks parsed from the same file (`QuarryConfig`,
-`src/quarry/panel_config.py:296-304`): `[budget]` (§4), `[retry]`
-(`max_attempts`, default 4, clamped ≥ 1 — `RetryConfig`, `:245-258`),
+`src/quarry/panel_config.py:250-309`): `[budget]` (§4), `[retry]`
+(`max_attempts`, default 4, clamped ≥ 1 — `RetryConfig`, `:250-263`),
 `[integrations.<name>]` (`IntegrationTomlEntry`, `:283-293`; secrets must be
 `${secret:ENV_VAR}` templates, enforced at `:364-383`), `[scan]`
 (`reasoning_lexicon` banned-phrase/evidence overrides, `ScanConfig` /
