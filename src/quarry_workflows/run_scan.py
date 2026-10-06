@@ -29,7 +29,6 @@ from quarry.schemas import (
     ArtifactRef,
     CallGraph,
     CandidateFinding,
-    DynamicEvidenceLink,
     ExploitChain,
     ExploitStep,
     FinalFinding,
@@ -37,7 +36,6 @@ from quarry.schemas import (
     HttpRequestSpec,
     HttpResponseCapture,
     IntegrationConfig,
-    IntegrationRun,
     IntegrationStatus,
     KBRootIndex,
     ModelPanelEntry,
@@ -52,7 +50,6 @@ from quarry.schemas import (
     ScanProfile,
     ScanStatus,
     Severity,
-    SourceRef,
     Subsystem,
     SubsystemAssignment,
     SuccessCheck,
@@ -75,7 +72,6 @@ from quarry_activities.inputs import (
     CloneRepoInput,
     CloneRepoResult,
     CreateSnapshotInput,
-    DeliverIntegrationsInput,
     DispatchLifecycleHooksInput,
     HttpRequestActivityInput,
     ReadArtifactTextInput,
@@ -157,6 +153,30 @@ from quarry_workflows.coverage_stage import (  # noqa: F401
 from quarry_workflows.exploitation_loop import (
     evaluate_exploit_success,
     exploit_chain_to_candidate,
+)
+
+# Explicit re-exports (back-compat): promotion machinery moved to
+# quarry_workflows.promotion_stage (cruft-purge §5.4); tests, golden callers,
+# and dynamic_validate_stage still import these from this module. Private-named
+# helpers are re-exported via the stage module's public aliases (same pattern
+# as §5.3's coverage_stage shims).
+from quarry_workflows.promotion_stage import (
+    deliver_integrations,
+    final_from_candidate,
+    promote_with_dynamic_evidence,
+    promotion_exhaustion_reason,
+)
+from quarry_workflows.promotion_stage import (  # noqa: F401
+    integration_runs_from_activity as _integration_runs_from_activity,
+)
+from quarry_workflows.promotion_stage import (  # noqa: F401
+    load_final_findings as _load_final_findings,
+)
+from quarry_workflows.promotion_stage import (  # noqa: F401
+    load_integration_runs as _load_integration_runs,
+)
+from quarry_workflows.promotion_stage import (  # noqa: F401
+    severity_from_activity as _severity_from_activity,
 )
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
@@ -2782,42 +2802,13 @@ class RunScanWorkflow:
         final_findings: list[FinalFinding],
         artifact_root: str,
     ) -> None:
-        if not final_findings:
-            return
-        existing = await _load_integration_runs(scan_input.db_path, scan.id)
-        existing_keys = tuple(run.idempotency_key for run in existing)
-        payload = await workflow.execute_activity(
-            "deliver-integrations",
-            DeliverIntegrationsInput(
-                scan_id=scan.id,
-                workspace_id="local",
-                final_findings_json=_model_list_json(final_findings),
-                artifact_root=artifact_root,
-                dry_run=scan.profile.dry_run_integrations,
-                existing_keys=existing_keys,
-            ),
-            start_to_close_timeout=timedelta(minutes=2),
-            retry_policy=self._retry_policy,
+        return await deliver_integrations(
+            self._retry_policy,
+            scan_input,
+            scan,
+            final_findings,
+            artifact_root,
         )
-        for run in _integration_runs_from_activity(payload):
-            if run.status is IntegrationStatus.SKIPPED:
-                continue
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_integration_run",
-                {"run": _model_json_dict(run)},
-            )
-            event_type = (
-                "integration.failed"
-                if run.status is IntegrationStatus.FAILED
-                else "integration.delivered"
-            )
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                event_type,
-                {"sink": run.sink, "finding_id": run.integration_event_id},
-            )
 
     async def _emit_and_dispatch(
         self,
@@ -3184,14 +3175,6 @@ async def _load_candidate_findings(db_path: str, scan_id: str) -> list[Candidate
     return [CandidateFinding.model_validate(item) for item in cast(list[object], payload)]
 
 
-async def _load_final_findings(db_path: str, scan_id: str) -> list[FinalFinding]:
-    payload = await _persist_scan_state(db_path, "load_final_findings", {"scan_id": scan_id})
-    if not isinstance(payload, list):
-        msg = f"Unexpected final findings payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    return [FinalFinding.model_validate(item) for item in cast(list[object], payload)]
-
-
 # Conservative per-validation charge used by the AGENTIC_VALIDATE fan-out's
 # mid-batch budget gate (scan-stage-fanout). The validate activity enforces the
 # precise model-loop spend; this flat increment only decides whether a queued
@@ -3242,25 +3225,6 @@ async def _load_model_invocations_json(db_path: str, scan_id: str) -> str | None
     if not isinstance(payload, list) or not payload:
         return None
     return json.dumps(payload)
-
-
-async def _load_integration_runs(db_path: str, scan_id: str) -> list[IntegrationRun]:
-    payload = await _persist_scan_state(db_path, "load_integration_runs", {"scan_id": scan_id})
-    if not isinstance(payload, list):
-        msg = f"Unexpected integration runs payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    return [IntegrationRun.model_validate(item) for item in cast(list[object], payload)]
-
-
-def _integration_runs_from_activity(payload: object) -> list[IntegrationRun]:
-    if not isinstance(payload, list):
-        msg = f"Unexpected integration runs payload: {type(payload).__name__}"
-        raise TypeError(msg)
-    items = cast(list[object], payload)
-    return [
-        item if isinstance(item, IntegrationRun) else IntegrationRun.model_validate(item)
-        for item in items
-    ]
 
 
 def panel_json_for_role(scan: Scan, role: str) -> str | None:
@@ -3350,48 +3314,6 @@ def effective_plugins_active(plugins_active: list[str], *, benchmark: bool) -> l
     if benchmark:
         return []
     return plugins_active
-
-
-def _severity_from_activity(raw: object) -> Severity | None:
-    """Coerce an activity payload's severity field into a ``Severity`` (or None)."""
-    if isinstance(raw, Severity):
-        return raw
-    if isinstance(raw, str):
-        try:
-            return Severity(raw)
-        except ValueError:
-            return None
-    return None
-
-
-def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) -> FinalFinding:
-    """Build a FinalFinding from a validated CandidateFinding.
-
-    ``now`` is passed in (workflow.now()) so this stays usable from workflow code
-    under the Temporal sandbox.
-    """
-    return FinalFinding(
-        id=candidate.id,
-        scan_id=scan_id,
-        workspace_id="local",
-        fingerprint=candidate.metadata.get("fingerprint", candidate.id),
-        vuln_class=candidate.vuln_class,
-        severity=candidate.severity,
-        # Calibration mirror (severity-calibration capability): a candidate
-        # already calibrated upstream keeps its calibrated fields on promotion;
-        # the workflow's CALIBRATE stage stamps them post-validation too.
-        raw_severity=candidate.raw_severity,
-        calibrated_severity=candidate.calibrated_severity,
-        calibrated_priority=candidate.calibrated_priority,
-        firing_rule_ids=list(candidate.firing_rule_ids),
-        title=candidate.title,
-        summary=candidate.hypothesis,
-        affected_component=candidate.affected_component,
-        source_refs=candidate.source_refs,
-        evidence_path=candidate.evidence_path,
-        validation_result_id=f"{candidate.id}-validation",
-        created_at=now,
-    )
 
 
 def live_exploitation_active(
@@ -3665,73 +3587,6 @@ def build_differential_evidence(
 # Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017):
 # re-exported at the top of this module from quarry_activities.verdict_evaluators
 # (the canonical home — see the import block above).
-
-
-def promote_with_dynamic_evidence(
-    candidate: CandidateFinding,
-    capture: HttpResponseCapture,
-    scan_id: str,
-    now: datetime,
-) -> tuple[FinalFinding, DynamicEvidenceLink] | None:
-    """Promote a NEEDS_PROOF finding to FinalFinding using live HTTP evidence.
-
-    Returns (FinalFinding, DynamicEvidenceLink) when the HTTP capture is
-    conclusive (2xx status), or None when the response does not confirm the
-    vulnerability (non-2xx, or missing artifact refs).
-
-    The returned FinalFinding carries non-empty proof_artifact_ids populated from
-    the request and response artifact refs in *capture*.
-
-    Called from the dynamic_validate sub-step of AGENTIC_VALIDATE; never called
-    from workflow code that runs under Temporal's sandbox (pure function, no I/O).
-    """
-    if capture.status_code < 200 or capture.status_code >= 300:
-        return None
-
-    req_ref = capture.request_artifact_ref or ""
-    resp_ref = capture.body_artifact_ref
-
-    proof_ids = [r for r in [req_ref, resp_ref] if r]
-
-    # Prefer the ordered sink (evidence_path[0]) for the evidence link; fall
-    # back to the first unordered source_ref only for findings that never got
-    # an ordered path (cpc task 7.2 — retire source_refs ordering reliance).
-    source_ref: SourceRef
-    if candidate.evidence_path:
-        sink = candidate.evidence_path[0]
-        source_ref = SourceRef(file_path=sink.path, start_line=sink.line, end_line=sink.line)
-    elif candidate.source_refs:
-        source_ref = candidate.source_refs[0]
-    else:
-        source_ref = SourceRef(
-            file_path=candidate.affected_component or "",
-        )
-
-    link = DynamicEvidenceLink(
-        source_ref=source_ref,
-        request_artifact_id=req_ref,
-        response_artifact_id=resp_ref,
-        candidate_finding_id=candidate.id,
-    )
-
-    final = FinalFinding(
-        id=candidate.id,
-        scan_id=scan_id,
-        workspace_id="local",
-        fingerprint=candidate.metadata.get("fingerprint", candidate.id),
-        vuln_class=candidate.vuln_class,
-        severity=candidate.severity,
-        title=candidate.title,
-        summary=candidate.hypothesis,
-        affected_component=candidate.affected_component,
-        source_refs=candidate.source_refs,
-        evidence_path=candidate.evidence_path,
-        validation_result_id=f"{candidate.id}-dynamic-validation",
-        proof_artifact_ids=proof_ids,
-        created_at=now,
-    )
-
-    return final, link
 
 
 def build_proof_artifact(
@@ -4050,29 +3905,3 @@ def sync_candidate_accumulator(
             accumulator[idx] = updated
             return
     accumulator.append(updated)
-
-
-def promotion_exhaustion_reason(
-    *,
-    dynamic_active: bool,
-    live_verdict: str,
-    proof_enabled: bool,
-) -> str | None:
-    """Why a needs_proof finding has no remaining promotion path (or None when
-    one exists).  Surfaced on the finding.needs_proof event so dead-ends are
-    visible in the audit trail instead of silently parking findings.
-
-    - corroborated + prove enabled  → PROVE can still promote (no dead end)
-    - inconclusive + no prove       → the 2caa3abc ssrf dead end
-    - no dynamic + no prove         → pipeline never had a promotion path for it
-    """
-    if dynamic_active and live_verdict == "corroborated" and proof_enabled:
-        return None
-    if dynamic_active and live_verdict == "inconclusive" and not proof_enabled:
-        return (
-            "dynamic probe inconclusive and proof disabled — "
-            "no remaining promotion path for this finding"
-        )
-    if not dynamic_active and not proof_enabled:
-        return "no dynamic validation and proof disabled for this scan"
-    return None
