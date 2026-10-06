@@ -9,9 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from quarry.plugin_types import ToolRegistry
 from quarry.schemas import AuthProfileSet, ScopeExclusion
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
-from quarry_tools.spec import ToolRegistry
 
 # Tools that dispatch live I/O; the scope-exclusion guard (Layer 4) applies to them.
 _DYNAMIC_TOOLS = frozenset({"http_request", "run_in_sandbox"})

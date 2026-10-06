@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from quarry_plugins.base import PluginType
+from quarry.plugin_types import PluginType
 from quarry_tools.errors import ToolUnavailableError
 
 _TIMEOUT_SECONDS = 15

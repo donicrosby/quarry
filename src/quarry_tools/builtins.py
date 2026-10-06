@@ -7,8 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from quarry.plugin_types import ToolRegistry
 from quarry_tools.errors import ToolSecurityError, ToolUnavailableError
-from quarry_tools.spec import ToolRegistry
 
 
 def _safe_resolve(path_str: str, repo_root: Path) -> Path:

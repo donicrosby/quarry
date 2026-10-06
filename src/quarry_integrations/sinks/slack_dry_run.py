@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from quarry.plugin_types import PluginType
 from quarry.schemas import (
     ArtifactKind,
     FinalFinding,
@@ -16,7 +17,6 @@ from quarry_integrations.base import (
     build_idempotency_key,
     make_run,
 )
-from quarry_plugins.base import PluginType
 
 
 class SlackDryRunSink:
