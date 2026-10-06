@@ -24,6 +24,10 @@
 # dedup_max_iterations = 8       # iterations per dedup cluster agent (default: 8)
 # max_coverage_rounds = 3        # cap on iterative-coverage-loop rounds (default: 3)
 #
+# Stage fan-out bounds (scan-stage-fanout; prove added in cruft-purge 3.2).
+# A higher value increases parallelism but not total model invocations.
+# prove_max_concurrent = 4       # concurrent per-finding PROVE attempt loops (default: 4)
+#
 # Rising-bar early stop (ADR-022). A round must add at least
 #   max(1, ceil(coverage_yield_threshold * findings_so_far))
 # new distinct findings to justify another round, so the bar climbs as findings

@@ -201,6 +201,11 @@ class ScanDefaultsConfig(BaseModel):
     trace_max_concurrent: int = 4
     # Per-finding severity-calibration fan-out bound (scan-stage-fanout).
     calibrate_max_concurrent: int = 4
+    # Per-finding PROVE attempt-loop fan-out bound (cruft-purge §3.2). Each
+    # in-flight finding holds one prove-finding agent loop plus its sandbox
+    # capture children; mirrors the tracer/calibrate bound. Resolved from
+    # quarry.toml [scan_defaults] by the API layer.
+    prove_max_concurrent: int = 4
     # Pre-hunt inventory sweep (per-class dynamic-validation chains): how many
     # classes' propose→dispatch→capture chains may overlap. Default 8; 1 restores
     # the historical serial per-class behavior.
