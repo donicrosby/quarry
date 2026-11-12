@@ -76,7 +76,7 @@ def test_backoff_delays_are_seconds_scale_exponential_with_jitter() -> None:
     delays = backoff_delays(attempts=4, base_seconds=2.0, factor=3.0, jitter_fraction=0.25)
     assert len(delays) == 4
     for d in delays:
-        assert 0 <= d <= 60.0, delays
+        assert 0 <= d <= 67.5, delays  # max = base*factor^(n-1)*(1+jitter) = 2*27*1.25
     # Monotonically non-decreasing exponential base, jitter never inverts order
     # badly: the last delay must exceed the first.
     assert delays[-1] > delays[0]
