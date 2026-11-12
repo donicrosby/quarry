@@ -31,7 +31,7 @@ All substance verified present on main at `6de560f`:
 |------|--------------|----------|
 | `verdict_evaluators.py` module (325 lines) | `src/quarry_activities/verdict_evaluators.py:1-325` | VERIFIED 6de560f |
 | `LiveProbeEvidence` dataclass | ib. `:98-111` | VERIFIED |
-| `register_evaluator` / `resolve_evaluator` / `clear_evaluators` | ib. `:133-159` | VERIFIED |
+| `resolve_evaluator` / `register_evaluator` / `clear_evaluators` | ib. `:133-162` | VERIFIED |
 | `evaluate_live_verdict_with_source` returning `(verdict, source)` | ib. `:193-206` | VERIFIED |
 | `live_verdict_from_status` | ib. `:78-91` | VERIFIED |
 | `read_artifact.py` activity | `src/quarry_activities/read_artifact.py` (exists, 90+ lines) | VERIFIED |
@@ -48,7 +48,7 @@ All substance verified present on main at `6de560f`:
 ### 1.2 `pcdv/templates` — SUPERSEDED
 
 **Branch head:** `e9031b2` "csrf + file_upload hunt templates"
-**Unique delta (3-dot vs main):** 13 files, +1458
+**Unique delta (3-dot vs main):** 13 files, +1458/-5
 
 **Substance:** Hunt templates for CSRF and file_upload vuln classes; dynamic_validate templates for auth, csrf, file_upload, open_redirect, sql_injection, ssti, xss, xxe; tests for template rendering and routing.
 
@@ -69,7 +69,7 @@ All substance verified present on main at `6de560f`:
 ### 1.3 `pcdv/evaluators` — SUPERSEDED
 
 **Branch head:** `b483d3a` "fix: restore builtin evaluators in registry fixture teardown"
-**Unique delta (3-dot vs main):** 7 files, +1338
+**Unique delta (3-dot vs main):** 7 files, +1338/-59
 
 **Substance:** SSTI evaluator (arithmetic-marker `{{7*7}}` → `49`), SQLi boolean-differential evaluator (primary/baseline pair), `EvaluatorSpec` with `min_probes`, differential two-probe dispatch logic in `run_scan.py`, golden + unit tests.
 
@@ -98,7 +98,7 @@ All substance verified present on main at `6de560f`:
 ### 1.4 `fix/ssrf-dynamic-evaluator` — SUPERSEDED
 
 **Branch head:** `15bf16f` "ssrf per-class dynamic evaluator + target-origin-aware fallback probe pair"
-**Unique delta (3-dot vs main):** 4 files, +541
+**Unique delta (3-dot vs main):** 4 files, +541/-25
 
 **Substance:** SSRF evaluator (userinfo-bypass boolean-differential, primary/baseline probe pair), test file.
 
@@ -143,9 +143,9 @@ All substance verified present on main at `6de560f`:
 ### 1.6 `perf/retry-backoff` — LAND
 
 **Branch head:** `595215d` "chore: nudge CI (cruft-purge 3.7)"
-**Unique delta (3-dot vs main):** 9 files, +683
+**Unique delta (3-dot vs main):** 9 files, +683/-19
 
-**Substance:** Seconds-scale retry with jitter for model-call failures. New `backoff_delays` and `retry_completion` in `litellm_client.py`, new `src/quarry_models/factory.py` module, config wire-up in `panel_config.py`/`routers/scans.py`/`run_scan.py`, config docs, tests.
+**Substance:** Seconds-scale retry with jitter for model-call failures. New `backoff_delays` and `retry_completion` in `litellm_client.py`, modified `src/quarry_models/factory.py` module (adds `model_retry_settings()` + retry kwargs injection), config wire-up in `panel_config.py`/`routers/scans.py`/`run_scan.py`, config docs, tests.
 
 **Verification that retry logic is absent from main:**
 
@@ -154,14 +154,14 @@ All substance verified present on main at `6de560f`:
 | `src/quarry_models/litellm_client.py` — grep 'retry\|RetryPolicy\|jitter\|backoff' | 0 matches | VERIFIED 6de560f |
 | `tests/unit/test_retry_backoff.py` | does not exist | VERIFIED |
 | `tests/unit/test_retry_config_plumbing.py` | does not exist | VERIFIED |
-| `src/quarry_models/factory.py` | does not exist | VERIFIED |
+| `src/quarry_models/factory.py` | exists since PR #11 (938e5c4); branch MODIFIES (+32) | VERIFIED |
 
 **Still-needed delta:**
 
 | File | Kind | Notes |
 |------|------|-------|
 | `src/quarry_models/litellm_client.py` | MODIFIED | +144 lines: retry logic, transient exception class, backoff_delays, retry_completion |
-| `src/quarry_models/factory.py` | NEW | Model client factory (+32 lines) |
+| `src/quarry_models/factory.py` | MODIFIED | Adds `model_retry_settings()` env-override knobs, injects retry kwargs into `build_model_client` (+32 lines) |
 | `src/quarry/panel_config.py` | MODIFIED | Retry config knobs (+23 lines) |
 | `src/quarry_workflows/run_scan.py` | MODIFIED | Wire retry config through workflow (+56 lines) |
 | `src/quarry_server/routers/scans.py` | MODIFIED | Pass retry config from server (+10 lines) |
@@ -197,7 +197,7 @@ All substance verified present on main at `6de560f`:
 | Stubs in `test_iterative_coverage_loop.py` | PRESENT (2 matches) | VERIFIED |
 | Stubs in `test_kb_context_consumption.py` | PRESENT (2 matches) | VERIFIED |
 | `len(sites) == 3` in `test_lifecycle_dispatch_wiring.py` | PRESENT (1 match) | VERIFIED |
-| AGENTS.md "No source-grep registration tests" rule | PRESENT at `AGENTS.md:96` | VERIFIED |
+| AGENTS.md "No source-grep registration tests" rule | PRESENT at `AGENTS.md:95` | VERIFIED |
 | `_create_clean_repo` helper in `test_e2e_temporal.py` | PRESENT | VERIFIED |
 | Updated `recon-subsystem` stub signatures | PRESENT | VERIFIED |
 
@@ -207,12 +207,12 @@ All substance verified present on main at `6de560f`:
 
 ### 1.8 `backup-c6abbc1` — SUPERSEDED (backup branch)
 
-**Branch head:** `c6abbc1` (also in fix/activity-registry history)
+**Branch head:** `c6abbc1` (NOT in fix/activity-registry history — they diverge at `2da3710`)
 **Unique delta (3-dot vs main):** 65 files, +430/-1619
 
-**Substance:** This is a **dead-code purge backup** — it restores code deleted by the cruft-purge campaign (restores `src/quarry_activities/registry.py`, `tests/unit/test_workflow_concurrency.py`, `tests/unit/test_cruft_conformance.py`, etc.). Its head commit `c6abbc1` is an ancestor of `fix/activity-registry`.
+**Substance:** This is a **pre-#51 draft backup** — the pre-landing draft series of #51. The only branch-restored files are `src/quarry_activities/registry.py` and `tests/unit/test_activity_registry.py` (both byte-identical on main). The other files cited in prior versions (`tests/unit/test_workflow_concurrency.py`, `tests/unit/test_cruft_conformance.py`) exist on MAIN and are absent from this backup. Its head commit `c6abbc1` is NOT an ancestor of `fix/activity-registry` — they diverge at `2da3710` (#49). backup = 5f8f99a→e6bddbb→c6abbc1 (3 commits on no other branch); fix/activity-registry = 9cd13eb (#51, on main)→34a062b.
 
-**Verdict: SUPERSEDED.** Not a feature branch. Exists as a safety net for the dead-code purge. The restored code was intentionally and adversarially verified as dead. Do not land.
+**Verdict: SUPERSEDED.** Pre-#51 draft backup, not a purge-restore. Content-verified: zero unlanded files. Note: deleting this branch orphans 3 commit objects (5f8f99a, e6bddbb, c6abbc1) permanently — consider a tag if archive-value is intended.
 
 ---
 
@@ -222,7 +222,7 @@ All substance verified present on main at `6de560f`:
 
 **Date:** 2026-09-16
 **Validated:** `openspec validate --strict` PASS (rules config warnings only)
-**Tasks:** 0/13 checked
+**Tasks:** 0/12 checked
 
 **Assessment:** Proposes a class-coverage floor — after final hunt, any requested vuln class with zero candidates gets a deterministic forced hunt pass. References real scan `ebdafaba` (2026-09-15) where SSRF class had zero candidates. No equivalent feature exists on main. The targeted files (`src/quarry_workflows/run_scan.py`, `src/quarry_activities/hunt.py`) have evolved but the proposal's core mechanism is still valid.
 
@@ -234,7 +234,7 @@ All substance verified present on main at `6de560f`:
 
 **Date:** 2026-09-16
 **Validated:** `openspec validate --strict` PASS (rules config warnings only)
-**Tasks:** 0/15 checked
+**Tasks:** 0/12 checked
 
 **Assessment:** Extends gapfill to detect class-shaped gaps deterministically from the ledger and re-queue class-scoped hunts. Complements `class-coverage-floor` (floor handles zero-candidate, rehunt handles all-refuted). No equivalent feature exists on main.
 
@@ -265,7 +265,7 @@ All substance verified present on main at `6de560f`:
 
 **Date:** 2026-09-16
 **Validated:** `openspec validate --strict` PASS (rules config warnings only)
-**Tasks:** 0/14 checked
+**Tasks:** 0/13 checked
 
 **Assessment:** Proposes ToolRunner arg-repair for malformed tool calls (alias tolerance, unknown-key drop, missing-required fill). References scan `ebdafaba` (2026-09-15) where gapfill agent burned 20 turns on a wrong kwarg name.
 
@@ -285,7 +285,7 @@ However, this change is **dated 2026-09-16** and the codebase has changed substa
 
 **Date:** 2026-09-16
 **Validated:** `openspec validate --strict` PASS
-**Tasks:** 0/12 checked
+**Tasks:** 0/10 checked
 
 **Assessment:** Proposed fixing `ScanProfile` serialization so `dynamic_validation_enabled` and `live_prove_enabled` are correctly reported in the status endpoint.
 
@@ -301,7 +301,7 @@ However, the actual bug described (status reports `false` for both flags) may or
 
 **Date:** 2026-09-30
 **Validated:** `openspec validate --strict` PASS
-**Tasks:** 0/24 checked
+**Tasks:** 0/21 checked
 **Implemented by:** branch `feat/prompt-replay-harness` (§1.5, LAND)
 
 **Assessment:** This is the spec companion to the implementation branch. The code exists on the branch but the spec change is untracked. If the branch lands, the spec change should be committed alongside.
@@ -369,7 +369,7 @@ Only 2 branches are LAND. They touch disjoint files:
 
 | # | Branch | Files touched | Shared? |
 |---|--------|--------------|---------|
-| 1 | `perf/retry-backoff` | Modifies `litellm_client.py`, `factory.py` (new), `panel_config.py`, `run_scan.py`, `routers/scans.py`, `quarry.toml.example`, `config-inventory.md`, 2 new test files | — |
+| 1 | `perf/retry-backoff` | Modifies `litellm_client.py`, `factory.py`, `panel_config.py`, `run_scan.py`, `routers/scans.py`, `quarry.toml.example`, `config-inventory.md`, 2 new test files | — |
 | 2 | `feat/prompt-replay-harness` | All new: `src/quarry_replay/` (3 files) + `tests/unit/` (3 files) | No overlap |
 
 **Recommended order:**
