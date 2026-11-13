@@ -17,7 +17,7 @@ entry point. Guarantees (prompt-replay-harness spec):
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from quarry_replay.resolvers import (
     GapfillInputs,
@@ -66,8 +66,10 @@ def tag_invocations_as_replay(
         row = dict(inv)
         row["workspace_id"] = "replay"
         row["task_name"] = f"replay:{panel.panel_name}:{panel.role}"
-        metadata = row.get("metadata")
-        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        raw_metadata = row.get("metadata")
+        metadata: dict[str, Any] = (
+            cast("dict[str, Any]", raw_metadata) if isinstance(raw_metadata, dict) else {}
+        )
         metadata["replay"] = True
         metadata["replay_panel"] = panel.panel_name
         metadata["replay_role"] = panel.role
@@ -87,7 +89,8 @@ def _client_invocation_rows(client: Any) -> list[dict[str, Any]]:
         if hasattr(inv, "model_dump"):
             rows.append(dict(inv.model_dump(mode="json")))
         elif isinstance(inv, dict):
-            rows.append(dict(inv))
+            row: dict[str, Any] = dict(cast("dict[str, Any]", inv))
+            rows.append(row)
     return rows
 
 
@@ -323,7 +326,7 @@ def _subsystem_to_dict(subsystem: Any) -> dict[str, Any]:
     if hasattr(subsystem, "model_dump"):
         return dict(subsystem.model_dump(mode="json"))
     if isinstance(subsystem, dict):
-        return dict(subsystem)
+        return dict(cast("dict[str, Any]", subsystem))
     return {"name": getattr(subsystem, "name", "")}
 
 
@@ -383,10 +386,10 @@ class _capture_clients:
         for mod in (gapfill_mod, hunt_mod, prove_mod, recon_mod, tracer_mod, validate_mod):
             if hasattr(mod, "MockModelClient"):
                 self._patched[(mod, "MockModelClient")] = mod.MockModelClient
-                mod.MockModelClient = mock_wrapper
+                mod.__dict__["MockModelClient"] = mock_wrapper
             if hasattr(mod, "build_model_client"):
                 self._patched[(mod, "build_model_client")] = mod.build_model_client
-                mod.build_model_client = factory_wrapper
+                mod.__dict__["build_model_client"] = factory_wrapper
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:

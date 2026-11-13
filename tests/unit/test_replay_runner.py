@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from quarry.schemas import FindingStatus, VulnerabilityClass
 from tests.unit.replay_fixtures import (
     DEFAULT_KB_KEY,
     build_repo,
@@ -131,7 +132,7 @@ class TestReplayReadOnly:
         db_path = build_scan_db(
             tmp_path / "quarry.db",
             repo,
-            vuln_classes=["secrets"],
+            vuln_classes=[VulnerabilityClass.SECRETS],
             arch_doc=make_arch_doc("scan-replay-1"),
             metadata={"repo_path": str(repo), "kb_root_index_key": DEFAULT_KB_KEY},
         )
@@ -160,7 +161,7 @@ class TestReplayRunnerAllStages:
         db_path = build_scan_db(
             tmp_path / "quarry.db",
             repo,
-            vuln_classes=["secrets"],
+            vuln_classes=[VulnerabilityClass.SECRETS],
             arch_doc=make_arch_doc("scan-replay-1"),
             metadata={"repo_path": str(repo)},
         )
@@ -185,7 +186,7 @@ class TestReplayRunnerAllStages:
         db_path = build_scan_db(
             tmp_path / "quarry.db",
             repo,
-            vuln_classes=["secrets"],
+            vuln_classes=[VulnerabilityClass.SECRETS],
             candidates=[finding],
             metadata={"repo_path": str(repo)},
         )
@@ -206,7 +207,7 @@ class TestReplayRunnerAllStages:
         from quarry_replay.runner import run_replay
 
         repo = build_repo(tmp_path)
-        prove_me = make_candidate("scan-replay-1", status="needs_proof")
+        prove_me = make_candidate("scan-replay-1", status=FindingStatus.NEEDS_PROOF)
         db_path = build_scan_db(
             tmp_path / "quarry.db", repo, candidates=[prove_me], metadata={"repo_path": str(repo)}
         )

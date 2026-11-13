@@ -7,12 +7,11 @@ naming the missing input — rather than fabricating a fallback.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from quarry.schemas import Provider, VulnerabilityClass
+from quarry.schemas import FindingStatus, Provider, VulnerabilityClass
 from tests.unit.replay_fixtures import (
     DEFAULT_KB_KEY,
     build_repo,
@@ -229,8 +228,8 @@ class TestProveResolver:
         from quarry_replay.resolvers import resolve_prove_inputs
 
         repo = build_repo(tmp_path)
-        candidate = make_candidate("scan-replay-1", status="candidate")
-        prove_me = make_candidate("scan-replay-1", status="needs_proof")
+        candidate = make_candidate("scan-replay-1", status=FindingStatus.CANDIDATE)
+        prove_me = make_candidate("scan-replay-1", status=FindingStatus.NEEDS_PROOF)
         db_path = build_scan_db(tmp_path / "quarry.db", repo, candidates=[candidate, prove_me])
         resolved = resolve_prove_inputs(
             db_path=db_path,
@@ -353,7 +352,3 @@ rpm = 20
         assert resolved.panel.role_config.provider is Provider.LITELLM
         assert resolved.panel.role_config.model == "chutes/Qwen/Qwen3-235B-A22B"
         assert resolved.panel.panel_name == "chutes"
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)

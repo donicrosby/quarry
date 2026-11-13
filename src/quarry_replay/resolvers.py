@@ -40,8 +40,6 @@ from quarry.schemas import (
 from quarry_persistence import QuarryRepository
 from quarry_tools.call_graph_python import build_python_call_graph
 
-REPLAY_WORKSPACE_ID = "replay"
-
 
 class ReplayResolutionError(Exception):
     """A required replay input could not be reconstructed from persisted state."""
@@ -231,7 +229,7 @@ def _panel_for_scan_role(
         None,
     )
     if entry is not None:
-        tiers = [ModelTier.model_validate(t.model_dump()) for t in entry.tiers]
+        tiers = [ModelTier.model_validate(t) for t in entry.tiers]
         return PanelSelection(
             panel_name=f"scan-snapshot:{scan.id}",
             role=role,
@@ -246,10 +244,6 @@ def _panel_for_scan_role(
     return _resolve_panel_selection(
         role=role, mock=False, panel_name=panel_name, allow_mock_panel=False
     )
-
-
-def _validate_candidates_loadable(candidates: list[CandidateFinding]) -> None:
-    del candidates  # hook for future shape validation
 
 
 def resolve_validate_inputs(
@@ -424,9 +418,7 @@ def resolve_prove_inputs(
     """
     scan = load_scan(db_path, scan_id)
     candidates = _load_candidates(db_path, scan_id)
-    provable = [
-        c for c in candidates if c.status == FindingStatus.NEEDS_PROOF or c.status == "needs_proof"
-    ]
+    provable = [c for c in candidates if c.status == FindingStatus.NEEDS_PROOF]
     if finding_id is not None:
         selected = [c for c in provable if c.id == finding_id]
         if not selected:
@@ -518,11 +510,3 @@ def resolve_recon_inputs(
         scan_id=scan_id,
         panel=panel,
     )
-
-
-def validate_stage_record(result: object, stage: str) -> dict[str, Any]:
-    """Assert a replay result is structurally valid for its stage (golden gate)."""
-    if not isinstance(result, dict):
-        msg = f"{stage} replay returned {type(result).__name__}, expected a JSON dict"
-        raise ReplayResolutionError(msg)
-    return result
