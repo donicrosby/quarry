@@ -212,8 +212,15 @@ layer and forwarded into `RunScanInput` at
 | `vendor_allowlist` | `[]` (`:247`) | Allowed model vendors for the panel; empty = unrestricted. Enforced fail-fast by `enforce_vendor_allowlist` before any model call (`src/quarry_server/routers/scans.py:61`). |
 
 Adjacent config blocks parsed from the same file (`QuarryConfig`,
-`src/quarry/panel_config.py:250-309`): `[budget]` (§4), `[retry]`
-(`max_attempts`, default 4, clamped ≥ 1 — `RetryConfig`, `:250-263`),
+`src/quarry/panel_config.py:316-325`): `[budget]` (§4), `[retry]`
+(`max_attempts`, default 4, clamped ≥ 1, plus the seconds-scale backoff
+intervals `initial_interval_seconds` 2.0, `backoff_coefficient` 2.0,
+`maximum_interval_seconds` 30.0, `jitter_fraction` 0.2 — bounded [0.0, 0.5] —
+and `calibrate_start_to_close_seconds` 300, the per-attempt StartToClose
+budget for the `calibrate-finding` agent-loop activity; all wired through
+`RunScanInput` by `src/quarry_server/routers/scans.py` into the workflow's
+`RetryPolicy` (cruft-purge §3.7 — `RetryConfig`, `:245-278`; counts
+unchanged, intervals seconds-scale),
 `[integrations.<name>]` (`IntegrationTomlEntry`, `:283-293`; secrets must be
 `${secret:ENV_VAR}` templates, enforced at `:364-383`), `[scan]`
 (`reasoning_lexicon` banned-phrase/evidence overrides, `ScanConfig` /

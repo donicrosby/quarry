@@ -347,6 +347,20 @@ class RunScanInput(BaseModel):
     # preserves the historical fail-fast behaviour for direct/test construction;
     # the CLI/client resolves the configured value (3–5) and passes it explicitly.
     activity_max_attempts: int = 1
+    # Seconds-scale retry intervals (quarry.toml [retry], cruft-purge §3.7).
+    # Defaults match the Temporal library defaults (1s initial, 2.0 backoff, no
+    # cap) so direct/test construction keeps historical behavior; the API layer
+    # passes the configured seconds-scale values (2s / 2.0 / 30s / 0.2).
+    retry_initial_interval_seconds: float = 1.0
+    retry_backoff_coefficient: float = 2.0
+    retry_maximum_interval_seconds: float | None = None
+    retry_jitter_fraction: float = 0.0
+    # Per-attempt StartToClose budget for ``calibrate-finding`` (quarry.toml
+    # [retry] calibrate_start_to_close_seconds). Default here preserves the
+    # historical behavior for direct/test construction... the historical
+    # dispatch passed hours=1; the configured default (300s) is applied by the
+    # API layer and documented in the §3.7 PR.
+    calibrate_start_to_close_seconds: int = 3600
     # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
     # None disables budget gating.
     budget_cap_usd: float | None = None
@@ -401,6 +415,37 @@ class RunScanResult(BaseModel):
     final_finding_count: int
 
 
+def _activity_retry_policy(
+    *,
+    max_attempts: int,
+    initial_interval_seconds: float,
+    backoff_coefficient: float,
+    maximum_interval_seconds: float | None,
+) -> RetryPolicy:
+    """Build the per-run activity RetryPolicy from the [retry] config block.
+
+    Counts are cost/behavior-bearing and pass through unchanged; only the
+    interval knobs were added (cruft-purge §3.7). All values arrive as explicit
+    RunScanInput fields resolved by the API layer — a sandboxed workflow cannot
+    read quarry.toml, and nothing here draws randomness: Temporal applies its
+    own fixed server-side jitter to retry waits during scheduling, so workflow
+    replay stays deterministic. The configurable ``[retry]
+    jitter_fraction`` applies to the activity-side model-call retry loop
+    (LiteLLMModelClient), which is the deterministic-replay-relevant one.
+    For ``maximum_attempts == 1`` the intervals are inert (no retries happen).
+    """
+    return RetryPolicy(
+        maximum_attempts=max(1, max_attempts),
+        initial_interval=timedelta(seconds=max(0.0, initial_interval_seconds)),
+        backoff_coefficient=max(1.0, backoff_coefficient),
+        maximum_interval=(
+            timedelta(seconds=maximum_interval_seconds)
+            if maximum_interval_seconds is not None
+            else None
+        ),
+    )
+
+
 @workflow.defn
 class RunScanWorkflow:
     def __init__(self) -> None:
@@ -428,7 +473,12 @@ class RunScanWorkflow:
             raise
 
     async def _run(self, scan_input: RunScanInput, scan_id: str) -> RunScanResult:
-        self._retry_policy = RetryPolicy(maximum_attempts=max(1, scan_input.activity_max_attempts))
+        self._retry_policy = _activity_retry_policy(
+            max_attempts=scan_input.activity_max_attempts,
+            initial_interval_seconds=scan_input.retry_initial_interval_seconds,
+            backoff_coefficient=scan_input.retry_backoff_coefficient,
+            maximum_interval_seconds=scan_input.retry_maximum_interval_seconds,
+        )
         created_at = workflow.now()
         artifact_root = _join_path(scan_input.output_dir, "artifacts")
         report_path = _join_path(scan_input.output_dir, "reports", f"{scan_id}.md")
@@ -2812,7 +2862,9 @@ class RunScanWorkflow:
                     None,
                     artifact_root,
                 ],
-                start_to_close_timeout=timedelta(hours=1),
+                start_to_close_timeout=timedelta(
+                    seconds=scan_input.calibrate_start_to_close_seconds
+                ),
                 heartbeat_timeout=timedelta(minutes=3),
                 retry_policy=self._retry_policy,
             )
