@@ -91,8 +91,9 @@ severity MEDIUM.
 
 ### Requirement: Curl-pipe-shell detection in npm scripts
 
-The scanner SHALL detect `curl ... | sh` and `wget ... | sh` patterns in any npm
-script value and SHALL flag them with severity CRITICAL.
+The scanner SHALL detect shell-pipe patterns — `curl` or `wget` piped into `sh`,
+`bash`, or another shell interpreter — in any npm script value and SHALL flag them
+with severity CRITICAL.
 
 #### Scenario: curl-pipe-sh-flagged
 
@@ -110,7 +111,10 @@ script value and SHALL flag them with severity CRITICAL.
 Each flagged risk SHALL be emitted as a `CandidateFinding` with
 `vuln_class=SUPPLY_CHAIN`, `status=candidate`, severity set per risk type, and
 `source_refs` carrying the manifest file path and the dependency or script line.
-The `created_by` field SHALL identify the scanner activity.
+The finding SHALL also populate `evidence_path` (ordered, manifest file path and
+line as the first element) so sink-locator dedup and evidence links resolve
+without falling back to `source_refs`. The `created_by` field SHALL identify the
+scanner activity.
 
 #### Scenario: single-risk-emits-one-candidate-finding
 

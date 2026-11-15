@@ -25,6 +25,9 @@ pre-recon scan closes this gap without adding model cost or latency.
 ## Impact
 
 - **Specs**: `dependency-manifest-scanning` (new capability, 8 ADDED requirements).
+  No MODIFIED deltas elsewhere: the scanner dispatches inside the existing stage
+  sequence, so `scan-orchestration`'s canonical stage order (`COMPLETED_STAGE_ORDER`)
+  is untouched.
 - **Code**: `src/quarry/schemas.py` (new `SUPPLY_CHAIN` enum member),
   `src/quarry_activities/dependency_risk.py` (new activity file), activity registration
   via existing `discover_activities()` auto-discovery (VERIFIED at
