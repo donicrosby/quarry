@@ -58,7 +58,7 @@ before execution. Any arg that starts with a `NAME=value` pattern or that is `-e
 
 ### Requirement: env command output is restricted
 
-When the `env` command is on the sandbox allowlist (sandbox.py:106), its output SHALL be
+When the `env` command is on the sandbox allowlist (sandbox.py:103), its output SHALL be
 post-filtered to redact non-credential environment variables before the capture is stored
 as an artifact. Only the exit code SHALL be returned unredacted; env-var names and values
 SHALL be replaced with a count line.

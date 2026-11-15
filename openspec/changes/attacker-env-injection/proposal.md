@@ -43,7 +43,7 @@ Add four requirements to `proof-and-sandbox-execution`:
 
 ## Impact
 
-- **Specs touched:** `proof-and-sandbox-execution` (4 ADDED requirements, 8 scenarios)
+- **Specs touched:** `proof-and-sandbox-execution` (4 ADDED requirements, 9 scenarios)
 - **Code touched:** `src/quarry_activities/sandbox.py` (arg validation, env output filter),
   `src/quarry_tools/sandbox_tool.py` (env_profile gate), `src/quarry/schemas.py`
   (EnvProfile enum may narrow)
