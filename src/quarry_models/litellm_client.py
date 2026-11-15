@@ -9,10 +9,19 @@ synchronous (`litellm.completion`) to match Quarry's sync-activity rule, run at
 from __future__ import annotations
 
 import logging
+import random
 import re
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 import litellm
+from litellm.exceptions import (
+    APIConnectionError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+)
 from pydantic import BaseModel
 
 from quarry.schemas import ModelInvocation, RedactionStatus
@@ -30,6 +39,88 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# Transient upstream failures worth a bounded seconds-scale retry (cruft-purge
+# §3.7): hosted chutes go cold and return 503/429 or drop connections.
+# Deterministic failures (400/401) are excluded — they surface immediately.
+TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    ServiceUnavailableError,
+    RateLimitError,
+    APIConnectionError,
+    InternalServerError,
+)
+
+
+def backoff_delays(
+    *,
+    attempts: int,
+    base_seconds: float,
+    factor: float,
+    jitter_fraction: float,
+    max_seconds: float | None = None,
+    rng: random.Random | None = None,
+) -> list[float]:
+    """Exponential backoff delays (one per attempt) with bounded multiplicative jitter.
+
+    Pure function of the arguments (plus the injectable *rng*), so tests assert
+    exact bounds deterministically. Delay *i* is
+    ``base_seconds * factor**i`` times a symmetric jitter in
+    ``[1 - jitter_fraction, 1 + jitter_fraction]``, then capped at
+    *max_seconds* — the cap bounds the FINAL (post-jitter) delay so it is a
+    hard ceiling. The jitter draw uses an explicit :class:`random.Random` —
+    this module is activity-side only (imported by activities, never by
+    workflow code), so Temporal replay determinism is not affected.
+    """
+    r = rng if rng is not None else random.Random()
+    delays: list[float] = []
+    for i in range(max(0, attempts)):
+        delay = base_seconds * (factor**i)
+        delay *= 1.0 + (2.0 * r.random() - 1.0) * jitter_fraction
+        if max_seconds is not None:
+            delay = min(delay, max_seconds)
+        delays.append(max(0.0, delay))
+    return delays
+
+
+def retry_completion(
+    call: Callable[[], Any],
+    *,
+    attempts: int,
+    base_seconds: float,
+    factor: float,
+    jitter_fraction: float,
+    max_seconds: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    rng: random.Random | None = None,
+) -> Any:
+    """Run *call* with bounded retries on the transient exception class only.
+
+    *attempts* is the total call budget (Temporal ``maximum_attempts``
+    semantics): the initial try plus retries. Counts are behavior/cost-bearing
+    and are never expanded here. Non-transient exceptions propagate after the
+    first attempt; a transient exception exhausts the budget and the last
+    error propagates. Sleeps happen only BETWEEN attempts.
+    """
+    total = max(1, attempts)
+    delays = backoff_delays(
+        attempts=total,
+        base_seconds=base_seconds,
+        factor=factor,
+        jitter_fraction=jitter_fraction,
+        max_seconds=max_seconds,
+        rng=rng,
+    )
+    last_error: Exception | None = None
+    for attempt in range(total):
+        try:
+            return call()
+        except TRANSIENT_EXCEPTIONS as exc:
+            last_error = exc
+            if attempt == total - 1:
+                break
+            sleep(delays[attempt + 1])
+    assert last_error is not None
+    raise last_error
+
 
 class LiteLLMModelClient:
     """A `ModelClient` that dispatches to providers through LiteLLM."""
@@ -41,6 +132,11 @@ class LiteLLMModelClient:
         seed: int | None = None,
         artifact_store: ArtifactStore | None = None,
         backend: str | None = None,
+        retry_attempts: int = 3,
+        retry_base_seconds: float = 2.0,
+        retry_backoff_coefficient: float = 3.0,
+        retry_max_seconds: float = 30.0,
+        retry_jitter_fraction: float = 0.25,
     ) -> None:
         self.temperature = temperature
         self.seed = seed
@@ -50,6 +146,14 @@ class LiteLLMModelClient:
             if artifact_store is not None
             else ""
         )
+        # Seconds-scale transient-failure retry (cruft-purge §3.7). Explicit,
+        # bounded, and small: max_attempts semantics stay with the Temporal
+        # RetryPolicy; this loop only smooths cold-chute 503s/429s.
+        self.retry_attempts = max(1, retry_attempts)
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_backoff_coefficient = retry_backoff_coefficient
+        self.retry_max_seconds = retry_max_seconds
+        self.retry_jitter_fraction = retry_jitter_fraction
         self.invocations: list[ModelInvocation] = []
 
     def complete_structured[T: BaseModel](
@@ -74,24 +178,36 @@ class LiteLLMModelClient:
             },
         }
         _seed_kwargs: dict[str, Any] = {"seed": self.seed} if self.seed is not None else {}
-        try:
-            completion = litellm.completion(
-                model=model_string,
-                messages=messages,
-                temperature=self.temperature,
-                timeout=request.timeout_seconds,
-                response_format=_response_format,
+
+        def _call(with_response_format: bool) -> Any:
+            # max_retries=0: the openai-client's implicit in-SDK retry is pinned
+            # OFF — its Retry-After honoring can wait up to 60s per retry
+            # (minutes-scale wall-clock bleed, cruft-purge proposal §1). The
+            # explicit seconds-scale loop below owns transient-failure retries.
+            params: dict[str, Any] = {
+                "model": model_string,
+                "messages": messages,
+                "temperature": self.temperature,
+                "timeout": request.timeout_seconds,
+                "max_retries": 0,
                 **_seed_kwargs,
+            }
+            if with_response_format:
+                params["response_format"] = _response_format
+            return retry_completion(
+                lambda: litellm.completion(**params),
+                attempts=self.retry_attempts,
+                base_seconds=self.retry_base_seconds,
+                factor=self.retry_backoff_coefficient,
+                jitter_fraction=self.retry_jitter_fraction,
+                max_seconds=self.retry_max_seconds,
             )
+
+        try:
+            completion = _call(with_response_format=True)
         except Exception:
             # Provider doesn't support response_format — fall back to unstructured.
-            completion = litellm.completion(
-                model=model_string,
-                messages=messages,
-                temperature=self.temperature,
-                timeout=request.timeout_seconds,
-                **_seed_kwargs,
-            )
+            completion = _call(with_response_format=False)
 
         content = _content(completion)
         _log.debug("raw response [%s/%s]: %s", provider, model, content[:600])

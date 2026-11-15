@@ -136,6 +136,26 @@
 # max_tokens_per_scan = 500000
 
 # --------------------------------------------------------------------------
+# Retry policy (optional)
+# max_attempts counts the initial try plus retries per activity (Temporal
+# semantics); 3-5 recommended. The interval knobs are seconds-scale by default
+# (cruft-purge 3.7): retries back off exponentially from initial_interval_seconds
+# up to maximum_interval_seconds, with jitter_fraction (0.0-0.5) spreading
+# concurrent workers' retries so they don't re-stampede a cold provider.
+# calibrate_start_to_close_seconds is the per-attempt StartToClose budget for
+# the calibrate-finding agent loop (default 300s covers 10 turns at observed
+# chutes latency; the 2026-09-26 baseline scan failed a 61s attempt budget
+# during an OOM window).
+# --------------------------------------------------------------------------
+# [retry]
+# max_attempts = 4
+# initial_interval_seconds = 2.0
+# backoff_coefficient = 2.0
+# maximum_interval_seconds = 30.0
+# jitter_fraction = 0.2
+# calibrate_start_to_close_seconds = 300
+
+# --------------------------------------------------------------------------
 # Reasoning lexicon overrides (optional)
 # Extend the vagueness guard with phrases specific to your codebase or org.
 # Keep entries short and generic — phrases that appear only in vague reasoning

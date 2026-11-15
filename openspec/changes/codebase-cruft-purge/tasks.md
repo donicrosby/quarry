@@ -27,7 +27,7 @@ Code-only change (`skip_specs: true`). The full test suite (unit + integration +
 > PR #54 (scan-stage-fanout) already landed: semaphore fan-out for AGENTIC_VALIDATE (mid-batch `_VALIDATE_COST_INCREMENT_USD=0.05`), TRACER, CALIBRATE, live-exploitation, and class-parallel inventory chains. Remaining serialization (verified):
 
 - [ ] 3.1 Hunt-barrier streaming: candidates currently wait for `asyncio.gather` over ALL round hunters before any flows to dedup/validate (`_run_round` HUNT block) — persist + enqueue each hunter's candidates as its task resolves, keep post-gather event emission input-order for replay safety
-- [ ] 3.2 PROVE fan-out: serial `for finding in prioritize_by_live_verdict(...)` loop (`run_scan.py:2291`), up to `PROVE_MAX_ATTEMPTS` sandbox runs each — mirror the #54 semaphore pattern + concurrency-contract tests
+- [x] 3.2 PROVE fan-out: serial `for finding in prioritize_by_live_verdict(...)` loop (`run_scan.py:2291`), up to `PROVE_MAX_ATTEMPTS` sandbox runs each — mirror the #54 semaphore pattern + concurrency-contract tests
 - [ ] 3.3 Secrets-gate fan-out: `validate-secret-candidate` (30s timeout) runs serially inside the HUNT candidate loop (`:1551+`) — fan or fold under the validate pool
 - [ ] 3.4 Streaming dedup: per-candidate merge against accumulated set on arrival (replace per-round batch pass at `:2201`) — dedup is a legitimate funnel, keep it a set operation
 - [ ] 3.5 Round scoping retained ONLY for coverage-ledger / gapfill / feedback re-hunt decisions (ADR-022 verified implemented and replay-safe — do not break the edges); validation no longer gated on rounds
