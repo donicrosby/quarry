@@ -64,10 +64,11 @@ sync API, launching a headless Chromium browser. `navigate`, `fill`, `click`,
 ### Requirement: Screenshot capture with scrubber integration
 
 The `BrowserSession` protocol SHALL be extended with a `screenshot` method
-returning raw PNG bytes of the current page. The driver SHALL capture the
-screenshot via Playwright, and the caller SHALL scrub the bytes through the
-`Scrubber` before storage. The screenshot artifact SHALL be attached to the
-finding with a stable URI and SHA-256 reference.
+returning raw PNG bytes of the current page, captured via Playwright. Before
+storage the bytes SHALL be scrubbed through the `Scrubber` and stored via the
+artifact store as an `ArtifactRef` (`kind=screenshot`, stable `file://` URI,
+SHA-256, `redaction_status`) that survives sandbox teardown and is attachable
+to finding `evidence_refs` without schema changes.
 
 #### Scenario: screenshot-captures-current-page-png
 
@@ -102,3 +103,21 @@ sandbox's kernel-enforced network isolation is the primary containment.
 
 - **WHEN** `navigate` is called with a URL whose host is not in `allowed_hosts`
 - **THEN** `ToolSecurityError` is raised before any browser navigation occurs
+
+### Requirement: Driver actions are time-bounded and the browser terminates deterministically
+
+Every Playwright page operation (`navigate`, `fill`, `click`, `wait_for`) SHALL
+carry a per-action timeout; on expiry a named `BrowserActionTimeoutError` SHALL
+be raised. `close` SHALL terminate the browser context and process even when
+invoked during sandbox timeout handling.
+
+#### Scenario: action-timeout-raises-named-error
+
+- **WHEN** a page operation exceeds its per-action timeout
+- **THEN** `BrowserActionTimeoutError` is raised
+
+#### Scenario: browser-terminated-under-deadline-handling
+
+- **WHEN** `close` is invoked while the sandbox deadline is being handled
+- **THEN** the browser context and process are terminated
+- **AND** no orphaned Chromium processes remain

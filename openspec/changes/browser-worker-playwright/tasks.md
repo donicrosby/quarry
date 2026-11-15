@@ -6,8 +6,8 @@
   `src/quarry_activities/browser_login.py:47` (after `close`, before the blank line).
   This is a backward-compatible extension; existing stubs define no `screenshot` and
   are unaffected.
-- [ ] 1.2 Add `screenshot` to the `FakeBrowserSession` in
-  `tests/unit/test_browser_login_resolver.py` returning an empty PNG. Verify existing
+- [ ] 1.2 Add `screenshot` to the `_FakeBrowser` stub in
+  `tests/unit/test_browser_login_resolver.py:49` returning an empty PNG. Verify existing
   resolver tests still pass: `uv run pytest tests/unit/test_browser_login_resolver.py -q`.
 
 ## 2. Implement PlaywrightBrowserSession driver
@@ -27,6 +27,12 @@
   so the test suite runs without Playwright installed. Verify protocol conformance
   (`isinstance(session, BrowserSession)`), navigation, fill, click, storage_state,
   screenshot returns bytes, close terminates. RED-GREEN-REFACTOR.
+- [ ] 2.7 Write the screenshot-artifact gate test (covers spec scenarios
+  `screenshot-content-is-scrubbed-before-storage` and `screenshot-artifact-reference-is-stable`):
+  captured bytes pass through `Scrubber` before storage; stored via
+  `LocalArtifactStore` as `ArtifactRef(kind="screenshot")` with `file://` URI +
+  SHA-256 + `redaction_status`; reference resolves after the sandbox work dir is
+  deleted.
 
 ## 3. Replace factory stub with real factory
 
@@ -37,9 +43,12 @@
   Keep the `ImportError` path raising `BrowserLoginUnavailableError` with the
   "Install the optional browser extra" message.
 - [ ] 3.2 Update `test_playwright_present_but_driver_unavailable_mentions_browser_extra`
-  in `tests/unit/test_browser_login_resolver.py` — the test currently expects the stub to
-  raise; after the real factory lands, the test should verify the factory returns a
-  `BrowserSession` when Playwright is available. Remove or rename the old test.
+  in `tests/unit/test_browser_login_resolver.py:131` — the test currently expects the stub to
+  raise; after the real factory lands, the test must branch on the environment:
+  when the Chromium binary is NOT installed (playwright importable but
+  `playwright install chromium` not run), the factory still raises
+  `BrowserLoginUnavailableError` (keep asserting the browser-extra hint); only when the
+  binary IS present should the test verify the factory returns a `BrowserSession`.
 
 ## 4. URL validation in driver (defense-in-depth)
 
@@ -55,9 +64,11 @@
 - [ ] 5.1 Add a per-action timeout (default 30 s) to every Playwright page operation
   (`navigate`, `fill`, `click`, `wait_for`). On timeout, raise a named
   `BrowserActionTimeoutError`.
-- [ ] 5.2 Launch Chromium with `--memory-pressure-off` and a browser-context-level
-  memory limit via Playwright launch args. Chromium exceeding the limit is killed by the
-  OS OOM killer.
+- [ ] 5.2 Bound browser memory at the container/cgroup level (the browser-capable image
+  runs with a memory cap, e.g. via the sandbox's container run arguments);
+  `--memory-pressure-off` MAY be passed via launch args. Chromium exceeding the
+  container limit is killed by the OS OOM killer. (Playwright has no
+  browser-context-level memory-limit option — do not invent one.)
 - [ ] 5.3 In `close` or context-manager `__exit__`, ensure browser process is terminated
   even when `close` is called during sandbox timeout handling. Use `try/finally`.
 - [ ] 5.4 Write tests: action timeout raises `BrowserActionTimeoutError`; browser process
@@ -74,6 +85,11 @@
   container.
 - [ ] 6.3 Lint the Dockerfile: `docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml:ro"
   hadolint/hadolint hadolint --config /.hadolint.yaml - < Dockerfile` exits 0.
+- [ ] 6.4 Add a guard test (covers spec scenario
+  `non-browser-scans-do-not-require-browser-image`): assert
+  `ContainerSandbox.DEFAULT_IMAGE == "python:3.12-slim"` remains the default and that
+  constructing `ContainerSandbox()` with no image argument does not require the
+  browser-capable image.
 
 ## 7. Integration: end-to-end browser login
 
@@ -81,11 +97,15 @@
   (a) starts a local HTTP server serving a login form, (b) configures an `AuthProfile`
   with `browser_login` kind and a `SuccessCheck`, (c) runs `BrowserLoginResolver.resolve`
   with a real `PlaywrightBrowserSession` against the local target, (d) asserts the
-  returned `CachedCredential` has the expected session cookie.
+  returned `CachedCredential` has the expected session cookie, and (e) captures a
+  screenshot at login success, scrubs it through `Scrubber`, stores it via
+  `LocalArtifactStore`, and asserts the `ArtifactRef(kind="screenshot")` URI+SHA-256
+  still resolve after the sandbox work dir is deleted.
 - [ ] 7.2 Skip the test when Playwright is not installed (`pytest.importorskip`). Gate
   on `QUARRY_BROWSER_TESTS=1` env var so CI (which has no browser) skips cleanly.
-- [ ] 7.3 Add the integration test to the manual-test suite documented in
-  `docs/testing.md` or README.
+- [ ] 7.3 Document the gated invocation (`QUARRY_BROWSER_TESTS=1 uv run pytest
+  tests/integration/test_browser_login_e2e.py`) as the manual-test entry in `README.md`
+  (create `docs/testing.md` if the README outgrows a section — neither exists today).
 
 ## 8. Gate battery + validate
 

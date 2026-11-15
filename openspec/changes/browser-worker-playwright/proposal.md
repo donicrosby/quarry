@@ -9,7 +9,8 @@ session capture, credential scrubbing. But the `_playwright_browser_factory`
 stub (VERIFIED: `browser_login.py:76`) always raises
 `BrowserLoginUnavailableError` because no real Playwright driver exists:
 "In-process Playwright browser driver is not available: Playwright is installed
-but the browser session must be provided by the quarry-dynamic worker image."
+but the browser session must be provided by the quarry-dynamic worker image
+(ADR-023 §5)."
 
 The existing Dockerfile (VERIFIED: committed since PR #13, 2026-06-11) builds a
 server/worker image with Python, the quarry package, and scanner binaries — but
@@ -25,10 +26,11 @@ targets.
 
 ## What Changes
 
-- **`browser-worker-playwright` spec delta** (new capability): 4 ADDED
-  requirements with 12 scenarios covering the worker image, Playwright driver
+- **`browser-worker-playwright` spec delta** (new capability): 5 ADDED
+  requirements with 14 scenarios covering the worker image, Playwright driver
   implementation, screenshot artifact capture with scrubbing, URL-based egress
-  validation, and resource bounding.
+  validation, and resource bounding (per-action timeouts, deterministic browser
+  termination).
 - **Dockerfile extension**: add a `quarry-dynamic` stage or separate Dockerfile
   layering Playwright + headless Chromium onto the existing
   Python-3.12-slim-bookworm base, installable via `playwright install chromium`.
@@ -55,7 +57,11 @@ targets.
 - **Code**: `src/quarry_activities/playwright_driver.py` (new) with
   `PlaywrightBrowserSession`; amended `browser_login.py` (protocol method,
   factory); amended Dockerfile (browser stage); no changes to
-  `BrowserLoginResolver` logic, schemas, or auth profiles.
+  `BrowserLoginResolver` logic, schemas, or auth profiles. Screenshot artifacts
+  reuse existing schema surfaces: `ArtifactRef` with `kind=screenshot`
+  (`schemas.py:413`) stored via `LocalArtifactStore` (`file://` URI + SHA-256,
+  `quarry_artifacts/local.py:33-39`) and attached through the existing finding
+  `evidence_refs: list[ArtifactRef]` field — no schema changes.
 - **Dependencies**: `playwright>=1.49.0` already declared as the `browser`
   extra in `pyproject.toml` (VERIFIED: `pyproject.toml:37`); no new deps.
 - **Security**: the driver is a new attack surface (hostile page JS runs in a
@@ -81,3 +87,9 @@ Playwright driver (stub raises), screenshot capture (no method on protocol).
 **Dropped**: HAR capture → browser tool concern (W1). `LiveSessionContext`
 session-state handoff → does not exist in codebase; the resolver already
 captures storage state via the protocol.
+
+**Delegated**: the ticket's acceptance clause "screenshot artifact … viewable in
+report" → rendering of finding `evidence_refs` in reports belongs to the
+`reporting-and-replay` capability (reports already render findings with
+provenance). This change delivers capture, scrubbing, and the stable
+`ArtifactRef` reference the report would surface.
