@@ -4,7 +4,8 @@
 
 - [ ] 1.1 Add `HuntHandoff` Pydantic model to `src/quarry/schemas.py` with fields:
   `id`, `scan_id`, `workspace_id`, `round_number`, `stage` (literal `"HUNT"`),
-  `covered_scope_units`, `candidate_finding_ids`, `pending_task_count`,
+  `covered_scope_units`, `candidate_finding_ids`, `pending_task_ids`,
+  `pending_task_count`,
   `open_hypotheses`, `scan_ordinal`, `artifact_version`, `created_at`.
   Use `ConfigDict(frozen=True)`. Add `_empty_*` factory helpers per existing
   convention.
@@ -24,7 +25,8 @@
 - [ ] 2.1 Replace the direct `ledger_path.write_bytes(data)` in
   `write_coverage_artifact` (`src/quarry_activities/coverage.py:258`) with a
   call to `LocalArtifactStore.put_json`. Pass `scan_ordinal` and
-  `artifact_version` from the ledger.
+  `artifact_version` from the ledger. Rerouting the function also covers the
+  second call site (`src/quarry_workflows/run_scan.py:3188`, local run path).
   - [ ] Verify: existing coverage unit tests (`tests/unit/test_coverage*.py`) pass.
 
 ## 3. ArchitectureDoc to artifact store
@@ -35,9 +37,10 @@
   - [ ] Verify: recon integration test confirms artifact file exists on disk after
     synthesis.
 
-- [ ] 3.2 Add `architecture_doc_artifact_ref: ArtifactRef | None` to
-  `ReconSynthesisOutput` (or equivalent activity output schema).
-  - [ ] Verify: `uv run pyright` clean on the amended activity and its caller.
+- [ ] 3.2 Widen `recon_synthesis_activity` (`src/quarry_activities/recon_synthesis.py:145`,
+  currently `-> ArchitectureDoc`) to also return the ArchitectureDoc `ArtifactRef`
+  (result wrapper or tuple), updating the recon workflow call sites accordingly.
+  - [ ] Verify: `uv run pyright` clean on the amended activity and its callers.
 
 ## 4. HuntHandoff production activity
 
@@ -72,7 +75,8 @@
 
 - [ ] 6.1 Add an integration test (`tests/integration/test_cold_start_resume.py`)
   that starts a scan, cancels it during HUNT, and resumes it from artifacts,
-  asserting no duplicate findings and that covered units are not re-hunted.
+  asserting no duplicate findings, no lost findings recorded before the kill,
+  and that covered units are not re-hunted.
   - [ ] Verify: `uv run pytest tests/integration/test_cold_start_resume.py -v` green.
 
 - [ ] 6.2 Run the full CI-equivalent gate battery:
@@ -88,8 +92,11 @@
 ## Notes
 
 - The `scan_ordinal` counter is scoped to the target; `artifact_version` is scoped
-  to (scan, artifact_type). Both start at 1. The implementation chooses where to
-  source these counters (scan metadata, workflow state, or a DB sequence).
+  to (scan, artifact_type). Both start at 1. `scan_ordinal` SHALL be sourced from
+  state durable across scans of the same target (persisted scan metadata or a DB
+  sequence keyed by target identity) — per-scan workflow state cannot satisfy
+  cross-scan monotonicity. `artifact_version` may be sourced from scan metadata
+  or workflow state.
 - Existing `CoverageLedger` records without `scan_ordinal`/`artifact_version`
   fields deserialise fine because Pydantic ignores extra fields on read and the
   new fields default to 1.

@@ -6,7 +6,7 @@ Every handoff artifact (ArchitectureDoc, CoverageLedger, HuntHandoff) SHALL carr
 `scan_ordinal` (monotonic counter incremented per scan on the same target) and an
 `artifact_version` (monotonic counter incremented each time that artifact type is
 written within the scan). Together these SHALL make every artifact version uniquely
-identifiable and diffable across scans.
+identifiable and diffable across scans. The `scan_ordinal` counter SHALL be sourced from state durable across scans of the same target.
 
 #### Scenario: version_stamps_increment_within_scan
 

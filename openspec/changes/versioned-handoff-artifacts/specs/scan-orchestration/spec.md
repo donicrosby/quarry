@@ -6,7 +6,7 @@ The scan workflow SHALL support resuming a hunt from handoff artifacts alone. Wh
 a scan enters the HUNT stage and detects a prior hunt round that produced handoff
 artifacts but did not reach completion, it SHALL load the latest ArchitectureDoc,
 CoverageLedger, and HuntHandoff from the artifact store and resume without
-re-covering completed scope units or re-emitting findings that were already produced.
+re-covering completed scope units or re-emitting findings that were already produced. Artifact lookup SHALL be scoped to the current `scan_id`.
 
 #### Scenario: cold_start_resume_from_artifacts
 
@@ -26,6 +26,11 @@ re-covering completed scope units or re-emitting findings that were already prod
 
 - **WHEN** a hunt resumes from a HuntHandoff that records open hypotheses
 - **THEN** those hypotheses are available to the resumed hunt agents as context
+
+#### Scenario: findings_recorded_before_interruption_survive_resume
+
+- **WHEN** a hunt round recorded candidate findings before the workflow was killed
+- **THEN** after cold-start resume those findings remain present and none are silently dropped
 
 #### Scenario: clean_start_when_no_prior_artifacts
 
