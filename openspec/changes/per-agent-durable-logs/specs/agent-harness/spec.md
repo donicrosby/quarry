@@ -2,9 +2,10 @@
 
 ### Requirement: Per-agent durable execution log
 
-Every invocation of `run_agent_loop` SHALL produce an append-only JSONL log in the
-artifact store at `agents/<scan_id>/<role>/<instance_id>.jsonl`. The log SHALL be
-written through the same `ArtifactStore` protocol used by other artifact writes. A
+Every invocation of `run_agent_loop` given an artifact store reference SHALL produce
+an append-only JSONL log at `agents/<scan_id>/<role>/<instance_id>.jsonl`, written
+through the artifact store via a new `append_bytes` store operation (O_APPEND line
+writes in `LocalArtifactStore`) under a new `ArtifactKind.AGENT_LOG` member. A
 missing or unavailable store SHALL cause the loop to skip logging rather than fail.
 
 #### Scenario: Log is written to artifact store
@@ -21,12 +22,13 @@ missing or unavailable store SHALL cause the loop to skip logging rather than fa
 
 ### Requirement: Log entry schema
 
-Each JSONL line SHALL carry at minimum a `timestamp` (ISO 8601 UTC), an `event`
-type (`tool_call`, `tool_result`, `model_call`, `stop`), and an `iteration`
-counter. A `tool_call` entry SHALL include the tool name and redacted inputs. A
-`tool_result` entry SHALL include the scrubbed output text. A `model_call` entry
-SHALL include the `ModelInvocation.id` so the log line and the invocation record are
-cross-referenced. A `stop` entry SHALL record `stop_reason` and `iterations_used`.
+Each JSONL line SHALL carry an `instance_id`, an ISO 8601 UTC `timestamp`, an
+`event` type (`tool_call`, `tool_result`, `model_call`, `stop`), an `iteration`
+counter, and a `replay` flag (true only on replay lines).
+A `tool_call` entry SHALL include the tool name and redacted inputs. A
+`tool_result` entry SHALL include the scrubbed output. A `model_call` entry SHALL
+include the `ModelInvocation.id` (cross-reference). A `stop` entry SHALL record
+`stop_reason`, `iterations_used`, and `total_cost`.
 
 #### Scenario: Tool call is recorded with redacted args
 
@@ -52,16 +54,18 @@ cross-referenced. A `stop` entry SHALL record `stop_reason` and `iterations_used
 
 ### Requirement: Deterministic instance ID survives replay
 
-The instance ID SHALL be computed from `scan_id`, `role`, and a task-specific
-suffix (the `AgentTask.id` prefix) so replaying the same task with the same inputs
-produces the same instance ID and appends to the same log file. Log writes SHALL be
-append-only — a replay SHALL NOT truncate or overwrite existing log lines.
+The instance ID SHALL be `<role>-<task_id_prefix_8>`: the first 8 chars of the
+`AgentTask.id` UUID. `scan_id` scopes the artifact path, so distinct scans never
+share a log file. The same task replayed with the same inputs yields the same
+instance ID and appends to the same file. Writes SHALL be append-only: a replay
+SHALL NOT truncate or overwrite existing lines, and its lines SHALL carry
+`replay: true`.
 
 #### Scenario: Same task produces same instance ID
 
-- **WHEN** a hunt task with `scan_id="s1"` and `task_id="abc123..."` runs, then is
-  replayed with the same `scan_id` and `task_id`
-- **THEN** both runs append to `agents/s1/hunt/hunt-abc123.jsonl`
+- **WHEN** a hunt task with `scan_id="s1"` and `task_id="abc12345-..."` runs, then
+  is replayed with the same `scan_id` and `task_id`
+- **THEN** both runs append to `agents/s1/hunt/hunt-abc12345.jsonl`
 
 #### Scenario: Replay never truncates
 
