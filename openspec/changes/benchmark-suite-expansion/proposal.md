@@ -55,9 +55,11 @@ went live. Refresh against main @ b284af7 confirms:
 - **XBEN spike (task 3.1).** spike-cybergym.md §5 (lines 235-250) covers XBEN:
   saturated (~100%), kept for historical purposes. Consolidated here; no
   dedicated XBEN spike doc needed.
-- **Planted-regression target (task 2.3).** No planted target exists (verified:
-  zero grep hits for 'planted' outside spec docs). Scoped to one modest target
-  (3–5 vulns, one language).
+- **Planted-regression target (task 2.3).** No planted vulnerable target exists
+  (verified: grep for 'planted' outside spec docs matches only the incidental
+  "no planted secrets" docstring at tests/integration/test_e2e_temporal.py:135
+  describing a clean fixture). Scoped to one modest target (3–5 vulns, one
+  language).
 
 ## Impact
 

@@ -16,7 +16,7 @@ Every benchmark run SHALL emit a result artifact recording per-class recall, fal
 
 ### Requirement: Local benchmark emits the result artifact schema
 
-The `quarry benchmark local` command SHALL emit a `BenchmarkRunResult` artifact (schema at src/quarry/benchmark_artifacts.py:85) with `RunProvenance` and `BenchmarkMetrics`, not only the lightweight `compare()` summary. The artifact SHALL be persisted so local runs are comparable field-by-field.
+The `quarry benchmark local` command SHALL emit a `BenchmarkRunResult` artifact (schema at src/quarry/benchmark_artifacts.py:93) with `RunProvenance` and `BenchmarkMetrics`, not only the lightweight `compare()` summary. The artifact SHALL be persisted so local runs are comparable field-by-field.
 
 #### Scenario: local_benchmark_writes_artifact
 
@@ -46,7 +46,7 @@ The benchmark fixture inventory SHALL differentiate VulnerabilityClass values th
 
 The benchmark SHALL include a deliberately vulnerable target with 3–5 known vulnerabilities never published anywhere (the analog of Microsoft's StorageDrive interview driver), in one language, with a ground-truth manifest recording class, location, and expected proof type for each vuln.
 
-#### Scenario: planted_target_detects_regression
+#### Scenario: planted_target_detects_a_regression
 
 - **WHEN** a harness change drops detection of a planted vulnerability
 - **THEN** the benchmark reports the recall drop on the planted target, naming the specific vuln class and file that regressed
@@ -60,7 +60,7 @@ The benchmark SHALL include a deliberately vulnerable target with 3–5 known vu
 
 Quarry SHALL adopt at least one external benchmark — CyberGym (the MDASH benchmark) or XBEN (Shannon's published targets) — with a runner and a recorded baseline, enabling comparability against published harnesses.
 
-#### Scenario: external_benchmark_baseline_recorded
+#### Scenario: external_benchmark_baseline_is_recorded
 
 - **WHEN** an external benchmark is adopted
 - **THEN** a runner exists and a baseline score with provenance is stored as an artifact
