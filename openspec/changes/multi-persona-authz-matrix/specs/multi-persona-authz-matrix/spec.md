@@ -26,8 +26,9 @@ single-authorization behavior. Duplicate persona names SHALL be rejected.
 A live-exploit request without an explicit `auth_profile` SHALL carry the
 `profile_ref` of the first persona whose scope covers its host and path,
 selected workflow-side by `persona_for_request` in `quarry_workflows/roe.py`;
-the `http-request` activity SHALL NOT select personas. No match SHALL be
-refused before egress. Persona selection refines `request_in_scope`
+the `http-request` activity SHALL NOT select personas. With personas declared,
+a no-match request SHALL be refused before egress. Persona selection refines
+`request_in_scope`
 (authorization-and-scope-policy "Requests confined to authorized scope") and
 never widens it.
 
@@ -39,7 +40,8 @@ never widens it.
   the `AuthProfileSet`
 
 #### Scenario: No-persona-match is refused and recorded
-- **WHEN** a proposed request is covered by no persona's scope
+- **WHEN** personas are declared and a proposed request is covered by no
+  persona's scope
 - **THEN** the request is refused before egress with the denial recorded in
   `ExploitStep.notes` (same refusal shape as out-of-scope rejections)
 
@@ -225,9 +227,10 @@ matrix artifact and `source_refs` to the persona declaration.
 The stage SHALL create hunt `AgentTask`s for flagged endpoints post-emit,
 following the gapfill/feedback shape: next-round `round_index`, deduplication
 against hunted cells, persistence via `save_agent_task`, and the flagged
-endpoint plus matrix artifact reference in the task prompt. The stage SHALL
-NOT mutate `domain_context` of RECON-emitted tasks, which is assembled at
-emit time only.
+endpoint plus matrix artifact reference in the task prompt. Created tasks
+SHALL join the next round's hunt queue, so a fresh run hunts them. The stage
+SHALL NOT mutate `domain_context` of RECON-emitted tasks, which is assembled
+at emit time only.
 
 #### Scenario: Violations yield next-round hunt tasks
 - **WHEN** the matrix flags one or more violations

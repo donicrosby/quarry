@@ -32,9 +32,11 @@
   a persona is selected and `HttpRequestSpec.auth_profile` is unset, set it to
   the persona's `profile_ref` (None stays None) before building
   `HttpRequestActivityInput`.
-- [ ] When no persona matches (and `auth_profile` unset), refuse before egress
-  with an `ExploitStep` carrying `dispatched=False` and a refusal reason in
-  `notes` — same shape as the out-of-scope refusal.
+- [ ] When `personas` is non-empty and no persona matches (and `auth_profile`
+  unset), refuse before egress with an `ExploitStep` carrying `dispatched=False`
+  and a refusal reason in `notes` — same shape as the out-of-scope refusal.
+  With `personas` empty, no persona refusal is ever emitted (backward-compat,
+  Req 1).
 - [ ] Do NOT touch `src/quarry_activities/dynamic_http.py`: the `http-request`
   activity already resolves explicit `auth_profile` names from
   `auth_profile_set_json`; it must never import `quarry_workflows` or select
@@ -48,6 +50,8 @@
 - [ ] Unit test: first matching persona wins on overlap.
 - [ ] Unit test: explicit auth_profile on HttpRequestSpec bypasses persona selection.
 - [ ] Unit test: no-match refusal records an ExploitStep with the refusal reason.
+- [ ] Regression test: `personas=[]` live-exploit dispatch emits no persona
+  refusals and behaves identically to the pre-change path.
 - [ ] Regression test: VALIDATION dynamic-validation egress and live-prove
   dispatch paths are unchanged — no persona selection is applied there.
 
@@ -80,7 +84,9 @@
 - [ ] Implement `detect_authz_violations(matrix: AuthzMatrixResult) -> list[AuthzViolation]`
   in `src/quarry_activities/authz_matrix.py`.
 - [ ] Rule "declared-denied access": any cell with 2xx status on a path matching
-  THAT persona's `expected_denied_paths`. Violation class `unauth_access` when
+  THAT persona's `expected_denied_paths` (per the `_path_matches` convention:
+  fnmatch glob or exact/prefix, same as `do_not_test`). Violation class
+  `unauth_access` when
   the persona's `privilege_level` is `unauthenticated`, `privilege_escalation`
   otherwise. A 2xx on a path absent from the declaration raises NOTHING
   (public endpoints must not flood findings).
@@ -139,10 +145,15 @@
   `scan.stage.completed`).
 - [ ] Create matrix-conditioned hunt `AgentTask`s post-emit in the
   gapfill/feedback shape: `round_index` = next round, dedup via
-  `dedup_new_tasks` against hunted cells, persist via `save_agent_task`,
-  extend `all_agent_tasks`; task prompt names flagged endpoint, persona, and
-  matrix artifact reference. Never mutate RECON-emitted tasks'
-  `domain_context`.
+  `dedup_new_tasks` against hunted cells (an empty set at the matrix's
+  pre-loop position — kept for shape parity), persist via `save_agent_task`,
+  extend `all_agent_tasks`, and merge the created tasks into the next round's
+  hunt queue — the same queue-merge the gapfill/feedback edge performs
+  (`round_tasks = next_tasks`, run_scan.py:1145); at the matrix's position
+  inside `_run_live_exploitation` this is the `round_tasks` assignment seam
+  immediately after the live track returns (run_scan.py:900). Task prompt
+  names flagged endpoint, persona, and matrix artifact reference. Never
+  mutate RECON-emitted tasks' `domain_context`.
 - [ ] Integration test: workflow with personas and an active authorization runs
   the matrix stage and produces the matrix artifact.
 - [ ] Integration test: live track active, personas non-empty,
@@ -150,6 +161,9 @@
 - [ ] Integration test: expired/blank authorization with personas → matrix
   dispatches zero requests.
 - [ ] Integration test: workflow without personas skips the matrix stage.
+- [ ] Integration test: a fresh (non-resume) run with a violating matrix hunts
+  a matrix-conditioned task in a coverage round — the flagged endpoint appears
+  among a round's hunted tasks.
 
 ## Group 7: Validation and edge cases
 - [ ] Handle persona with login-flow/browser-login auth: the matrix SHALL
