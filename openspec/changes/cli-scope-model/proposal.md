@@ -50,8 +50,9 @@ that gap codifies a tiered, auditable decision.
   tiered host confinement, and valid-kind enumeration).
 - **Code touched** (for coder reference): `quarry_tools/runner.py` (new kind matchers in
   `_matches_scope_exclusion`, `filesystem_path` pre-check at static-path branch),
-  `quarry/schemas.py` (kind validation, 8 valid kinds including `note`), `quarry_cli/`
-  (profile parsing).
+  `quarry_activities/sandbox.py` (tiered-confinement module docstring, workdir-guard
+  verification), `quarry/schemas.py` (kind validation, 8 valid kinds including `note`),
+  `quarry_cli/` (profile parsing).
 - **No breaking changes**: new kinds are additive; unknown kinds are rejected at parse time
   (safe fail-closed); existing `kind="note"` usage is preserved.
 

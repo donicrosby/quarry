@@ -11,8 +11,8 @@
 - [ ] Verify existing tests using `kind="note"` (`tests/unit/test_agentic_schemas.py:44`,
   `tests/unit/test_scope_exclusions.py:43`) still pass — `note` must be in the valid
   kinds set.
-- [ ] Run `pytest tests/unit/test_agentic_schemas.py tests/unit/test_scope_exclusions.py -q` —
-  all tests pass.
+- [ ] Run `uv run pytest tests/unit/test_agentic_schemas.py
+  tests/unit/test_scope_exclusions.py -q` — all tests pass.
 
 ## 2. Implement binary exclusion kind in ToolRunner
 
@@ -33,13 +33,13 @@
     trigger the exclusion (fail-open)
   - `test_binary_exclusion_without_block_dynamic_does_not_refuse` —
     `block_dynamic=False` passes through
-- [ ] Run `pytest tests/unit/test_runner_sandbox_scope_guard.py -q` — all tests pass.
+- [ ] Run `uv run pytest tests/unit/test_runner_sandbox_scope_guard.py -q` — all tests pass.
 
 ## 3. Implement filesystem_path exclusion kind in ToolRunner
 
 - [ ] Add a `kind == "filesystem_path"` branch in `_matches_scope_exclusion`
-  (`src/quarry_tools/runner.py`) that matches the `path` input field (for
-  `run_in_sandbox`) and `input_files` keys against the exclusion value using fnmatch.
+  (`src/quarry_tools/runner.py`) that matches `input_files` keys (for `run_in_sandbox`;
+  that tool has no `path` input) against the exclusion value using fnmatch.
 - [ ] Add a separate `filesystem_path` pre-check at the static-path branch in
   `ToolRunner.run()` (`src/quarry_tools/runner.py:319`), BEFORE the existing
   `_resolve_path` escape check. This check SHALL iterate over
@@ -60,7 +60,7 @@
   - `test_command_exclusion_does_not_affect_static_tools` — a `kind="command"` exclusion
     does NOT block `read_file` (this test already exists at line 215; verify it still
     passes).
-- [ ] Run `pytest tests/unit/test_tool_runner_guard.py -q` — all tests pass.
+- [ ] Run `uv run pytest tests/unit/test_tool_runner_guard.py -q` — all tests pass.
 
 ## 4. Add tiered sandbox confinement guard
 
@@ -74,7 +74,8 @@
   Tier 1 — these guards are defense-in-depth, not a kernel-enforced guarantee.
 - [ ] Add a unit test verifying that a sandbox execution spec with a `cwd` pointing
   outside the workdir raises `ToolSecurityError` (if not already covered).
-- [ ] Run `pytest tests/unit/test_runner_sandbox_scope_guard.py -q` — all tests pass.
+- [ ] Run `uv run pytest tests/integration/test_local_sandbox.py
+  tests/unit/test_runner_sandbox_scope_guard.py -q` — all tests pass.
 
 ## 5. Validate the change end-to-end
 
@@ -84,5 +85,7 @@
 - [ ] Run the full gate suite: `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run pyright`, `uv run pytest tests/unit -q -n 4`.
 - [ ] Commit on branch `spec/cli-scope-model` with message
-  `spec: revise cli-scope-model — address adversarial review findings r2`.
-- [ ] Report the revised commit SHA in run metadata.
+  `spec: enforce cli-scope-model scope exclusions and tiered sandbox confinement`
+  (unique on the branch — must not duplicate the planner's landed spec-commit subjects).
+- [ ] Try `gh auth setup-git` and push; park locally on failure and report the
+  implementation commit SHA in run metadata.
