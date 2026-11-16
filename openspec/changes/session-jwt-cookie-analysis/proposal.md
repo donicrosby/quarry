@@ -17,15 +17,19 @@ becomes a candidate finding under the `AUTH` vulnerability class.
 ## What Changes
 
 - ADDED capability `auth-session-analysis`: a **SessionTokenAnalyzer** that extracts
-  JWTs and session cookies from `HttpResponseCapture` artifacts (auth-related responses
-  only), evaluates them against a checklist of security properties, and emits
-  `CandidateFinding`s for each failing check.
-- The analyzer hooks into the `http_request_activity` response path — after credential
-  injection and scrubbing (so secrets are never in the clear), but before the capture
-  re-enters agent context — and runs synchronously within the same activity invocation.
-- Three analysis dimensions: **JWT structure** (alg=none, weak HMAC key detection via
-  entropy, missing claim validation), **cookie attributes** (Secure, HttpOnly, SameSite,
-  Path/Domain scope), and **session token quality** (predictable patterns, short entropy).
+  JWTs and session cookies from auth-related HTTP responses (multi-value Set-Cookie
+  read from the raw response headers before dict collapse), evaluates them against
+  a checklist of security properties, and emits `CandidateFinding`s for each
+  failing check.
+- The analyzer hooks into the `http_request_activity` response path — after
+  the raw response arrives but before the capture re-enters agent context —
+  and runs synchronously within the same activity invocation. The analyzer
+  reads raw response surfaces (multi-value headers, body artifact) internally
+  but all emitted findings are placeholder-redacted (see R6).
+- Three analysis dimensions: **JWT structure** (alg=none, missing exp/iat claims,
+  embedded key-material quality when present), **cookie attributes** (Secure,
+  HttpOnly, SameSite, Path/Domain scope), and **session token quality**
+  (predictable patterns, short entropy, Shannon entropy thresholds).
 - Findings are fingerprinted deterministically (per `compute_fingerprint`) and flow
   through the existing dedup → report pipeline alongside code-hunted auth candidates.
 - The analyzer is **opt-in** — it only runs when an auth profile is present on the
@@ -70,13 +74,14 @@ original acceptance criteria are already covered or obsoleted:
   completing this, but the browser-login path already captures full cookie state for
   JS/SSO targets, and the `COOKIE` profile kind handles static cookies. Cookie
   EXTRACTION from raw Set-Cookie headers (non-browser) is re-assessed here as part of
-  the analysis pipeline — the analyzer will parse cookies from response headers directly
-  rather than completing a separate extraction path.
+  the analysis pipeline — the analyzer will parse cookies from the raw multi-value
+  response headers (httpx multi-dict) directly rather than completing a separate
+  extraction path.
 - **JWT-specific AuthProfileKind**: ❌ DROPPED — The original ticket envisioned a
-  `JWT` auth profile kind. The current system already handles JWTs through the `BEARER`
-  kind (Authorization: Bearer <jwt>), and JWT analysis belongs in the analyzer (this
-  change) rather than in credential resolution. A JWT is just a bearer token — its
-  structure is a concern of analysis, not injection.
+  `JWT` auth profile kind. The current system already handles JWTs through the
+  `BEARER` kind (Authorization: Bearer …) and JWT analysis belongs in the analyzer
+  (this change) rather than in credential resolution. A JWT is just a bearer
+  token — its structure is a concern of analysis, not injection.
 - **Session lifecycle tracking (logout, renewal, timeout)**: ❌ DROPPED as a first
   increment. Multi-request session lifecycle analysis requires correlation across
   exploitation-loop turns and is a follow-up capability. This change analyzes single
