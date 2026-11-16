@@ -77,7 +77,9 @@
 - [ ] 5.2 Unit tests: 8-byte token flagged, 32+ byte random token passes,
   timestamp-prefixed token flagged (using capture_time reference), integer counter
   flagged, hex counter flagged, edge cases: empty string produces no findings,
-  multi-fire overlap (10-digit epoch fires ≥2 checks) is expected and verified.
+  multi-fire overlap (10-digit epoch fires ≥2 checks) is expected and verified,
+  embedded key-material claim assessed (payload field `secret` with a weak value
+  -> finding; a strong 32-byte value -> no finding).
 
 ## 6. Fingerprinting, CandidateFinding emission, and redaction
 
@@ -92,19 +94,20 @@
   (line is the 0-based token index within the response, not a repo file line —
   documented in the finding description), vuln_class = `VulnerabilityClass.AUTH`.
 - [ ] 6.3 Unit tests: same inputs → same fingerprint, different token_index →
-  different fingerprint, confidence/severity per check name, emitted finding
-  title/description/evidence_summary contain ZERO raw token substrings (gating
+  different fingerprint, confidence/severity per check name, emitted finding text fields
+  (title/hypothesis/reasoning/evidence_summary) contain ZERO raw token substrings (gating
   scenario — assert with a known token value that its raw form appears nowhere
   in emitted text).
 
 ## 7. Integration into http_request_activity
 
 - [ ] 7.1 Add `SessionTokenAnalysisResult` to `HttpResponseCapture` (optional field,
-  default None) or add a companion activity `analyze-session-tokens`. Prefer the
-  in-activity path: call the analyzer synchronously inside `http_request_activity`
-  after the response arrives but before the capture is constructed and returned,
-  passing BOTH the raw `httpx.Response` (for multi-value Set-Cookie) and the
-  resulting `HttpResponseCapture` — ONLY when `spec.auth_profile` is not None.
+  default None). Call the analyzer synchronously inside `http_request_activity`
+  after the capture is constructed but before it is returned, passing BOTH the
+  raw `httpx.Response` (for multi-value Set-Cookie — read via
+  `response.headers.get_list`, not the collapsed `capture.headers` dict) and the
+  resulting `HttpResponseCapture` (for `body_artifact_ref`) — ONLY when
+  `spec.auth_profile` is not None.
 - [ ] 7.2 The analyzer results (list of findings) are persisted via the existing
   `persist-scan-state` path in the workflow that calls `http_request_activity`.
   Modify the workflow to collect findings from the capture result.

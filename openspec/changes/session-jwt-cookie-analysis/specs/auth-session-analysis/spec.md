@@ -116,7 +116,7 @@ to the embedded key's value.
 
 - **WHEN** a session cookie value begins with a recent ISO-8601 timestamp or a
   10-digit Unix epoch (recent = within ±1 year of capture time)
-- **THEN** the analyzer emits a `predictable-token` finding
+- **THEN** the analyzer emits a `predictable-timestamp` finding
 - **AND** predictable patterns are: pure decimal integer < 2^31, ISO-8601
   timestamp prefix, or ≤16 hex chars (≤8 bytes)
 
@@ -160,15 +160,15 @@ use capture time as the reference window, not analysis time.
 
 The analyzer reads raw capture surfaces internally but SHALL NOT propagate
 raw token, cookie value, or credential material into emitted
-`CandidateFinding` text fields. Every finding title, description, and
+`CandidateFinding` text fields. Every finding title, hypothesis, reasoning, and
 `evidence_summary` SHALL use placeholder references instead of the raw value.
 
 #### Scenario: findings-contain-no-raw-tokens
 
 - **WHEN** the analyzer emits findings for a token with value
   `eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYWRtaW4ifQ.`
-- **THEN** no emitted finding title, description, or evidence_summary contains
-  the raw token substring
+- **THEN** no emitted finding text field (title, hypothesis, reasoning,
+  evidence_summary) contains the raw token substring
 
 #### Scenario: evidence-summary-uses-placeholder
 
