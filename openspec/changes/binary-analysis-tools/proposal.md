@@ -24,7 +24,7 @@ the hunt loop.
 1. **Six new binary analysis tools** registered in the tool registry:
    `file_type`, `extract_strings`, `checksec`, `linked_libraries`,
    `suid_sgid_detect`, `symlink_analysis`. Each wraps an external system
-   binary (`file`, `strings`, `readelf`, `find`) or reads OS filesystem
+   binary (`file`, `strings`, `readelf`) or reads OS filesystem
    metadata directly.
 
 2. **A `binary_analysis` Temporal activity** that runs a deterministic pass

@@ -16,7 +16,7 @@ SHALL raise `ToolUnavailableError` rather than crashing the agent loop.
 #### Scenario: missing-external-binary-raises-tool-unavailable
 
 - **WHEN** a binary analysis tool is invoked but its external binary (e.g.
-  `file`, `readelf`, `strings`) is not on PATH
+  `file` or `readelf`) is not on PATH
 - **THEN** the tool raises `ToolUnavailableError` with a message naming the
   missing binary and an install hint
 
@@ -62,13 +62,14 @@ SHALL wrap `readelf` for section/segment inspection.
 
 - **WHEN** `checksec` is run against an ELF binary compiled with full RELRO,
   NX, PIE, and stack canary
-- **THEN** every protection field reports "Enabled" or "Full"
+- **THEN** RELRO reports "Full", NX reports "Enabled", PIE reports
+  "Enabled", and stack canary reports "Enabled"
 
 #### Scenario: unhardened-binary-reports-missing-protections
 
 - **WHEN** `checksec` is run against an ELF binary compiled without
   hardening flags
-- **THEN** at least one protection field reports "None" or "No"
+- **THEN** at least one protection field reports "None" or "Disabled"
 
 ### Requirement: Linked library inventory
 
@@ -122,21 +123,35 @@ SHALL be detected by comparing inode numbers.
 
 A Temporal activity `binary_analysis` SHALL execute a deterministic pass over
 the repo root, invoke the binary analysis tools for every discovered binary,
-and produce a structured report. The report SHALL feed into the hunt stage as
-domain context on `AgentTask`.
+and produce a structured report persisted as a scan artifact. A
+`ContextInjectorPlugin` targeting `attack_classes=[security_misconfiguration]`
+SHALL read the persisted report artifact and inject it as domain context on
+every `security_misconfiguration` `AgentTask`, including tasks emitted by
+gapfill and reachability-feedback.
 
-#### Scenario: activity-produces-structured-report
+#### Scenario: activity-produces-and-persists-structured-report
 
 - **WHEN** `binary_analysis` runs against a repo containing at least one ELF
   binary
 - **THEN** the returned report includes a per-binary section with file type,
   hardening flags, linked libraries, and any SUID/sgid or symlink findings
+- **AND** the report is persisted as an artifact for later consumption by
+  the context injector
 
-#### Scenario: report-is-injected-into-hunt-context
+#### Scenario: report-is-injected-via-context-injector
 
-- **WHEN** the `binary_analysis` activity completes
-- **THEN** its report is attached as domain context to hunt tasks targeting
-  the `security_misconfiguration` vulnerability class
+- **WHEN** a `security_misconfiguration` hunt task is assembled via
+  `assemble_domain_context` during `emit-agent-tasks`
+- **THEN** the `BinaryAnalysisContextInjector` plugin reads the persisted
+  report and contributes it to the task's `domain_context`
+- **AND** the task's `domain_context_sources` includes `binary_analysis`
+
+#### Scenario: gapfill-and-feedback-tasks-receive-binary-context
+
+- **WHEN** gapfill or reachability-feedback emits a
+  `security_misconfiguration` `AgentTask`
+- **THEN** the task's `domain_context` includes the binary analysis report
+  from the persisted artifact
 
 #### Scenario: no-binaries-yields-empty-report
 
