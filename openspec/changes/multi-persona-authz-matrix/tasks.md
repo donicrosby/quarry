@@ -2,123 +2,182 @@
 
 ## Group 1: Schema — PersonaScope model
 - [ ] Define `PersonaScope` Pydantic model in `src/quarry/schemas.py` with fields:
-  `name` (str), `profile_ref` (str, references AuthProfile name), `allowed_hosts`
-  (list[str]), `allowed_paths` (list[str], defaults to `["/"]`),
-  `do_not_test` (list[str], defaults to []), `privilege_level`
-  (Literal["unauthenticated","guest","user","admin"]).
+  `name` (str), `profile_ref` (str | None — None declares an unauthenticated
+  persona, no credential injection), `allowed_hosts` (list[str]),
+  `allowed_paths` (list[str], defaults to `["/"]`), `do_not_test`
+  (list[str], defaults to []), `privilege_level`
+  (Literal["unauthenticated","guest","user","admin"]),
+  `expected_denied_paths` (list[str], defaults to []).
 - [ ] Add optional `personas: list[PersonaScope]` field to `TargetAuthorization`.
 - [ ] Add validation: reject duplicate persona names within one authorization.
 - [ ] Add validation: reject any persona whose `allowed_hosts` contains a host not
   in the top-level `TargetAuthorization.allowed_hosts`.
-- [ ] Add validation: reject any persona whose `allowed_paths` intersects a
-  top-level `do_not_test` pattern.
+- [ ] Add validation: reject any persona whose `allowed_paths` OR
+  `expected_denied_paths` intersect a top-level `do_not_test` pattern.
 - [ ] Unit test: persona with valid fields serializes/deserializes correctly.
 - [ ] Unit test: persona with duplicate name raises ValidationError.
-- [ ] Unit test: persona scope intersecting top-level do_not_test is rejected.
+- [ ] Unit test: persona scope intersecting top-level do_not_test is rejected
+  (both `allowed_paths` and `expected_denied_paths` variants).
 - [ ] Unit test: empty personas field preserves backward-compatible behavior.
 
-## Group 2: Persona dispatch in roe.py
+## Group 2: Persona dispatch — workflow-side only (roe.py + run_scan.py)
 - [ ] Add `persona_for_request(authorization, host, path)` predicate to
   `src/quarry_workflows/roe.py`: returns the first matching `PersonaScope` or
   `None`. Match = host in persona.allowed_hosts AND path under
-  persona.allowed_paths AND path not in any applicable do_not_test.
-- [ ] Add `persona_do_not_test` check: per-persona do_not_test is applied after
-  top-level do_not_test.
-- [ ] Wire `persona_for_request` into the `http_request` activity dispatch path:
-  when a persona is selected, use its `profile_ref` to resolve the credential.
-- [ ] When `HttpRequestSpec.auth_profile` is explicitly set, bypass persona
-  selection and use the named profile directly.
-- [ ] Add startup validation: every persona's `profile_ref` must resolve in the
-  `AuthProfileSet`; fail fast with a clear error if not.
+  persona.allowed_paths AND path not in any applicable do_not_test. Pure
+  predicate importing only `quarry.schemas` (same shape as
+  `authorization_active`/`request_in_scope`).
+- [ ] Wire `persona_for_request` into the live-exploit chain dispatch in
+  `run_scan.py`, immediately AFTER the existing `request_in_scope` check: when
+  a persona is selected and `HttpRequestSpec.auth_profile` is unset, set it to
+  the persona's `profile_ref` (None stays None) before building
+  `HttpRequestActivityInput`.
+- [ ] When no persona matches (and `auth_profile` unset), refuse before egress
+  with an `ExploitStep` carrying `dispatched=False` and a refusal reason in
+  `notes` — same shape as the out-of-scope refusal.
+- [ ] Do NOT touch `src/quarry_activities/dynamic_http.py`: the `http-request`
+  activity already resolves explicit `auth_profile` names from
+  `auth_profile_set_json`; it must never import `quarry_workflows` or select
+  personas.
+- [ ] Add startup validation: every persona's non-null `profile_ref` must
+  resolve in the `AuthProfileSet`; fail fast with a clear error if not
+  (extend the existing auth-profile validation seam in `runner.py`).
 - [ ] Unit test: persona_for_request selects correct persona for matching host+path.
 - [ ] Unit test: persona_for_request returns None when no persona matches.
 - [ ] Unit test: persona_for_request returns None when do_not_test blocks path.
 - [ ] Unit test: first matching persona wins on overlap.
 - [ ] Unit test: explicit auth_profile on HttpRequestSpec bypasses persona selection.
+- [ ] Unit test: no-match refusal records an ExploitStep with the refusal reason.
+- [ ] Regression test: VALIDATION dynamic-validation egress and live-prove
+  dispatch paths are unchanged — no persona selection is applied there.
 
-## Group 3: AuthZ matrix activity
+## Group 3: AuthZ matrix activity (no persona logic inside)
 - [ ] Create `src/quarry_activities/authz_matrix.py` with Temporal activity
-  `authz_matrix_activity`. Input: scan_id, attack_surface endpoints list,
-  personas list, target endpoint config.
-- [ ] For each (endpoint, persona) pair: dispatch an HTTP request with that
-  persona's resolved credential, capture status code and response body hash.
+  `authz_matrix_activity`. Input: scan_id, attack-map endpoint list (from the
+  live-recon `attack_map`), personas serialized with pre-resolved
+  `profile_ref` per cell, target endpoint config, `auth_profile_set_json`.
+  The activity receives explicit profiles; it performs NO persona selection
+  and imports nothing from `quarry_workflows`.
+- [ ] For each (endpoint, persona) pair: skip endpoints failing top-level
+  `request_in_scope` (evaluated workflow-side before the call); dispatch an
+  HTTP request via the `http-request` activity with
+  `spec.auth_profile = persona.profile_ref`; capture status code and response
+  body hash.
 - [ ] Use deterministic request ordering: endpoints sorted by path, personas by
   declaration order.
 - [ ] Produce `AuthzMatrixResult` model: list of `AuthzMatrixRow` with
   `endpoint_path`, `endpoint_method`, and per-persona `AuthzMatrixCell`
   (status_code, body_hash, error).
-- [ ] Persist matrix result as an artifact (same path as other scan artifacts).
+- [ ] Persist matrix result as an artifact (same path convention as other scan
+  artifacts) and return its `ArtifactRef` for finding provenance.
 - [ ] Unit test: matrix produces correct dimensions (N endpoints × M personas).
 - [ ] Unit test: cell records actual status code and hash from a stub HTTP server.
+- [ ] Unit test: endpoint matching top-level do_not_test produces no cell.
 - [ ] Integration test: matrix activity runs inside a Temporal workflow with
   mock endpoints.
 
-## Group 4: Violation detection
+## Group 4: Violation detection — declared ground truth only
 - [ ] Implement `detect_authz_violations(matrix: AuthzMatrixResult) -> list[AuthzViolation]`
   in `src/quarry_activities/authz_matrix.py`.
-- [ ] Detection rule 1 (unauth access): any cell where the unauthenticated
-  persona gets a 2xx status AND at least one authenticated persona also gets 2xx
-  on the same endpoint.
-- [ ] Detection rule 2 (privilege escalation): any cell where a lower-privilege
-  persona (e.g. "user") receives the same success class (2xx) as a higher-privilege
-  persona (e.g. "admin") on an endpoint where they should differ.
-- [ ] Detection rule 3 (inconsistent authZ): any cell where two personas of the
-  same `privilege_level` receive materially different responses (different status
-  class or different body hash) for the same endpoint.
-- [ ] Unit test: unauth 200 on protected endpoint triggers violation.
-- [ ] Unit test: user getting 200 on admin-only endpoint triggers privilege
-  escalation.
-- [ ] Unit test: two user-level personas getting 200 vs 403 triggers inconsistency.
-- [ ] Unit test: matrix with no violations returns empty list.
+- [ ] Rule "declared-denied access": any cell with 2xx status on a path matching
+  THAT persona's `expected_denied_paths`. Violation class `unauth_access` when
+  the persona's `privilege_level` is `unauthenticated`, `privilege_escalation`
+  otherwise. A 2xx on a path absent from the declaration raises NOTHING
+  (public endpoints must not flood findings).
+- [ ] Rule "inconsistent authZ": two personas sharing a `privilege_level`
+  receiving DIFFERENT status classes (2xx vs 4xx/3xx) on the same endpoint.
+  Body-hash differences NEVER trigger a violation (recorded as evidence only).
+- [ ] Exclusions: cells with a transport `error` set or a 5xx status are
+  inconclusive — excluded from every rule.
+- [ ] Preconditions are inert-by-declaration: with no unauthenticated persona
+  configured, `unauth_access` can never fire; with no `expected_denied_paths`
+  declared anywhere, the declared-denied rule raises nothing. Neither state is
+  an error.
+- [ ] Unit test: unauth 200 on declared-denied path triggers unauth_access.
+- [ ] Unit test: user 200 on declared-denied admin path triggers
+  privilege_escalation.
+- [ ] Unit test: unauth 200 on an UNdeclared path (public endpoint) triggers
+  nothing.
+- [ ] Unit test: two user-level personas 200 vs 403 triggers inconsistency.
+- [ ] Unit test: two user-level personas 200 vs 200 with different body hashes
+  triggers nothing (CSRF/per-user content negative).
+- [ ] Unit test: error and 5xx cells are excluded from all rules.
+- [ ] Unit test: matrix with no violations returns empty list; matrix with no
+  matching persona configured for a rule completes without error.
 
-## Group 5: Candidate finding emission
-- [ ] For each `AuthzViolation`, construct a `CandidateFinding` with:
-  `vuln_class` mapped from violation class (unauth_access → appropriate class,
-  priv_esc → `VulnerabilityClass.IDOR` or new `AUTHZ_MISCONFIGURATION`),
-  `title` derived from endpoint + persona, `hypothesis` describing the violation,
-  `evidence_refs` linking to the matrix artifact.
-- [ ] Wire violation detection + finding emission into the `authz_matrix` activity
-  so findings are emitted as part of the activity's output.
-- [ ] Ensure findings carry provenance: the matrix activity's invocation ID and
-  the scan's `TargetAuthorization` reference.
-- [ ] Unit test: unauth-access violation produces a CandidateFinding with correct
-  vuln_class.
-- [ ] Unit test: finding evidence_ref includes the matrix artifact reference.
-- [ ] Integration test: scan with a target exhibiting broken authZ produces
-  authZ findings in the final report.
+## Group 5: Candidate finding emission — pinned mapping
+- [ ] For each `AuthzViolation`, construct a `CandidateFinding` with `vuln_class`
+  pinned: `unauth_access` → `VulnerabilityClass.AUTH`;
+  `privilege_escalation` → `VulnerabilityClass.AUTH`; `inconsistent_authz` →
+  `VulnerabilityClass.SECURITY_MISCONFIGURATION`. Do NOT add a new
+  `VulnerabilityClass` member and do NOT use `IDOR`.
+- [ ] Set `title` derived from endpoint + persona, `hypothesis` describing the
+  violation.
+- [ ] Provenance: `evidence_refs` carries the matrix artifact `ArtifactRef`
+  (returned by the activity); `source_refs` references the persona
+  declaration; `metadata` records persona name, privilege_level, and endpoint.
+- [ ] Wire violation detection + finding emission into the matrix stage so
+  findings are appended to `candidate_findings` alongside live-PROVEN findings
+  (same first-class-candidate flow).
+- [ ] Unit test: each violation class produces a CandidateFinding with the
+  pinned vuln_class (AUTH, AUTH, SECURITY_MISCONFIGURATION).
+- [ ] Unit test: finding evidence_refs includes the matrix artifact reference
+  and source_refs the persona declaration.
 
-## Group 6: Workflow integration
-- [ ] Create `authz_matrix_stage` in `src/quarry_workflows/run_scan.py`:
-  orchestrated after `live_recon` (attack surface must be mapped first) and
-  before `hunt` (matrix findings feed into hunt tasks).
-- [ ] Condition: stage only runs when `TargetAuthorization.personas` is non-empty
-  AND `ScanProfile.dynamic_validation_enabled` is true.
-- [ ] Thread the matrix result into hunt tasks: each hunt task receives the
-  matrix as context so the hunter agent can focus on flagged endpoints.
-- [ ] Emit `scan.stage.completed` event for the matrix stage.
-- [ ] Integration test: workflow with personas runs the matrix stage and produces
-  matrix artifact.
+## Group 6: Workflow integration — live-track gate, position, events, tasks
+- [ ] Add the `authz_matrix` stage in `src/quarry_workflows/run_scan.py` inside
+  `_run_live_exploitation`, AFTER live recon produces the attack map and
+  BEFORE the propose→dispatch chain. The stage runs under the existing
+  fail-closed `live_exploitation_active` gate (`run_scan.py`) — add only the
+  `personas` non-empty condition on top. Do NOT reference
+  `dynamic_validation_enabled` in the gate.
+- [ ] Workflow-side pre-resolution: evaluate `request_in_scope` per endpoint
+  and build the per-cell explicit `auth_profile` before calling the activity.
+- [ ] Emit `authz_matrix.started` before and `authz_matrix.completed` after
+  the activity via `_append_workflow_event`, with endpoint/persona/violation
+  counts in the completed payload (bespoke-event convention — no
+  `scan.stage.completed`).
+- [ ] Create matrix-conditioned hunt `AgentTask`s post-emit in the
+  gapfill/feedback shape: `round_index` = next round, dedup via
+  `dedup_new_tasks` against hunted cells, persist via `save_agent_task`,
+  extend `all_agent_tasks`; task prompt names flagged endpoint, persona, and
+  matrix artifact reference. Never mutate RECON-emitted tasks'
+  `domain_context`.
+- [ ] Integration test: workflow with personas and an active authorization runs
+  the matrix stage and produces the matrix artifact.
+- [ ] Integration test: live track active, personas non-empty,
+  `dynamic_validation_enabled=false` → matrix still runs.
+- [ ] Integration test: expired/blank authorization with personas → matrix
+  dispatches zero requests.
 - [ ] Integration test: workflow without personas skips the matrix stage.
 
 ## Group 7: Validation and edge cases
-- [ ] Handle persona with login-flow/browser-login auth: the `authz_matrix`
-  activity SHALL trigger login once per persona, cache the session credential per
-  the profile's TTL, and reuse across endpoint requests.
-- [ ] Handle HTTP errors during matrix collection: a 5xx from the target on one
-  endpoint SHALL NOT abort the entire matrix; record the error in the cell and
-  continue.
+- [ ] Handle persona with login-flow/browser-login auth: the matrix SHALL
+  trigger login once per persona, cache the session credential per the
+  profile's TTL (`LoginStep.ttl_seconds`/`BrowserLoginStep.ttl_seconds`,
+  `CredentialCache`), and reuse across endpoint requests.
+- [ ] Handle HTTP errors during matrix collection: a 5xx or transport error on
+  one endpoint SHALL NOT abort the matrix; record in the cell and continue.
 - [ ] Request rate limiting: space persona requests per endpoint to avoid
   triggering target-side rate limits (minimum 1s between requests to the same
   host).
 - [ ] Unit test: login-flow persona reuses cached credential across matrix rows.
-- [ ] Unit test: target 5xx on one endpoint doesn't abort matrix for remaining
-  endpoints.
-- [ ] Validate the full change with `openspec validate multi-persona-authz-matrix --strict`.
+- [ ] Unit test: target 5xx on one endpoint doesn't abort the matrix for
+  remaining endpoints.
 
 ## Group 8: Documentation and config example
 - [ ] Add `[personas]` section example to `docs/auth-profiles.md` (or create the
-  doc if absent).
-- [ ] Document the `privilege_level` vocabulary and its effect on violation
-  detection rules.
+  doc if absent), including an `expected_denied_paths` example.
+- [ ] Document the `privilege_level` vocabulary, the declared-ground-truth
+  detection rules, and their inert preconditions.
 - [ ] Update `openspec/config.yaml` context if new invariants emerge during
   implementation.
+
+## Group 9: Gates and delivery
+- [ ] Run `uv run ruff check .` and `uv run ruff format --check .` — both clean.
+- [ ] Run `uv run pyright` — clean (zero `# pyright: ignore`, typed helpers for
+  complex defaults).
+- [ ] Run `uv run pytest -x -q` — full suite green.
+- [ ] Run `npx openspec validate multi-persona-authz-matrix --strict` — clean.
+- [ ] Commit on `spec/multi-persona-authz-matrix` with a conventional-commit
+  message and report the revised SHA.
