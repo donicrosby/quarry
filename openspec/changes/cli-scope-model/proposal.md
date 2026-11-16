@@ -10,20 +10,31 @@ blocking filesystem access to sensitive paths even when those paths lie within t
 
 The sandbox host machine is currently not addressed in any scope policy — a gap that leaves
 the "is the host in scope for privilege escalation testing?" question unanswered. Closing
-that gap codifies a clear, auditable decision.
+that gap codifies a tiered, auditable decision.
 
 ## What Changes
 
-- **ADD** `binary` exclusion kind: matches against the resolved binary path (post-PATH
-  resolution) in `run_in_sandbox`, blocking execution even when the command name is allowed.
-- **ADD** `filesystem_path` exclusion kind: blocks static tool access (`read_file`, `grep`,
-  `scip_index`, `run_in_sandbox` `input_files` paths) to paths matching the exclusion
-  value, independently of the repo-root escape check.
-- **ADD** host-is-never-in-scope policy: the sandbox host SHALL NOT be treated as a
-  reachable target; all privilege-escalation checks execute exclusively inside the sandbox
-  environment.
+- **ADD** `binary` exclusion kind: resolves the command name via `shutil.which()` within
+  `_matches_scope_exclusion` (`src/quarry_tools/runner.py`) at the ToolRunner pre-gate —
+  NOT downstream in `sandbox_exec_activity`. Blocks `run_in_sandbox` execution by the
+  resolved binary path even when the command name is allowed. Fail-open when the binary
+  cannot be resolved.
+- **ADD** `filesystem_path` exclusion kind: for static tools (`read_file`, `grep`,
+  `scip_index`), the check is applied at the static-path branch in `ToolRunner.run()`
+  (`src/quarry_tools/runner.py:319`) before the `_resolve_path` escape check, preserving
+  the invariant that static tools are unaffected by sandbox-scoped exclusions. For
+  `run_in_sandbox`, the existing `_check_scope_exclusion` path applies.
+- **ADD** tiered sandbox confinement policy: Tier 1 (`LocalSubprocessSandbox`) provides
+  resource containment plus defense-in-depth via the command allowlist and workdir
+  restriction, but shares the host kernel, filesystem, and network stack. Tier 2+
+  (`ContainerSandbox`, `K8sJobSandbox`) provides kernel-enforced isolation where the host
+  is not a reachable target. All privilege-escalation checks execute inside the sandbox
+  regardless of tier.
 - **ADD** CLI configurability: the `ScanProfile` `scope_exclusions` list accepts the new
-  kinds; validation rejects unknown kinds at profile parse time.
+  kinds; validation rejects unknown kinds at profile parse time. Valid kinds: `route`,
+  `path_glob`, `functional_area`, `vuln_class`, `command`, `binary`, `filesystem_path`,
+  and `note` (8 total). The existing `kind="note"` usage in tests and prompt blocks
+  continues to parse without error.
 
 ## Non-goals
 
@@ -35,13 +46,14 @@ that gap codifies a clear, auditable decision.
 
 ## Impact
 
-- **Specs**: `authorization-and-scope-policy` (ADDED requirements for new exclusion kinds
-  and host-scope decision).
+- **Specs**: `authorization-and-scope-policy` (ADDED requirements for new exclusion kinds,
+  tiered host confinement, and valid-kind enumeration).
 - **Code touched** (for coder reference): `quarry_tools/runner.py` (new kind matchers in
-  `_matches_scope_exclusion`), `quarry_activities/sandbox.py` (binary-path resolution in
-  scope check), `quarry/schemas.py` (kind validation), `quarry_cli/` (profile parsing).
+  `_matches_scope_exclusion`, `filesystem_path` pre-check at static-path branch),
+  `quarry/schemas.py` (kind validation, 8 valid kinds including `note`), `quarry_cli/`
+  (profile parsing).
 - **No breaking changes**: new kinds are additive; unknown kinds are rejected at parse time
-  (safe fail-closed).
+  (safe fail-closed); existing `kind="note"` usage is preserved.
 
 ## Reconciled against current tree (main @ b284af7)
 
@@ -49,8 +61,8 @@ The original ticket (2026-09-10) requested three new kinds: `command`, `binary`,
 `filesystem_path`. `command` was already implemented before the ticket was written (commit
 5b716db9, 2026-06-12: `_matches_scope_exclusion` `kind == "command"` branch, plus tests in
 `test_runner_sandbox_scope_guard.py`). This change drops `command` from scope and adds only
-`binary` and `filesystem_path`, plus the host-scope decision that was always implied but
-never codified.
+`binary` and `filesystem_path`, plus the tiered host-confinement decision that was always
+implied but never codified.
 
 **Dropped from original ticket:**
 - `command` kind — already shipped (5b716db9, `src/quarry_tools/runner.py:152-156`).
