@@ -182,7 +182,7 @@ class TestDefaultImageUnchanged:
 # ---------------------------------------------------------------------------
 
 
-def _new_session(host: str, port: int) -> Any:
+def _new_session(host: str, port: int, **kwargs: Any) -> Any:
     from quarry_activities.playwright_driver import (
         BrowserLaunchError,
         PlaywrightBrowserSession,
@@ -190,7 +190,9 @@ def _new_session(host: str, port: int) -> Any:
 
     pytest.importorskip("playwright.sync_api")
     try:
-        return PlaywrightBrowserSession(allowed_hosts=(host,), target_host=host, target_port=port)
+        return PlaywrightBrowserSession(
+            allowed_hosts=(host,), target_host=host, target_port=port, **kwargs
+        )
     except BrowserLaunchError as exc:  # pragma: no cover - env-dependent
         pytest.skip(f"Chromium not available: {exc}")
 
@@ -245,6 +247,19 @@ class TestPlaywrightBrowserSession:
             shot = session.screenshot()
             assert isinstance(shot, bytes)
             assert shot.startswith(b"\x89PNG")
+        finally:
+            session.close()
+
+    def test_action_timeout_raises_named_error(self, login_server: tuple[str, int]) -> None:
+        from quarry_activities.playwright_driver import BrowserActionTimeoutError
+
+        host, port = login_server
+        session = _new_session(host, port, action_timeout_ms=250)
+        try:
+            session.navigate(f"http://{host}:{port}/login")
+            # A selector that never appears forces the per-action timeout to fire.
+            with pytest.raises(BrowserActionTimeoutError):
+                session.wait_for("#never-appears")
         finally:
             session.close()
 
