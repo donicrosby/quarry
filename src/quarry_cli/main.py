@@ -517,8 +517,14 @@ def benchmark_local(
         )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
-    except FileNotFoundError:
-        typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+    except FileNotFoundError as exc:
+        # A missing ground-truth file is the common case; anything else that
+        # raises FileNotFoundError (e.g. a checkout without prompts/) must not
+        # be mislabelled as the ground truth.
+        if not Path(ground_truth).is_file():
+            typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+        else:
+            typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)

@@ -219,6 +219,38 @@ def test_relative_artifact_root_resolves_against_cwd(tmp_path: Path, monkeypatch
     assert (tmp_path / ".quarry/benchmarks/local-scan-1/result.json").is_file()
 
 
+def test_benchmark_local_reports_non_ground_truth_file_errors(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A missing prompts/hunt tree must not be reported as a missing answer key."""
+    missing_prompts = tmp_path / "prompts" / "hunt"
+    _install_fake_client(monkeypatch)
+
+    def _raise_missing_prompts(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError(f"prompts hunt directory not found at {missing_prompts}")
+
+    monkeypatch.setattr(main, "local_benchmark_run_result", _raise_missing_prompts)
+
+    result = runner.invoke(
+        main.app,
+        [
+            "benchmark",
+            "local",
+            "--repo",
+            "examples/vulnerable-fastapi",
+            "--ground-truth",
+            str(GROUND_TRUTH),
+            "--artifact-root",
+            str(tmp_path / "benchmarks"),
+        ],
+    )
+
+    output = result.output + result.stderr
+    assert result.exit_code == 1
+    assert "ground truth file not found" not in output
+    assert str(missing_prompts) in output
+
+
 def test_benchmark_local_exposes_artifact_root_option() -> None:
     result = runner.invoke(main.app, ["benchmark", "local", "--help"])
     clean = _strip_ansi(result.output)
