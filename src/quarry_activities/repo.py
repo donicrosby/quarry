@@ -34,7 +34,7 @@ from quarry.schemas import (
     utc_now,
 )
 from quarry_activities.inputs import CreateSnapshotInput, PersistScanStateInput
-from quarry_artifacts import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_persistence import QuarryRepository
 
 IGNORED_DIRS = frozenset(
@@ -97,7 +97,7 @@ def _create_repository_snapshot_impl(
 ) -> RepositorySnapshot:
     root = repo_path.resolve()
     manifest = build_file_manifest(root)
-    store = LocalArtifactStore(artifact_root)
+    store = build_artifact_store(str(artifact_root))
     manifest_ref = store.put_json(
         f"{scan_id}/repo_manifest.json",
         manifest,

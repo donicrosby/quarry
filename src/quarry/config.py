@@ -46,6 +46,13 @@ class QuarrySettings(BaseSettings):
     redis_url: str = ""  # env: QUARRY_REDIS_URL      (used when backend=redis)
     s3_bucket: str = ""  # env: QUARRY_S3_BUCKET      (used when backend=s3)
 
+    # Network-backend tuning (ADR-024 §B).
+    # Max artifact size the Redis backend will accept (larger -> ValueError, use S3).
+    redis_max_artifact_bytes: int = 1_048_576  # env: QUARRY_REDIS_MAX_ARTIFACT_BYTES
+    # Bounded retry for transient network failures on put_bytes/get_bytes.
+    artifact_retry_max_attempts: int = 3  # env: QUARRY_ARTIFACT_RETRY_MAX_ATTEMPTS
+    artifact_retry_backoff_seconds: float = 1.0  # env: QUARRY_ARTIFACT_RETRY_BACKOFF_SECONDS
+
     # Sandbox execution backend (ADR-022 §A).
     # "" or "local"     => LocalSubprocessSandbox (default, dev/test, no Docker required).
     # "container"       => ContainerSandbox Tier 2 (Docker/Podman, production default).

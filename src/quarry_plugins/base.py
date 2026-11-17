@@ -22,7 +22,7 @@ from quarry.schemas import (
     Severity,
     VulnerabilityClass,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore
 
 __all__ = [
     "ContextInjectorPlugin",
@@ -80,7 +80,7 @@ class HookContext:
         scan_id: str,
         workspace_id: str,
         dry_run: bool,
-        artifact_store: LocalArtifactStore | None = None,
+        artifact_store: ArtifactStore | None = None,
         already_delivered: set[str] | None = None,
         secret_ref: SecretRef | None = None,
     ) -> None:
