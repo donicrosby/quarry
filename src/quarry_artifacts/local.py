@@ -90,3 +90,6 @@ class LocalArtifactStore:
             msg = f"Artifact key escapes store root: {key}"
             raise ValueError(msg)
         return path
+
+    def close(self) -> None:
+        """No-op: the file backend holds no connection pool to release."""

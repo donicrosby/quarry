@@ -62,9 +62,9 @@ class KbContextInjectorPlugin:
     def _read_artifact(self, key: str) -> str | None:
         if self._artifact_root is None:  # pragma: no cover - guarded by inject_context
             return None
-        from quarry_artifacts.local import LocalArtifactStore
+        from quarry_artifacts.store import build_artifact_store
 
-        return LocalArtifactStore(self._artifact_root).get_text(key)
+        return build_artifact_store(str(self._artifact_root)).get_text(key)
 
 
 KB_CONTEXT_PLUGIN = KbContextInjectorPlugin()

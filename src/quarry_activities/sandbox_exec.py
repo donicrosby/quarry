@@ -37,7 +37,7 @@ from quarry_activities.sandbox import (
     SandboxBackend,
     SandboxResult,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_models.redaction import Scrubber
 
 # Maximum bytes for stdout/stderr before truncation (mirrors http_utils).
@@ -189,7 +189,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
 
         target_endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
 
-    store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
+    store = build_artifact_store(inp.artifact_store_path)
     sandbox = _build_sandbox_backend()
 
     with tempfile.TemporaryDirectory(prefix="quarry-sandbox-") as _work_dir:
@@ -219,14 +219,14 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     wrapped_stderr = f"<target_content>{stderr_scrub.text}</target_content>"
 
     stdout_ref = store.put_bytes(
-        f"{inp.candidate_finding_id}/stdout",
+        f"{inp.scan_id}/{inp.candidate_finding_id}/stdout",
         wrapped_stdout.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDOUT,
         content_type="text/plain",
         redaction_status=redaction_status,
     )
     stderr_ref = store.put_bytes(
-        f"{inp.candidate_finding_id}/stderr",
+        f"{inp.scan_id}/{inp.candidate_finding_id}/stderr",
         wrapped_stderr.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDERR,
         content_type="text/plain",

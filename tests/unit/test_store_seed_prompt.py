@@ -128,6 +128,12 @@ def test_write_failure_is_best_effort(tmp_path: Path) -> None:
         def get_bytes(self, artifact_ref: ArtifactRef) -> bytes:
             raise NotImplementedError
 
+        def get_text(self, key: str) -> str | None:
+            raise NotImplementedError
+
+        def close(self) -> None:
+            raise NotImplementedError
+
     invs = [_inv("seed")]
     # Best-effort: an IO failure under redacted must not raise (scan continues).
     store_seed_prompt(

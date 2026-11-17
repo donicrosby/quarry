@@ -35,6 +35,11 @@ dependencies = [
 # require it — the browser_login path imports Playwright lazily and errors
 # actionably when this extra is not installed.
 browser = ["playwright>=1.49.0"]
+# Network artifact-store backends (ADR-024 §B). Optional so the dev/prod default
+# stays dependency-light; a worker only installs the extra for the backend it is
+# configured with. Both modules import their client lazily.
+artifacts-redis = ["redis>=5"]
+artifacts-s3 = ["boto3>=1.35"]
 
 [dependency-groups]                                                                                                            
   dev = [
@@ -45,6 +50,8 @@ browser = ["playwright>=1.49.0"]
   "pytest-shard>=0.1.2",
   "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.0",
+  "redis>=5",
+  "boto3>=1.35",
   "ruff>=0.11.12",
 ]
 

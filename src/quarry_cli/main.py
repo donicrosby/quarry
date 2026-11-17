@@ -713,10 +713,14 @@ def provenance_verify(
         expected_user_prompt_hash=user_hash,
     )
 
-    if ok and prompt_store is not None:
-        from quarry_artifacts.local import LocalArtifactStore
+    if ok and prompt_store is not None and inv.prompt_ref is not None:
+        from quarry_artifacts.store import resolve_artifact_store
 
-        stored_ok = verify_stored_prompt(inv, LocalArtifactStore(prompt_store))
+        # Route by the ref's URI scheme (ADR-024 §B) so a prompt stored under a
+        # network backend verifies too; the file scheme resolves through
+        # build_artifact_store().
+        store = resolve_artifact_store(inv.prompt_ref, root=str(prompt_store))
+        stored_ok = verify_stored_prompt(inv, store)
         if stored_ok is False:
             typer.echo(f"FAIL  {inv.id}  stored prompt bytes do not match record", err=True)
             raise typer.Exit(code=1)
