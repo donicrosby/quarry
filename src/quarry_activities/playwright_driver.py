@@ -80,6 +80,14 @@ def _validate_host(url: str, allowed_hosts: tuple[str, ...]) -> None:
         raise ToolSecurityError(msg)
 
 
+#: Chromium launch flags. Docker's default ``/dev/shm`` is 64 MiB, far below what
+#: Chromium's renderer expects, so a page render crashes with "Target crashed"
+#: unless the browser writes its shared memory to ``/tmp`` instead. The
+#: ``quarry-dynamic`` worker image does not override ``--shm-size``, so this flag
+#: is required for the shipped image to render hostile pages at all.
+CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = ("--disable-dev-shm-usage",)
+
+
 class PlaywrightBrowserSession:
     """A real headless-Chromium session implementing the ``BrowserSession`` protocol.
 
@@ -110,7 +118,9 @@ class PlaywrightBrowserSession:
         self._page: Any = None
         try:
             self._playwright = self._sync_api.sync_playwright().start()
-            self._browser = self._playwright.chromium.launch(headless=headless)
+            self._browser = self._playwright.chromium.launch(
+                headless=headless, args=list(CHROMIUM_LAUNCH_ARGS)
+            )
             self._context = self._browser.new_context()
             self._page = self._context.new_page()
         except Exception as exc:  # noqa: BLE001 - any launch failure is actionable
