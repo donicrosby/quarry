@@ -7,14 +7,21 @@ and the write/read activities that persist the three cold-start artifacts.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     CoverageLedger,
     HuntHandoff,
+    Scan,
+    ScanProfile,
+    ScanStatus,
+    Target,
 )
 from quarry_activities.handoff import (
     architecture_doc_key,
@@ -27,6 +34,7 @@ from quarry_activities.inputs import (
     LoadHandoffArtifactsInput,
     WriteHandoffArtifactsInput,
 )
+from quarry_persistence.repositories import QuarryRepository
 
 
 def _arch_doc() -> ArchitectureDoc:
@@ -193,3 +201,69 @@ def test_load_returns_not_found_for_clean_start(tmp_path: Path) -> None:
     )
     assert not output.found
     assert output.hunt_handoff_json is None
+
+
+# --- cross-scan ordinal monotonicity (scenario version_stamps_differ_across_scans) ---
+
+_REPOS: list[QuarryRepository] = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_repositories() -> Generator[None, None, None]:  # pyright: ignore[reportUnusedFunction]
+    """Dispose SQLAlchemy engines after each test (ResourceWarning guard)."""
+    yield
+    for repository in _REPOS:
+        repository.engine.dispose()
+    _REPOS.clear()
+
+
+def _seed_scan(
+    repository: QuarryRepository, scan_id: str, repo_path: str, scan_ordinal: int
+) -> None:
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+    repository.create_scan(
+        Scan(
+            id=scan_id,
+            workspace_id="local",
+            target_id=f"{scan_id}-target",
+            requested_by="test",
+            profile=ScanProfile(id="local-fast", name="Local Fast", vuln_classes=[]),
+            status=ScanStatus.CREATED,
+            created_at=created,
+            metadata={"repo_path": repo_path, "scan_ordinal": scan_ordinal},
+        ),
+        Target(
+            id=f"{scan_id}-target",
+            workspace_id="local",
+            repo_path=repo_path,
+            target_url=None,
+            target_kind="local_repo",
+            allowed_hosts=[],
+            created_at=created,
+        ),
+    )
+
+
+def test_scan_ordinal_increments_across_scans_of_same_target(tmp_path: Path) -> None:
+    """The durable cross-scan ordinal source (max recorded + 1) is monotonic per repo.
+
+    Exercises ``max_scan_ordinal_for_repo`` — the DB-backed state the workflow
+    reads via the ``load_scan_ordinal`` persist action — so a second scan on the
+    same target carries a strictly higher ``scan_ordinal`` (scenario
+    ``version_stamps_differ_across_scans``).
+    """
+    repository = QuarryRepository(str(tmp_path / "t.db"))
+    _REPOS.append(repository)
+    repo_path = "/tmp/target-repo"
+
+    # No prior scans of the target → next ordinal is 1.
+    assert repository.max_scan_ordinal_for_repo(repo_path) == 0
+
+    _seed_scan(repository, "scan-1", repo_path, 1)
+    assert repository.max_scan_ordinal_for_repo(repo_path) == 1
+
+    _seed_scan(repository, "scan-2", repo_path, 2)
+    assert repository.max_scan_ordinal_for_repo(repo_path) == 2
+
+    # A different target keeps its own independent counter.
+    assert repository.max_scan_ordinal_for_repo("/tmp/other-repo") == 0
