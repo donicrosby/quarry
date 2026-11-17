@@ -123,8 +123,8 @@ class TestBuildProveDispatchInputs:
         assert exec_inputs[0].scan_id == "scan-link-check"
         assert exec_inputs[0].candidate_finding_id == "cf-link"
 
-    def test_exec_input_no_target_endpoint_cli_prove(self) -> None:
-        """CLI prove has no target endpoint; target_endpoint_json should be None."""
+    def test_exec_input_no_egress_policy_cli_prove(self) -> None:
+        """CLI prove has no target; the sandbox egress policy should be absent."""
         from quarry_workflows.run_scan import build_prove_dispatch_inputs
 
         exec_inputs, _ = build_prove_dispatch_inputs(
@@ -136,7 +136,24 @@ class TestBuildProveDispatchInputs:
             target_endpoint_json=None,
             allowed_hosts=(),
         )
-        assert exec_inputs[0].target_endpoint_json is None
+        assert exec_inputs[0].egress_policy_json is None
+
+    def test_exec_input_carries_egress_policy(self) -> None:
+        """A scenario-scoped egress policy rides into the sandbox exec input."""
+        from quarry_workflows.run_scan import build_prove_dispatch_inputs
+
+        policy_json = '{"destination_sets": [{"name": "target-host", "allowed_ips": ["10.0.0.5"]}]}'
+        exec_inputs, _ = build_prove_dispatch_inputs(
+            proposed_exec_specs=[_make_exec_spec_dict()],
+            proposed_http_specs=[],
+            scan_id="s-policy",
+            finding_id="cf-policy",
+            artifact_root="/tmp/art",
+            target_endpoint_json=None,
+            allowed_hosts=(),
+            egress_policy_json=policy_json,
+        )
+        assert exec_inputs[0].egress_policy_json == policy_json
 
     def test_http_spec_produces_http_request_input(self) -> None:
         from quarry_activities.inputs import HttpRequestActivityInput

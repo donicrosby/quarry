@@ -22,12 +22,14 @@ from pathlib import Path
 
 from temporalio import activity
 
+from quarry.egress import resolve_egress_policy
 from quarry.schemas import (
     ArtifactKind,
+    EgressPolicy,
     RedactionStatus,
+    ResolvedEgressPolicy,
     SandboxExecCapture,
     SandboxExecSpec,
-    TargetEndpoint,
 )
 from quarry_activities.inputs import SandboxExecActivityInput
 from quarry_activities.sandbox import (
@@ -152,20 +154,35 @@ def _build_sandbox_backend() -> SandboxBackend:
     raise ValueError(msg)
 
 
+def _resolve_policy_json(policy_json: str | None) -> ResolvedEgressPolicy | None:
+    """Reconstruct and resolve an ``EgressPolicy`` from its serialized form.
+
+    Domains are resolved to IPs exactly once here (the enforcement boundary),
+    so every tier receives a frozen :class:`ResolvedEgressPolicy`.  Returns
+    None when there is no policy or it declares no destinations (no egress).
+    """
+    if not policy_json:
+        return None
+    policy = EgressPolicy.model_validate_json(policy_json)
+    if policy.is_empty():
+        return None
+    return resolve_egress_policy(policy)
+
+
 def _run_sandbox(
     spec: SandboxExecSpec,
     *,
     sandbox: SandboxBackend,
     work_dir: Path,
     resolved_env: dict[str, str],
-    target_endpoint: TargetEndpoint | None,
+    egress_policy: ResolvedEgressPolicy | None,
 ) -> SandboxResult:
     """Thin shim — lets tests patch at a single point without mocking subprocess."""
     return sandbox.run(
         spec,
         work_dir=work_dir,
         resolved_env=resolved_env,
-        target_endpoint=target_endpoint,
+        egress_policy=egress_policy,
     )
 
 
@@ -183,11 +200,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     resolved_env = _resolve_credentials(inp.auth_profile_set_json)
     run_scrubber = build_scrubber_with_creds(resolved_env)
 
-    target_endpoint = None
-    if inp.target_endpoint_json:
-        from quarry.schemas import TargetEndpoint
-
-        target_endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
+    egress_policy = _resolve_policy_json(inp.egress_policy_json)
 
     store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
     sandbox = _build_sandbox_backend()
@@ -200,7 +213,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
             sandbox=sandbox,
             work_dir=work_dir,
             resolved_env=resolved_env,
-            target_endpoint=target_endpoint,
+            egress_policy=egress_policy,
         )
 
     # Cap then scrub then wrap each stream.
