@@ -28,11 +28,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import ipaddress
+import json
 import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -334,6 +335,52 @@ def egress_network_name(egress_policy: ResolvedEgressPolicy | None) -> str | Non
     return f"{EGRESS_NETWORK_PREFIX}{digest[:12]}"
 
 
+def _verify_internal_network(name: str, inspect_output: str) -> None:
+    """Fail closed unless *inspect_output* proves *name* is an internal bridge.
+
+    Docker network names are one global namespace, so an existing network with
+    the content-addressed name we expect cannot be trusted: an actor with
+    ``docker network create`` access can squat it with an externally routed
+    bridge and a naive reuse would grant the sandbox full egress.  Reuse is
+    therefore conditional on proof parsed from ``docker network inspect``: the
+    output must be a JSON array whose first entry is an object carrying
+    ``Internal: true`` (and, when present, ``Driver: "bridge"``).  Any mismatch,
+    missing field, or unparseable output raises :class:`~quarry.egress.EgressPolicyError`
+    rather than attaching to the network.
+    """
+    try:
+        parsed = json.loads(inspect_output)
+    except (json.JSONDecodeError, TypeError):
+        msg = (
+            f"refusing to reuse Docker network '{name}': `docker network inspect` "
+            "output was not valid JSON, so the network could not be verified as "
+            "--internal."
+        )
+        raise EgressPolicyError(msg) from None
+    if not isinstance(parsed, list) or not parsed or not isinstance(parsed[0], dict):
+        msg = (
+            f"refusing to reuse Docker network '{name}': `docker network inspect` "
+            "returned no inspectable network entry to verify."
+        )
+        raise EgressPolicyError(msg)
+    entry: dict[str, Any] = cast("dict[str, Any]", parsed[0])
+    if entry.get("Internal") is not True:
+        msg = (
+            f"refusing to reuse existing Docker network '{name}': it is not an "
+            "internal network (Internal != true). A pre-existing network with "
+            "the expected content-addressed name may have been squatted and "
+            "would grant the sandbox unrestricted egress."
+        )
+        raise EgressPolicyError(msg)
+    driver = entry.get("Driver")
+    if driver is not None and driver != "bridge":
+        msg = (
+            f"refusing to reuse existing Docker network '{name}': unexpected "
+            f"driver '{driver}' (expected 'bridge')."
+        )
+        raise EgressPolicyError(msg)
+
+
 def _kill_container(container_name: str) -> None:
     """Best-effort cleanup: forcibly remove a Docker container by name.
 
@@ -363,7 +410,9 @@ class ContainerSandbox:
            network has no external route, so a compromised process can reach the
            declared destinations and nothing else — enforced by the kernel, not
            application code.  The network is created (idempotently) before the
-           container starts; the pinned IPs ride along as
+           container starts, and an existing network with the expected name is
+           reused **only after** being verified ``--internal`` (a squatted name
+           fails closed); the pinned IPs ride along as
            ``QUARRY_EGRESS_ALLOWED_IPS`` for audit.
          - *work_dir* bind-mounted to the same path inside the container.
          - Only cleaned ``resolved_env`` forwarded (no proxy vars).
@@ -373,6 +422,14 @@ class ContainerSandbox:
 
     ``image`` defaults to ``python:3.12-slim``; override via constructor for
     language-specific minimal runtime images (ADR-024 §A).
+
+    Known residual (accepted): the restricted network is content-addressed per
+    policy, so concurrent sandboxes with the *same* pinned ip-union share one
+    bridge and can see each other's L2 traffic.  Containers also keep Docker's
+    default caps (incl. ``NET_RAW``) because ping-based proof payloads need raw
+    sockets.  Reuse is deliberate — a per-run network would diverge from the
+    reviewed spec's reuse intent and break the live fixture that pre-creates the
+    content-addressed network.  See impl-review F2 (t_987a8d13).
     """
 
     # Default runtime image — minimal, no build toolchain.
@@ -449,26 +506,51 @@ class ContainerSandbox:
     # ------------------------------------------------------------------
 
     def _ensure_restricted_network(self, name: str) -> None:
-        """Create the internal restricted network *name* if it does not exist.
+        """Ensure the internal restricted network *name* exists and stays internal.
 
-        Idempotent: an existing network is reused (its membership is the egress
-        allow-list, so reuse is intended).  Errors are swallowed — a genuine
-        failure surfaces when ``docker run`` fails to attach.
+        Idempotent by design: the name is content-addressed by the policy's
+        pinned IPs, so every run of the same policy reuses one restricted
+        network (its membership *is* the egress allow-list, so reuse is
+        intended).  Reuse is NOT blind, however.  Docker network names live in a
+        single global namespace, so an actor able to run ``docker network
+        create`` can pre-create the expected ``quarry-egress-*`` name as an
+        *external* bridge; reusing it unverified would silently hand the sandbox
+        full outbound egress, defeating the containment primitive.  A present
+        network is therefore only reused after it proves it is ``--internal``
+        (:func:`_verify_internal_network`); a mismatch fails closed with
+        :class:`~quarry.egress.EgressPolicyError` — never a silent reuse.
+
+        A failing ``inspect`` (absent, or Docker unavailable) is left for
+        ``docker run`` to surface when it tries to attach; there is no network
+        to verify in that case.
         """
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
             inspect = subprocess.run(
                 ["docker", "network", "inspect", name],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            if inspect.returncode != 0:
-                subprocess.run(
-                    ["docker", "network", "create", "--internal", name],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+            if inspect.returncode == 0:
+                _verify_internal_network(name, inspect.stdout)
+                return
+            # Absent — create it internal, then re-inspect and verify so a
+            # network that appears in the create→attach window (a name-squat
+            # race) is still checked rather than trusted.
+            subprocess.run(
+                ["docker", "network", "create", "--internal", name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            reinspect = subprocess.run(
+                ["docker", "network", "inspect", name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if reinspect.returncode == 0:
+                _verify_internal_network(name, reinspect.stdout)
 
     def _build_docker_cmd(
         self,
