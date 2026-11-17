@@ -48,7 +48,7 @@ from quarry.schemas import (
     ProposedAction,
     ReasoningCheckResult,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore, build_artifact_store
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import (
@@ -77,7 +77,7 @@ def _store_rejected_reasoning(
     tool_name: str,
     iteration: int,
     retry: int,
-    store: LocalArtifactStore | None,
+    store: ArtifactStore | None,
     scan_id: str | None,
 ) -> str:
     """Persist a rejected ActionReasoning as an artifact and return its ArtifactRef.id.
@@ -317,8 +317,8 @@ def run_agent_loop(
     parsed: Any = None  # last parsed model response; referenced after loop exhaustion
 
     # Build the ArtifactStore lazily if a path was provided.  None = no store.
-    _store: LocalArtifactStore | None = (
-        LocalArtifactStore(artifact_store_path) if artifact_store_path else None
+    _store: ArtifactStore | None = (
+        build_artifact_store(artifact_store_path) if artifact_store_path else None
     )
 
     # ADR-019 per-part provenance is constant for the loop's lifetime (it describes

@@ -19,6 +19,7 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.egress import build_egress_policy, build_prove_sandbox_policy
 from quarry.fingerprints import compute_fingerprint as _compute_fingerprint
 from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
@@ -2527,11 +2528,22 @@ class RunScanWorkflow:
                     else 0.0
                 )
                 _, pv_budget_remaining = budget_decision(scan.budget_cap_usd, pv_spent)
-                _target_endpoint_json = (
-                    build_target_endpoint_from_url(scan_input.target_url).model_dump_json()
+                _target_ep = (
+                    build_target_endpoint_from_url(scan_input.target_url)
                     if scan_input.target_url
                     else None
                 )
+                _target_endpoint_json = _target_ep.model_dump_json() if _target_ep else None
+                # Destination-set egress policy for the prove sandbox, scoped to
+                # the sets the scenario needs.  Pure construction (no DNS) — the
+                # sandbox activity resolves domains to pinned IPs at enforcement.
+                _prove_egress_policy_json = build_prove_sandbox_policy(
+                    build_egress_policy(
+                        allowed_hosts=scan_input.allowed_hosts
+                        or ((_target_ep.host, "127.0.0.1") if _target_ep else ())
+                    ),
+                    needs_live_target=_target_ep is not None,
+                ).model_dump_json()
                 # Prove live-corroborated leads first (dynamic_validate verdict).
                 # Per-finding fan-out (cruft-purge §3.2, mirroring
                 # scan-stage-fanout): each finding's attempt loop dispatches
@@ -2592,6 +2604,7 @@ class RunScanWorkflow:
                                     finding_id=finding.id,
                                     artifact_root=artifact_root,
                                     target_endpoint_json=_target_endpoint_json,
+                                    egress_policy_json=_prove_egress_policy_json,
                                     allowed_hosts=scan_input.allowed_hosts,
                                 )
                                 exec_caps: list[SandboxExecCapture] = []
@@ -4110,6 +4123,7 @@ def build_prove_dispatch_inputs(
     artifact_root: str,
     target_endpoint_json: str | None,
     allowed_hosts: tuple[str, ...],
+    egress_policy_json: str | None = None,
 ) -> "tuple[list[Any], list[Any]]":
     """Convert a ProveResponse's proposed specs into activity input objects.
 
@@ -4118,8 +4132,10 @@ def build_prove_dispatch_inputs(
     :class:`~quarry_activities.inputs.HttpRequestActivityInput` ready to
     pass to ``workflow.execute_activity``.
 
-    HTTP specs are silently dropped when *target_endpoint_json* is None —
-    live HTTP probes require a target endpoint.
+    Sandbox exec specs carry *egress_policy_json* (the scenario-scoped
+    destination-set policy); ``None``/empty means the sandbox runs with no
+    egress.  HTTP specs are silently dropped when *target_endpoint_json* is None
+    — live HTTP probes require a target endpoint.
 
     Pure function — no I/O, safe to call from within workflow code.
     """
@@ -4128,7 +4144,7 @@ def build_prove_dispatch_inputs(
         exec_inputs.append(
             SandboxExecActivityInput(
                 spec_json=json.dumps(spec_dict),
-                target_endpoint_json=target_endpoint_json,
+                egress_policy_json=egress_policy_json,
                 allowed_hosts=allowed_hosts,
                 artifact_store_path=artifact_root,
                 scan_id=scan_id,

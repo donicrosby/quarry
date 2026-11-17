@@ -210,7 +210,7 @@ class TestSandboxExecActivityInput:
     def test_round_trip(self) -> None:
         inp = SandboxExecActivityInput(
             spec_json='{"command": "echo", "args": ["hi"]}',
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path="/data/artifacts",
             scan_id="scan-123",
@@ -218,13 +218,13 @@ class TestSandboxExecActivityInput:
         )
         reloaded = SandboxExecActivityInput.model_validate_json(inp.model_dump_json())
         assert reloaded.scan_id == "scan-123"
-        assert reloaded.target_endpoint_json is None
+        assert reloaded.egress_policy_json is None
         assert reloaded.allowed_hosts == ()
 
     def test_auth_profile_set_defaults_none(self) -> None:
         inp = SandboxExecActivityInput(
             spec_json="{}",
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path="/tmp",
             scan_id="s-1",

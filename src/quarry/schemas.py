@@ -1440,6 +1440,111 @@ class TargetEndpoint(BaseModel):
     base_path: str = "/"
 
 
+# ---------------------------------------------------------------------------
+# Per-destination-set egress policy (ADR-024 §A — sandbox network containment)
+# ---------------------------------------------------------------------------
+
+
+class DestinationSet(BaseModel):
+    """One named category of outbound destinations for a sandbox egress policy.
+
+    A destination set groups the domains and IPs that belong to a single
+    capability (``target-host``, ``canary-listener``, …).  Every destination the
+    sandbox may reach must appear in some set; the policy denies all else.  The
+    model is pure data — resolution to IPs happens in ``quarry.egress``.
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_domains: list[str] = Field(default_factory=_empty_strings)
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_destination_sets() -> list[DestinationSet]:
+    return []
+
+
+class EgressPolicy(BaseModel):
+    """An unresolved destination-set policy for sandbox egress.
+
+    Carries named :class:`DestinationSet` entries; domains are resolved to IPs
+    once at policy construction (see ``quarry.egress.resolve_egress_policy``).
+    ``deny_all_else`` defaults to True — anything not in a declared set is
+    refused at the sandbox tier.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[DestinationSet] = Field(default_factory=_empty_destination_sets)
+    deny_all_else: bool = True
+
+    def is_empty(self) -> bool:
+        """True when the policy declares no reachable destination."""
+        return not any(ds.allowed_domains or ds.allowed_ips for ds in self.destination_sets)
+
+
+class ResolvedDestinationSet(BaseModel):
+    """A :class:`DestinationSet` with every domain resolved to pinned IPs.
+
+    ``allowed_ips`` is the union of the set's declared IPs and the IPs each
+    domain resolved to at construction time.  The IPs are frozen for the policy
+    lifetime — re-resolution is rejected (DNS-rebinding guard).
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_resolved_destination_sets() -> list[ResolvedDestinationSet]:
+    return []
+
+
+class ResolvedEgressPolicy(BaseModel):
+    """An :class:`EgressPolicy` with all domains resolved to pinned IPs.
+
+    This is what every sandbox tier enforces: Tier 2 attaches the container to
+    a restricted network carrying only these destinations; Tier 3 renders the
+    IPs as NetworkPolicy egress rules.  ``resolution_frozen`` records that the
+    IP set is final — no destination is re-resolved during execution.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[ResolvedDestinationSet] = Field(
+        default_factory=_empty_resolved_destination_sets
+    )
+    deny_all_else: bool = True
+    resolution_frozen: bool = True
+
+    @model_validator(mode="after")
+    def _require_frozen(self) -> ResolvedEgressPolicy:
+        """A resolved policy is frozen by definition — refuse an unfrozen one.
+
+        Enforcement tiers trust the pinned IPs; a policy that was never frozen
+        could still be re-resolved, defeating the DNS-rebinding guard.
+        """
+        if not self.resolution_frozen:
+            msg = "ResolvedEgressPolicy must carry resolution_frozen=True"
+            raise ValueError(msg)
+        return self
+
+    def all_allowed_ips(self) -> list[str]:
+        """Union of every set's pinned IPs, de-duplicated and sorted."""
+        ips: list[str] = []
+        for ds in self.destination_sets:
+            for ip in ds.allowed_ips:
+                if ip not in ips:
+                    ips.append(ip)
+        return sorted(ips)
+
+    def is_empty(self) -> bool:
+        """True when no destination is reachable (empty policy ⇒ no egress)."""
+        return not self.all_allowed_ips()
+
+
 class HttpRequestSpec(BaseModel):
     """The HTTP request a dynamic_validate or prove agent proposes.
 
