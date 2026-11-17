@@ -229,6 +229,10 @@ def _empty_artifact_refs() -> list[ArtifactRef]:
     return []
 
 
+def _empty_candidate_findings() -> list[CandidateFinding]:
+    return []
+
+
 def _empty_strings() -> list[str]:
     return []
 
@@ -1443,6 +1447,25 @@ class HttpResponseCapture(BaseModel):
     # captures construct without it and evaluators treat a missing body as
     # non-corroboration, never an error.
     body_artifact_key: str | None = None
+    # Deterministic session-token/JWT/cookie analysis, attached in-activity by
+    # ``http_request_activity`` ONLY when the request carried an ``auth_profile``
+    # (session-jwt-cookie-analysis). None for unauthenticated captures and for
+    # legacy captures; the workflow persists ``findings`` through the existing
+    # ``persist-scan-state`` path.
+    session_token_analysis: SessionTokenAnalysisResult | None = None
+
+
+class SessionTokenAnalysisResult(BaseModel):
+    """Emitted session-token analysis attached to an auth-related capture.
+
+    Carries the candidate findings produced by
+    ``quarry_activities.session_analysis.analyze_session_tokens`` for one captured
+    response. Findings are placeholder-redacted (never the raw token/cookie value)
+    and fingerprinted deterministically on (artifact ref, check name, token index),
+    so replaying the same capture yields the same finding ids.
+    """
+
+    findings: list[CandidateFinding] = Field(default_factory=_empty_candidate_findings)
 
 
 class DynamicEvidenceLink(BaseModel):

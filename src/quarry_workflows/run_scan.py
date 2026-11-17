@@ -1355,7 +1355,9 @@ class RunScanWorkflow:
         # (the same safety net the deterministic sweeps use).
         semaphore = asyncio.Semaphore(max(1, scan_input.dynamic_validate_max_concurrent))
 
-        async def _exploit_one_class(vuln_class: VulnerabilityClass) -> ExploitChain:
+        async def _exploit_one_class(
+            vuln_class: VulnerabilityClass,
+        ) -> tuple[ExploitChain, list[CandidateFinding]]:
             async with semaphore:
                 return await self._exploit_class_chain(
                     scan_input,
@@ -1378,6 +1380,8 @@ class RunScanWorkflow:
         # Registration pass (class order, post-gather): a proven chain becomes a
         # first-class candidate carrying the per-class fingerprint id, so an
         # overlapped/resumed chain can never register the same fingerprint twice.
+        # Session-token analysis findings collected from this class's auth-bearing
+        # captures are registered in the same deterministic pass.
         registered_ids = {c.id for c in candidate_findings}
         for vuln_class, chain_result in zip(scan.profile.vuln_classes, chains, strict=True):
             if isinstance(chain_result, BaseException):
@@ -1389,39 +1393,58 @@ class RunScanWorkflow:
                     {"stage": "exploit_chain", "error": _describe_failure(chain_result)},
                 )
                 continue
+            chain, session_findings = chain_result
             candidate = exploit_chain_to_candidate(
-                chain_result,
+                chain,
                 finding_id=_live_exploit_fingerprint(vuln_class)[:32],
                 title=f"Live-proven {vuln_class.value} via chained exploitation",
                 hypothesis="Confirmed against the running target by a chained live exploit.",
                 created_by="exploit-agent",
                 created_at=workflow.now(),
             )
-            if candidate is None or candidate.id in registered_ids:
-                continue  # unproven chain ("prove by doing") or already registered
-            registered_ids.add(candidate.id)
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_candidate_finding",
-                {"finding": _model_json_dict(candidate)},
-            )
-            candidate_findings.append(candidate)
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "live_exploit.proven",
-                {
-                    "finding_id": candidate.id,
-                    "vuln_class": vuln_class.value,
-                    "step_count": str(len(chain_result.steps)),
-                },
-            )
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "finding.candidate_created",
-                {"finding_id": candidate.id, "source": "live-exploit"},
-            )
+            if candidate is not None and candidate.id not in registered_ids:
+                registered_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.proven",
+                    {
+                        "finding_id": candidate.id,
+                        "vuln_class": vuln_class.value,
+                        "step_count": str(len(chain.steps)),
+                    },
+                )
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "live-exploit"},
+                )
+            # Persist the session-token analysis findings (task 7.2) through the
+            # existing persist-scan-state path; ids are deterministic, so replay
+            # never registers the same check twice.
+            for session_finding in session_findings:
+                if session_finding.id in registered_ids:
+                    continue
+                registered_ids.add(session_finding.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(session_finding)},
+                )
+                candidate_findings.append(session_finding)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": session_finding.id, "source": "session-analysis"},
+                )
 
     async def _exploit_class_chain(
         self,
@@ -1435,7 +1458,7 @@ class RunScanWorkflow:
         attack_map: list[Any],
         exploit_panel_json: str | None,
         vuln_class: VulnerabilityClass,
-    ) -> ExploitChain:
+    ) -> tuple[ExploitChain, list[CandidateFinding]]:
         """One class's stateful propose→dispatch exploit chain (step 2 above).
 
         Per-class state (``steps``, ``session_cookies``) lives entirely inside
@@ -1443,6 +1466,10 @@ class RunScanWorkflow:
         """
         steps: list[ExploitStep] = []
         session_cookies: dict[str, str] = {}
+        # Session-token analysis findings collected from this class's auth-bearing
+        # captures; returned alongside the chain and registered by the caller in
+        # the deterministic post-gather pass (task 7.2).
+        session_findings: list[CandidateFinding] = []
         for _turn in range(scan_input.validate_max_iterations):
             prior_steps = [s.model_dump(mode="json") for s in steps]
             session_summary = "cookies set" if session_cookies else "(no session state yet)"
@@ -1533,6 +1560,11 @@ class RunScanWorkflow:
                 # A failed dispatch ends this class's chain; other classes continue.
                 break
 
+            # Collect any session-token analysis the activity attached to this
+            # auth-bearing capture (None for unauthenticated captures).
+            if capture.session_token_analysis is not None:
+                session_findings.extend(capture.session_token_analysis.findings)
+
             success_raw = turn.get("success")
             check = SuccessCheck.model_validate(success_raw) if success_raw else None
             confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
@@ -1560,13 +1592,16 @@ class RunScanWorkflow:
             if confirmed:
                 break  # we have our proof
 
-        return ExploitChain(
-            scan_id=scan.id,
-            workspace_id=scan.workspace_id,
-            vuln_class=vuln_class,
-            steps=steps,
-            proven=any(s.confirmed for s in steps),
-            summary=f"live exploitation chain for {vuln_class.value}",
+        return (
+            ExploitChain(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id,
+                vuln_class=vuln_class,
+                steps=steps,
+                proven=any(s.confirmed for s in steps),
+                summary=f"live exploitation chain for {vuln_class.value}",
+            ),
+            session_findings,
         )
 
     async def _run_round(
