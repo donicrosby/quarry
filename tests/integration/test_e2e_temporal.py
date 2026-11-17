@@ -38,6 +38,7 @@ from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.handoff import load_handoff_artifacts, write_handoff_artifacts
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.inputs import ScanSecretsInput
 from quarry_activities.integrations import deliver_integrations_activity
@@ -463,6 +464,8 @@ async def test_e2e_cancel_sets_cancelled_status(
         task_queue=task_queue,
         workflows=[RunScanWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             _stub_scan_repo_for_secrets,
             _stub_scan_repo_for_ssrf_sinks,
@@ -636,6 +639,8 @@ async def test_e2e_concurrent_scans(
             task_queue=task_queue,
             workflows=[RunScanWorkflow],
             activities=[
+                load_handoff_artifacts,
+                write_handoff_artifacts,
                 create_repository_snapshot,
                 clone_repository_activity,
                 persist_scan_state,

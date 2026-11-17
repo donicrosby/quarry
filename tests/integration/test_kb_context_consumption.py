@@ -24,6 +24,7 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from quarry_activities.handoff import load_handoff_artifacts, write_handoff_artifacts
 from quarry_activities.inputs import ScanSecretsInput
 from quarry_persistence import QuarryRepository
 from quarry_workflows import RunScanInput, RunScanWorkflow
@@ -164,6 +165,8 @@ def _build_worker(
         task_queue=task_queue,
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             _stub_scan_repo_for_secrets,
             _stub_scan_repo_for_ssrf_sinks,

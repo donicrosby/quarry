@@ -204,6 +204,10 @@ class ArtifactKind(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
+    # versioned-handoff-artifacts: handoff artifacts addressable through the same
+    # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
+    ARCHITECTURE_DOC = "architecture_doc"
+    HUNT_HANDOFF = "hunt_handoff"
 
 
 class RedactionStatus(StrEnum):
@@ -911,6 +915,11 @@ class CoverageLedger(BaseModel):
     file_coverage: list[ProductionFileAccounting] = Field(
         default_factory=_empty_production_file_accounting
     )
+    # versioned-handoff-artifacts: version stamps make every ledger uniquely
+    # identifiable and diffable across scans (ADR-026 rule 6). Both default to 1
+    # so ledgers serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
     created_at: datetime
 
     def file_gap_paths(self) -> list[str]:
@@ -1227,6 +1236,37 @@ class ArchitectureDoc(BaseModel):
     build_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
     attack_surface_summary: str = ""
     transcript_refs: list[str] = Field(default_factory=_empty_strings)
+    # versioned-handoff-artifacts: version stamps (see CoverageLedger). Default to
+    # 1 so docs serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+
+
+class HuntHandoff(BaseModel):
+    """Structured per-round hunt handoff (ADR-026 rule 6 — handoff over compaction).
+
+    Records what a hunt round covered, what it found, what tasks remain for the
+    next round, and any unproven hypotheses. Together with the ArchitectureDoc
+    and CoverageLedger it forms the cold-start contract: a fresh agent process
+    given only these artifacts (plus the scan id) can resume a hunt without
+    access to Temporal workflow state, in-memory data, or conversation history.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    scan_id: str
+    workspace_id: str
+    round_number: int
+    stage: Literal["HUNT"] = "HUNT"
+    covered_scope_units: list[str] = Field(default_factory=_empty_strings)
+    candidate_finding_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_count: int = 0
+    open_hypotheses: list[str] = Field(default_factory=_empty_strings)
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+    created_at: datetime
 
 
 class AgentStep(BaseModel):
