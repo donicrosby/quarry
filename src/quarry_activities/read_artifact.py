@@ -15,13 +15,12 @@ the exact input per-class body evaluators consume.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import cast
 
 from temporalio import activity
 
 from quarry_activities.inputs import ReadArtifactTextInput
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore, build_artifact_store
 
 # Hard cap on resolved artifact text. Response bodies are already capped at
 # 10KB at capture time; this second cap guards against future producers and
@@ -29,7 +28,7 @@ from quarry_artifacts.local import LocalArtifactStore
 MAX_ARTIFACT_TEXT_BYTES = 64 * 1024
 
 
-def read_artifact_text(store: LocalArtifactStore, artifact_key: str) -> str | None:
+def read_artifact_text(store: ArtifactStore, artifact_key: str) -> str | None:
     """Read an artifact's bytes by key, capped at 64KB; None on ANY failure.
 
     Never raises: a missing artifact (``store.get_text`` → None) or any OSError
@@ -77,14 +76,15 @@ def body_text_from_response_artifact(raw: str | None) -> str | None:
 def read_artifact_text_activity(inp: ReadArtifactTextInput) -> str | None:
     """Read one artifact by key from the scan's store; None on any failure.
 
-    The store is rooted at ``artifact_store_path / scan_id`` — the same
-    convention as the ``http-request`` activity, so the two share a namespace.
-    Returns the artifact text (64KB cap) or None; dispatched by the
-    dynamic-validation workflow to resolve response bodies without breaking the
-    sandbox's no-I/O rule for workflow code.
+    The store is rooted at ``artifact_store_path`` and the key is scan-qualified
+    (``scan_id/artifact_key``) — the same namespace convention as the
+    ``http-request`` activity, so the two share a namespace. Returns the artifact
+    text (64KB cap) or None; dispatched by the dynamic-validation workflow to
+    resolve response bodies without breaking the sandbox's no-I/O rule for
+    workflow code.
     """
     try:
-        store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
-        return read_artifact_text(store, inp.artifact_key)
+        store = build_artifact_store(inp.artifact_store_path)
+        return read_artifact_text(store, f"{inp.scan_id}/{inp.artifact_key}")
     except (OSError, ValueError):
         return None

@@ -19,6 +19,7 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.egress import build_egress_policy, build_prove_sandbox_policy
 from quarry.fingerprints import compute_fingerprint as _compute_fingerprint
 from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
@@ -35,6 +36,7 @@ from quarry.schemas import (
     FindingStatus,
     HttpRequestSpec,
     HttpResponseCapture,
+    HuntHandoff,
     IntegrationConfig,
     IntegrationStatus,
     KBRootIndex,
@@ -74,12 +76,17 @@ from quarry_activities.inputs import (
     CreateSnapshotInput,
     DispatchLifecycleHooksInput,
     HttpRequestActivityInput,
+    LoadHandoffArtifactsInput,
+    LoadHandoffArtifactsOutput,
     ReadArtifactTextInput,
+    ReconSynthesisOutput,
     RenderReportInput,
     RenderReportOutput,
     SandboxExecActivityInput,
     ScanSecretsInput,
     ValidateCandidateInput,
+    WriteHandoffArtifactsInput,
+    WriteHandoffArtifactsOutput,
 )
 from quarry_activities.read_artifact import body_text_from_response_artifact
 from quarry_activities.repo import create_repository_snapshot
@@ -452,6 +459,10 @@ class RunScanWorkflow:
         self._current_stage = "CREATED"
         # Overridden per-run in _run() from RunScanInput.activity_max_attempts.
         self._retry_policy = ACTIVITY_RETRY_POLICY
+        # versioned-handoff-artifacts: scope units covered by hunt rounds so far
+        # (seeded from the loaded HuntHandoff on a cold-start resume, so a
+        # re-written handoff never loses the covered set).
+        self._covered_scope_units: set[str] = set()
 
     @workflow.query
     def get_stage(self) -> str:
@@ -518,6 +529,13 @@ class RunScanWorkflow:
             origin_commit_sha = clone_result.commit_sha
 
         if persisted_scan is None:
+            # versioned-handoff-artifacts: source the durable cross-scan ordinal
+            # for this target (max recorded + 1) so a second scan on the same
+            # repo carries a strictly higher scan_ordinal.
+            next_ordinal = await _persist_scan_state(
+                scan_input.db_path, "load_scan_ordinal", {"repo_path": repo_path}
+            )
+            scan_ordinal = next_ordinal if isinstance(next_ordinal, int) and next_ordinal > 0 else 1
             target = Target(
                 id=str(workflow.uuid4()),
                 workspace_id="local",
@@ -563,6 +581,9 @@ class RunScanWorkflow:
                     # GET /scans/{id}; coverage_round_index is updated every
                     # round (see the loop in _run()).
                     "max_coverage_rounds": scan_input.max_coverage_rounds,
+                    # versioned-handoff-artifacts: durable scan ordinal, read
+                    # back on resume so artifact stamps stay stable.
+                    "scan_ordinal": scan_ordinal,
                 },
             )
             await _persist_scan_state(
@@ -730,7 +751,15 @@ class RunScanWorkflow:
 
             synthesis_payload = await workflow.execute_activity(
                 "recon-synthesis",
-                args=[subsystems, repo_path, scan.id, scan_input.output_dir],
+                args=[
+                    subsystems,
+                    repo_path,
+                    scan.id,
+                    scan_input.output_dir,
+                    artifact_root,
+                    _scan_ordinal(scan),
+                    1,
+                ],
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=self._retry_policy,
             )
@@ -740,6 +769,15 @@ class RunScanWorkflow:
                 "save_architecture_doc",
                 {"scan_id": scan.id, "doc": _model_json_dict(arch_doc)},
             )
+            # versioned-handoff-artifacts (recon-and-architecture): the versioned
+            # architecture-doc artifact's ref is recorded in the scan state.
+            arch_ref = _recon_artifact_ref(synthesis_payload)
+            if arch_ref is not None:
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_artifact_ref",
+                    {"scan_id": scan.id, "artifact_ref": _model_json_dict(arch_ref)},
+                )
 
             # ── Knowledge Base recon (candidate-precision-and-calibration, D3) ──
             # Built ONCE per scan, inside RECON, BEFORE the hunt stage. The KB
@@ -924,6 +962,24 @@ class RunScanWorkflow:
             )
         elif start_round == LOOP_DONE:
             round_tasks = []
+
+        # ── Cold-start resume from handoff artifacts (versioned-handoff-artifacts) ──
+        # When a resumed scan re-enters HUNT (the last checkpoint is RECON — a
+        # prior run wrote the handoff but never checkpointed HUNT completion),
+        # load the three cold-start artifacts and launch only the tasks whose
+        # scope units were not already covered. Findings recorded before the
+        # interruption are rehydrated from the DB so none are silently dropped.
+        if scan_input.resume and start_round == 0 and not _stage_completed(completed_stage, "HUNT"):
+            round_tasks, handoff_loaded = await self._resume_from_handoff_artifacts(
+                scan_input, scan, artifact_root, round_tasks
+            )
+            if handoff_loaded:
+                loaded_candidates = await _load_candidate_findings(scan_input.db_path, scan.id)
+                loaded_finals = await _load_final_findings(scan_input.db_path, scan.id)
+                candidate_findings.clear()
+                candidate_findings.extend(loaded_candidates)
+                final_findings.clear()
+                final_findings.extend(loaded_finals)
 
         for round_index in range(
             start_round if start_round > 0 else 0, scan_input.max_coverage_rounds
@@ -1634,6 +1690,7 @@ class RunScanWorkflow:
         """
         hunt_new_start = len(candidate_findings)
         needs_proof_new_start = len(needs_proof_findings)
+        gaps_new_start = len(hunter_gaps)
 
         # ── HUNT stage ───────────────────────────────────────────────────────
         # Focus + exclusion drops happen here in workflow code (deterministic).
@@ -1858,6 +1915,22 @@ class RunScanWorkflow:
                             "finding.rejected",
                             {"finding_id": candidate.id},
                         )
+
+            # ── Handoff artifacts (versioned-handoff-artifacts, task 4.2) ──────
+            # Persist the three versioned artifacts at the end of the HUNT pass,
+            # after hunters complete but before the stage checkpoint — so a kill
+            # between the two leaves a resumable handoff behind.
+            await self._write_round_handoff(
+                scan_input,
+                scan,
+                artifact_root,
+                round_index,
+                runnable_tasks,
+                round_tasks,
+                candidate_findings,
+                hunt_new_start,
+                hunter_gaps[gaps_new_start:],
+            )
 
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
             # SPEC-D1 (cruft-purge 2.1): VALIDATION is a canonical stage in
@@ -2490,11 +2563,22 @@ class RunScanWorkflow:
                     else 0.0
                 )
                 _, pv_budget_remaining = budget_decision(scan.budget_cap_usd, pv_spent)
-                _target_endpoint_json = (
-                    build_target_endpoint_from_url(scan_input.target_url).model_dump_json()
+                _target_ep = (
+                    build_target_endpoint_from_url(scan_input.target_url)
                     if scan_input.target_url
                     else None
                 )
+                _target_endpoint_json = _target_ep.model_dump_json() if _target_ep else None
+                # Destination-set egress policy for the prove sandbox, scoped to
+                # the sets the scenario needs.  Pure construction (no DNS) — the
+                # sandbox activity resolves domains to pinned IPs at enforcement.
+                _prove_egress_policy_json = build_prove_sandbox_policy(
+                    build_egress_policy(
+                        allowed_hosts=scan_input.allowed_hosts
+                        or ((_target_ep.host, "127.0.0.1") if _target_ep else ())
+                    ),
+                    needs_live_target=_target_ep is not None,
+                ).model_dump_json()
                 # Prove live-corroborated leads first (dynamic_validate verdict).
                 # Per-finding fan-out (cruft-purge §3.2, mirroring
                 # scan-stage-fanout): each finding's attempt loop dispatches
@@ -2555,6 +2639,7 @@ class RunScanWorkflow:
                                     finding_id=finding.id,
                                     artifact_root=artifact_root,
                                     target_endpoint_json=_target_endpoint_json,
+                                    egress_policy_json=_prove_egress_policy_json,
                                     allowed_hosts=scan_input.allowed_hosts,
                                 )
                                 exec_caps: list[SandboxExecCapture] = []
@@ -2989,6 +3074,138 @@ class RunScanWorkflow:
             {"manifest": _model_json_dict(manifest)},
         )
         return manifest
+
+    async def _resume_from_handoff_artifacts(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        round_tasks: list[AgentTask],
+    ) -> tuple[list[AgentTask], bool]:
+        """Load the cold-start artifacts and filter out already-covered tasks.
+
+        Returns ``(tasks_to_hunt, handoff_loaded)``. When no HuntHandoff exists
+        the tasks pass through unchanged and ``handoff_loaded`` is False (a clean
+        start). When one is loaded, its covered scope units seed
+        ``self._covered_scope_units`` and each surviving task receives the
+        handoff's open hypotheses as context. Emits ``hunt.resumed_from_artifacts``.
+        """
+        payload = await workflow.execute_activity(
+            "load-handoff-artifacts",
+            LoadHandoffArtifactsInput(scan_id=scan.id, artifact_root=artifact_root),
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=self._retry_policy,
+        )
+        output = _handoff_output_from_activity(payload)
+        if not output.found or output.hunt_handoff_json is None:
+            return round_tasks, False
+
+        handoff = HuntHandoff.model_validate_json(output.hunt_handoff_json)
+        covered = set(handoff.covered_scope_units)
+        self._covered_scope_units.update(covered)
+        pending = set(handoff.pending_task_ids)
+        resumed_tasks = [
+            _with_hypotheses(task, handoff.open_hypotheses)
+            for task in round_tasks
+            if task.id in pending or _task_scope_unit(task) not in covered
+        ]
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "hunt.resumed_from_artifacts",
+            {
+                "artifact_version": str(handoff.artifact_version),
+                "scan_ordinal": str(handoff.scan_ordinal),
+                "covered_units": str(len(covered)),
+                "open_hypotheses": str(len(handoff.open_hypotheses)),
+                "pending_tasks": str(handoff.pending_task_count),
+                "skipped_covered_tasks": str(len(round_tasks) - len(resumed_tasks)),
+                "architecture_doc_loaded": "true" if output.architecture_doc_json else "false",
+                "coverage_ledger_loaded": "true" if output.coverage_ledger_json else "false",
+            },
+        )
+        return resumed_tasks, True
+
+    async def _write_round_handoff(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        round_index: int,
+        covered_tasks: list[AgentTask],
+        round_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
+        round_candidate_start: int,
+        round_gaps: list[dict[str, Any]],
+    ) -> None:
+        """Persist the three versioned handoff artifacts at the end of a HUNT pass.
+
+        The covered scope units accumulate across rounds (seeded from a loaded
+        handoff on resume) so a re-written handoff never loses coverage. The
+        artifact_version is the round cursor + 1 — monotonic within the scan.
+        """
+        self._covered_scope_units.update(_task_scope_unit(t) for t in covered_tasks)
+        pending_ids = [
+            t.id for t in round_tasks if _task_scope_unit(t) not in self._covered_scope_units
+        ]
+        hypotheses = [str(gap.get("reason") or gap.get("hypothesis") or gap) for gap in round_gaps]
+        artifact_version = round_index + 1
+        scan_ordinal = _scan_ordinal(scan)
+        payload = await workflow.execute_activity(
+            "write-handoff-artifacts",
+            WriteHandoffArtifactsInput(
+                scan_id=scan.id,
+                artifact_root=artifact_root,
+                round_number=round_index,
+                workspace_id=scan.workspace_id,
+                scan_ordinal=scan_ordinal,
+                artifact_version=artifact_version,
+                architecture_doc_json=None,
+                requested_vuln_classes=tuple(vc.value for vc in scan.profile.vuln_classes),
+                completed_vuln_classes=tuple(
+                    sorted({c.vuln_class.value for c in candidate_findings})
+                ),
+                agent_tasks_total=len(round_tasks),
+                agent_tasks_scanned=len(covered_tasks),
+                covered_scope_units=tuple(sorted(self._covered_scope_units)),
+                candidate_finding_ids=tuple(
+                    c.id for c in candidate_findings[round_candidate_start:]
+                ),
+                pending_task_ids=tuple(pending_ids),
+                open_hypotheses=tuple(hypotheses),
+                created_at=workflow.now().isoformat(),
+            ),
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=self._retry_policy,
+        )
+        output = _write_handoff_output_from_activity(payload)
+        # Record each artifact's ref in the scan state so the handoff bundle is
+        # addressable through the same reference system as the other artifacts.
+        for ref_json in (
+            output.hunt_handoff_ref_json,
+            output.architecture_doc_ref_json,
+            output.coverage_ledger_ref_json,
+        ):
+            if ref_json is None:
+                continue
+            ref = ArtifactRef.model_validate_json(ref_json)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_artifact_ref",
+                {"scan_id": scan.id, "artifact_ref": _model_json_dict(ref)},
+            )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "hunt.handoff_written",
+            {
+                "round_index": str(round_index),
+                "artifact_version": str(artifact_version),
+                "scan_ordinal": str(scan_ordinal),
+                "covered_units": str(len(self._covered_scope_units)),
+                "pending_tasks": str(len(pending_ids)),
+            },
+        )
 
     async def _record_coverage(
         self,
@@ -3505,6 +3722,75 @@ def _round_cursor_from_stage(current_stage: str | None) -> int:
     return 0
 
 
+def _scan_ordinal(scan: Scan) -> int:
+    """The durable scan ordinal recorded on the scan metadata (default 1).
+
+    versioned-handoff-artifacts: the ordinal is sourced at scan creation from
+    durable state keyed by the target repo path (see ``max_scan_ordinal_for_repo``)
+    and persisted on the scan metadata so a resume reads the same value.
+    """
+    value = scan.metadata.get("scan_ordinal")
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+def _task_scope_unit(task: AgentTask) -> str:
+    """The scope unit a hunter task covers (its scope, or its id when absent)."""
+    return task.scope or task.id
+
+
+def _with_hypotheses(task: AgentTask, hypotheses: list[str]) -> AgentTask:
+    """Return *task* with the handoff's open hypotheses appended as context.
+
+    Cold-start resume makes the previous round's unproven hypotheses available
+    to the resumed hunt agents (scenario ``cold_start_preserves_open_hypotheses``)
+    by threading them into the task's recon notes — the field hunters already
+    consume as leads.
+    """
+    if not hypotheses:
+        return task
+    block = "\n".join(f"- {hypothesis}" for hypothesis in hypotheses)
+    header = "## Open hypotheses from prior hunt round"
+    note = f"{task.recon_notes}\n\n{header}\n{block}" if task.recon_notes else f"{header}\n{block}"
+    return task.model_copy(update={"recon_notes": note})
+
+
+def _handoff_output_from_activity(payload: object) -> LoadHandoffArtifactsOutput:
+    if isinstance(payload, LoadHandoffArtifactsOutput):
+        return payload
+    if isinstance(payload, dict):
+        return LoadHandoffArtifactsOutput.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected handoff payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _write_handoff_output_from_activity(payload: object) -> WriteHandoffArtifactsOutput:
+    if isinstance(payload, WriteHandoffArtifactsOutput):
+        return payload
+    if isinstance(payload, dict):
+        return WriteHandoffArtifactsOutput.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected handoff write payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _recon_artifact_ref(payload: object) -> ArtifactRef | None:
+    """Extract the ArchitectureDoc ArtifactRef from a recon-synthesis payload.
+
+    Returns None for legacy payloads (a bare ArchitectureDoc) that carry no
+    persisted artifact, so the caller records nothing rather than failing.
+    """
+    ref_json: object = None
+    if isinstance(payload, ReconSynthesisOutput):
+        ref_json = payload.artifact_ref_json
+    elif isinstance(payload, dict):
+        ref_json = cast(dict[str, Any], payload).get("artifact_ref_json")
+    if not isinstance(ref_json, str) or not ref_json:
+        return None
+    try:
+        return ArtifactRef.model_validate_json(ref_json)
+    except Exception:
+        return None
+
+
 def should_dispatch_lifecycle_hooks(profile: ScanProfile) -> bool:
     """Cheap, I/O-free gate: is it worth scheduling dispatch-lifecycle-hooks?
 
@@ -3872,6 +4158,7 @@ def build_prove_dispatch_inputs(
     artifact_root: str,
     target_endpoint_json: str | None,
     allowed_hosts: tuple[str, ...],
+    egress_policy_json: str | None = None,
 ) -> "tuple[list[Any], list[Any]]":
     """Convert a ProveResponse's proposed specs into activity input objects.
 
@@ -3880,8 +4167,10 @@ def build_prove_dispatch_inputs(
     :class:`~quarry_activities.inputs.HttpRequestActivityInput` ready to
     pass to ``workflow.execute_activity``.
 
-    HTTP specs are silently dropped when *target_endpoint_json* is None —
-    live HTTP probes require a target endpoint.
+    Sandbox exec specs carry *egress_policy_json* (the scenario-scoped
+    destination-set policy); ``None``/empty means the sandbox runs with no
+    egress.  HTTP specs are silently dropped when *target_endpoint_json* is None
+    — live HTTP probes require a target endpoint.
 
     Pure function — no I/O, safe to call from within workflow code.
     """
@@ -3890,7 +4179,7 @@ def build_prove_dispatch_inputs(
         exec_inputs.append(
             SandboxExecActivityInput(
                 spec_json=json.dumps(spec_dict),
-                target_endpoint_json=target_endpoint_json,
+                egress_policy_json=egress_policy_json,
                 allowed_hosts=allowed_hosts,
                 artifact_store_path=artifact_root,
                 scan_id=scan_id,
@@ -3967,7 +4256,13 @@ def _architecture_doc_from_activity(payload: object) -> ArchitectureDoc:
     if isinstance(payload, ArchitectureDoc):
         return payload
     if isinstance(payload, dict):
-        return ArchitectureDoc.model_validate(cast(dict[str, Any], payload))
+        data = cast(dict[str, Any], payload)
+        # versioned-handoff-artifacts: recon-synthesis now returns a wrapper
+        # (ReconSynthesisOutput) carrying doc_json + the artifact ref.
+        doc_json = data.get("doc_json")
+        if isinstance(doc_json, str):
+            return ArchitectureDoc.model_validate_json(doc_json)
+        return ArchitectureDoc.model_validate(data)
     msg = f"Unexpected ArchitectureDoc payload: {type(payload).__name__}"
     raise TypeError(msg)
 

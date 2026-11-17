@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import timedelta
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -19,6 +20,33 @@ with workflow.unsafe.imports_passed_through():
 
 ACTIVITY_RETRY = RetryPolicy(maximum_attempts=1)
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
+
+
+def _doc_from_synthesis(payload: object) -> ArchitectureDoc:
+    """Unwrap the recon-synthesis output wrapper back to an ArchitectureDoc.
+
+    ``recon_synthesis_activity`` returns ``ReconSynthesisOutput`` (doc + the
+    persisted artifact ref) since versioned-handoff-artifacts; direct-call and
+    legacy payloads (a bare ArchitectureDoc / its dict form) stay accepted.
+
+    The wrapper is recognised by duck-typing on ``doc_json`` rather than
+    ``isinstance``: the Temporal workflow sandbox deserialises the activity
+    result into a *sandboxed* copy of ``ReconSynthesisOutput`` whose class
+    object differs from the one imported here, so an isinstance check misses it.
+    """
+    doc_json = getattr(payload, "doc_json", None)
+    if isinstance(doc_json, str):
+        return ArchitectureDoc.model_validate_json(doc_json)
+    if isinstance(payload, ArchitectureDoc):
+        return payload
+    if isinstance(payload, dict):
+        data = cast("dict[str, Any]", payload)
+        inner = data.get("doc_json")
+        if isinstance(inner, str):
+            return ArchitectureDoc.model_validate_json(inner)
+        return ArchitectureDoc.model_validate(data)
+    msg = f"Unexpected recon-synthesis payload: {type(payload).__name__}"
+    raise TypeError(msg)
 
 
 @workflow.defn
@@ -53,12 +81,13 @@ class ReconWorkflow:
         subsystems: list[Subsystem] = list(await asyncio.gather(*subsystem_tasks))
 
         # Step 3: Synthesis — merge into a single ArchitectureDoc
-        doc: ArchitectureDoc = await workflow.execute_activity(
+        synthesis_payload: object = await workflow.execute_activity(
             recon_synthesis_activity,
             args=[subsystems, repo_root, scan_id],
             start_to_close_timeout=ACTIVITY_TIMEOUT,
             retry_policy=ACTIVITY_RETRY,
         )
+        doc: ArchitectureDoc = _doc_from_synthesis(synthesis_payload)
 
         # Step 4: Persist the ArchitectureDoc to SQLite
         await workflow.execute_activity(

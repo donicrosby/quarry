@@ -59,6 +59,7 @@ from quarry.schemas import (
     Target,
     VulnerabilityClass,
 )
+from quarry_activities.handoff import load_handoff_artifacts, write_handoff_artifacts
 from quarry_activities.inputs import BuildScanManifestInput, CreateSnapshotInput, ScanSecretsInput
 from quarry_activities.repo import persist_scan_state
 from quarry_persistence import QuarryRepository
@@ -454,6 +455,8 @@ async def _run_validate_scan(
         task_queue=task_queue,
         workflows=[RunScanWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             persist_scan_state,
             counting_validate_activity,
             _stub_build_scan_manifest,
@@ -967,6 +970,8 @@ def _build_worker(
         task_queue=task_queue,
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             _stub_scan_repo_for_secrets,
             _stub_scan_repo_for_ssrf_sinks,
@@ -1328,6 +1333,8 @@ def _build_fan_out_worker(
         task_queue=task_queue,
         workflows=[RunScanWorkflow, ReconWorkflow, CommitStageWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             _stub_scan_repo_for_secrets,
             _stub_scan_repo_for_ssrf_sinks,
@@ -1678,6 +1685,8 @@ async def _run_prove_scan(
         task_queue=task_queue,
         workflows=[RunScanWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             persist_scan_state,
             _needs_proof_validator,
             _instrumented_prove_activity,

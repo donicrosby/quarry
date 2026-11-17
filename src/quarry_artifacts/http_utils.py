@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore
 
 # Maximum response body size to store (10KB)
 MAX_RESPONSE_BODY_SIZE = 10 * 1024
@@ -65,25 +65,30 @@ def _truncate_body(body: bytes, max_size: int = MAX_RESPONSE_BODY_SIZE) -> tuple
 
 
 def capture_request_artifact(
-    store: LocalArtifactStore,
+    store: ArtifactStore,
     request: httpx.Request,
     artifact_key: str | None = None,
+    *,
+    key_prefix: str = "",
 ) -> ArtifactRef:
     """Serialize an httpx.Request to JSON artifact and store it.
 
     Authorization header values are redacted before storage.
 
     Args:
-        store: LocalArtifactStore instance
+        store: ArtifactStore instance
         request: httpx.Request to capture
         artifact_key: Optional storage key (auto-generated if not provided)
+        key_prefix: Prefix prepended to the auto-generated key (scan scoping)
 
     Returns:
         ArtifactRef for the stored request artifact
     """
     if artifact_key is None:
         digest = _key_digest(request.method, str(request.url))
-        artifact_key = f"http/requests/{request.method}_{request.url.host}_{digest}.json"
+        artifact_key = (
+            f"{key_prefix}http/requests/{request.method}_{request.url.host}_{digest}.json"
+        )
 
     # Build request data with redacted headers
     request_data: dict[str, Any] = {
@@ -120,24 +125,27 @@ def capture_request_artifact(
 
 
 def capture_response_artifact(
-    store: LocalArtifactStore,
+    store: ArtifactStore,
     response: httpx.Response,
     artifact_key: str | None = None,
+    *,
+    key_prefix: str = "",
 ) -> ArtifactRef:
     """Serialize an httpx.Response to JSON artifact and store it.
 
     Response body is truncated to 10KB max.
 
     Args:
-        store: LocalArtifactStore instance
+        store: ArtifactStore instance
         response: httpx.Response to capture
         artifact_key: Optional storage key (auto-generated if not provided)
+        key_prefix: Prefix prepended to the auto-generated key (scan scoping)
 
     Returns:
         ArtifactRef for the stored response artifact
     """
     if artifact_key is None:
-        artifact_key = response_artifact_key(response)
+        artifact_key = f"{key_prefix}{response_artifact_key(response)}"
 
     # Truncate body if needed
     body_bytes = response.content

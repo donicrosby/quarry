@@ -9,14 +9,13 @@ never in workflow code.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, cast
 
 from temporalio import activity
 
 from quarry.schemas import FinalFinding, IntegrationConfig, IntegrationRun, Severity
 from quarry_activities.inputs import DispatchLifecycleHooksInput
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_plugins.base import HookContext, LifecycleEvent, LifecycleHookPlugin, PluginType
 from quarry_plugins.registry import load_plugins, plugins_of_type
 
@@ -55,7 +54,7 @@ def dispatch_lifecycle_hooks(input: DispatchLifecycleHooksInput) -> list[Integra
     ]
     configs_by_name = {c.integration_type: c for c in configs}
 
-    store = LocalArtifactStore(Path(input.artifact_root))
+    store = build_artifact_store(input.artifact_root)
     already_delivered = set(input.existing_keys)
 
     plugins = load_plugins()

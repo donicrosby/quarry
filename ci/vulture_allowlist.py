@@ -27,6 +27,9 @@ _ALLOWLIST = [
     src.quarry.config.config_file,
     src.quarry.config.redis_url,
     src.quarry.config.s3_bucket,
+    src.quarry.config.redis_max_artifact_bytes,
+    src.quarry.config.artifact_retry_max_attempts,
+    src.quarry.config.artifact_retry_backoff_seconds,
     src.quarry.panel_config.max_tokens_per_scan,
     src.quarry.panel_config.reasoning_lexicon,
     src.quarry.schemas.snippet_hash,
@@ -172,6 +175,10 @@ _ALLOWLIST = [
     src.quarry_workflows.run_scan.final_finding_count,
 
     # --- Protocol signature params, dunder params, instance attrs ---
+    src.quarry_artifacts.s3_store.Body,
+    src.quarry_artifacts.s3_store.Bucket,
+    src.quarry_artifacts.s3_store.ContentType,
+    src.quarry_artifacts.s3_store.Key,
     src.quarry.panel_config.COUNTERPOINT,
     src.quarry.schemas.QUEUED,
     src.quarry.schemas.PREPARING,

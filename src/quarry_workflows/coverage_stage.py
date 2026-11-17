@@ -180,6 +180,13 @@ async def record_coverage(
     # Skipped rows distinguish hunt failure from promotion failure — blaming
     # the hunter for candidates that died in validation hides those defects.
     skipped = skipped_task_records(agent_tasks, candidate_findings, final_findings)
+    # versioned-handoff-artifacts: stamp the ledger from durable scan metadata.
+    scan_ordinal_value = scan.metadata.get("scan_ordinal")
+    scan_ordinal = (
+        scan_ordinal_value if isinstance(scan_ordinal_value, int) and scan_ordinal_value > 0 else 1
+    )
+    round_value = scan.metadata.get("coverage_round_index")
+    round_index = round_value if isinstance(round_value, int) and round_value >= 0 else 0
     payload = await workflow.execute_activity(
         "build-coverage-ledger",
         BuildCoverageLedgerInput(
@@ -191,6 +198,8 @@ async def record_coverage(
             agent_tasks_total=len(agent_tasks),
             agent_tasks_scanned=len(agent_tasks),
             skipped_json=json.dumps(skipped, sort_keys=True),
+            scan_ordinal=scan_ordinal,
+            artifact_version=round_index + 1,
         ),
         start_to_close_timeout=timedelta(minutes=1),
         retry_policy=retry_policy,
