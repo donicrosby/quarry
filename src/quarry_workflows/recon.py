@@ -12,7 +12,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from quarry.schemas import ArchitectureDoc, Subsystem, SubsystemAssignment
-    from quarry_activities.inputs import PersistScanStateInput, ReconSynthesisOutput
+    from quarry_activities.inputs import PersistScanStateInput
     from quarry_activities.recon_orchestrator import recon_orchestrator_activity
     from quarry_activities.recon_subsystem import recon_subsystem_activity
     from quarry_activities.recon_synthesis import recon_synthesis_activity
@@ -28,16 +28,22 @@ def _doc_from_synthesis(payload: object) -> ArchitectureDoc:
     ``recon_synthesis_activity`` returns ``ReconSynthesisOutput`` (doc + the
     persisted artifact ref) since versioned-handoff-artifacts; direct-call and
     legacy payloads (a bare ArchitectureDoc / its dict form) stay accepted.
+
+    The wrapper is recognised by duck-typing on ``doc_json`` rather than
+    ``isinstance``: the Temporal workflow sandbox deserialises the activity
+    result into a *sandboxed* copy of ``ReconSynthesisOutput`` whose class
+    object differs from the one imported here, so an isinstance check misses it.
     """
-    if isinstance(payload, ReconSynthesisOutput):
-        return ArchitectureDoc.model_validate_json(payload.doc_json)
+    doc_json = getattr(payload, "doc_json", None)
+    if isinstance(doc_json, str):
+        return ArchitectureDoc.model_validate_json(doc_json)
     if isinstance(payload, ArchitectureDoc):
         return payload
     if isinstance(payload, dict):
         data = cast("dict[str, Any]", payload)
-        doc_json = data.get("doc_json")
-        if isinstance(doc_json, str):
-            return ArchitectureDoc.model_validate_json(doc_json)
+        inner = data.get("doc_json")
+        if isinstance(inner, str):
+            return ArchitectureDoc.model_validate_json(inner)
         return ArchitectureDoc.model_validate(data)
     msg = f"Unexpected recon-synthesis payload: {type(payload).__name__}"
     raise TypeError(msg)
