@@ -100,6 +100,10 @@ class BuildCoverageLedgerInput(BaseModel):
     agent_tasks_scanned: int
     skipped_json: str
     workspace_id: str = "local"
+    # versioned-handoff-artifacts: version stamps carried onto the persisted
+    # ledger (ADR-026 rule 6). Default to 1 for callers that predate the stamps.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
 
 
 class BuildCoverageLedgerOutput(BaseModel):
@@ -237,3 +241,82 @@ class SandboxExecActivityInput(BaseModel):
     candidate_finding_id: str
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
     prove_corpus_json: str | None = None  # ProveCorpus serialized; None = HTTP prove
+
+
+class ReconSynthesisOutput(BaseModel):
+    """Output payload for recon-synthesis (versioned-handoff-artifacts).
+
+    Wraps the merged ArchitectureDoc so the activity can also return the
+    ``ArtifactRef`` of the versioned architecture-doc artifact it persisted
+    (task 3.2). ``artifact_ref_json`` is None when no artifact_root was supplied
+    (direct-call/back-compat path).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    doc_json: str
+    artifact_ref_json: str | None = None
+
+
+class WriteHandoffArtifactsInput(BaseModel):
+    """Input payload for write-handoff-artifacts (versioned-handoff-artifacts).
+
+    Carries the per-round hunt state needed to build the three cold-start
+    artifacts (ArchitectureDoc, CoverageLedger, HuntHandoff). All values are
+    JSON-serializable primitives at the Temporal boundary.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    artifact_root: str
+    round_number: int
+    workspace_id: str = "local"
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+    # The merged ArchitectureDoc JSON; when None the activity falls back to the
+    # copy already persisted by recon (cold-start/resume path).
+    architecture_doc_json: str | None = None
+    requested_vuln_classes: tuple[str, ...] = ()
+    completed_vuln_classes: tuple[str, ...] = ()
+    agent_tasks_total: int = 0
+    agent_tasks_scanned: int = 0
+    covered_scope_units: tuple[str, ...] = ()
+    candidate_finding_ids: tuple[str, ...] = ()
+    pending_task_ids: tuple[str, ...] = ()
+    open_hypotheses: tuple[str, ...] = ()
+    # ISO-8601 timestamp supplied by the workflow (workflow.now()) so the
+    # artifact is deterministic across replays; defaults to now() in the activity.
+    created_at: str | None = None
+
+
+class WriteHandoffArtifactsOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    hunt_handoff_json: str
+    hunt_handoff_ref_json: str
+    architecture_doc_ref_json: str | None = None
+    coverage_ledger_ref_json: str | None = None
+
+
+class LoadHandoffArtifactsInput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    artifact_root: str
+
+
+class LoadHandoffArtifactsOutput(BaseModel):
+    """The three cold-start artifacts for a scan, read back from the store.
+
+    ``found`` is False when no HuntHandoff exists (a fresh start). The
+    architecture-doc / coverage-ledger payloads may be None independently when
+    only some artifacts were written.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    found: bool = False
+    hunt_handoff_json: str | None = None
+    architecture_doc_json: str | None = None
+    coverage_ledger_json: str | None = None

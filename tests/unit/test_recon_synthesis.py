@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quarry.schemas import EntryPoint, Subsystem
+from quarry.schemas import ArchitectureDoc, EntryPoint, Subsystem
 from quarry_activities.recon_synthesis import (
     recon_synthesis_activity,
     render_architecture_markdown,
 )
+
+
+def _doc(out: object) -> ArchitectureDoc:
+    """Parse the recon-synthesis output wrapper back to an ArchitectureDoc."""
+    from quarry_activities.inputs import ReconSynthesisOutput
+
+    assert isinstance(out, ReconSynthesisOutput)
+    return ArchitectureDoc.model_validate_json(out.doc_json)
 
 
 def _subsystem() -> Subsystem:
@@ -27,7 +35,7 @@ def _subsystem() -> Subsystem:
 def test_render_architecture_markdown_includes_entry_points_and_notes() -> None:
     from quarry_activities.recon_synthesis import recon_synthesis_activity as _act
 
-    doc = _act([_subsystem()], ".", "scan-1")
+    doc = _doc(_act([_subsystem()], ".", "scan-1"))
     md = render_architecture_markdown(doc, "scan-1")
 
     assert md.startswith("# Architecture map — scan-1")
@@ -53,6 +61,6 @@ def test_recon_synthesis_writes_architecture_report_to_disk(tmp_path: Path) -> N
 
 def test_recon_synthesis_no_write_without_output_dir(tmp_path: Path) -> None:
     # Back-compat: called without output_dir → returns the doc, writes nothing.
-    doc = recon_synthesis_activity([_subsystem()], ".", "scan-1")
+    doc = _doc(recon_synthesis_activity([_subsystem()], ".", "scan-1"))
     assert doc.entry_points and doc.entry_points[0].function == "fetch_local"
     assert not list(tmp_path.glob("**/*.md"))

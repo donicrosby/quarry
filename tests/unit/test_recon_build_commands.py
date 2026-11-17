@@ -102,15 +102,19 @@ def test_vulnerable_fastapi_acceptance() -> None:
 
 def test_recon_synthesis_populates_build_commands(tmp_path: Path) -> None:
     """End-to-end: the activity wires detection into the ArchitectureDoc."""
+    from quarry.schemas import ArchitectureDoc
     from quarry_activities.recon_synthesis import recon_synthesis_activity
 
     _mk(tmp_path, "Cargo.toml")
-    doc = recon_synthesis_activity([], tmp_path, "scan-bc")
+    out = recon_synthesis_activity([], tmp_path, "scan-bc")
+    doc = ArchitectureDoc.model_validate_json(out.doc_json)
     assert any("cargo build --release" in c.command for c in doc.build_commands)
 
 
 def test_recon_synthesis_empty_when_no_build_system(tmp_path: Path) -> None:
+    from quarry.schemas import ArchitectureDoc
     from quarry_activities.recon_synthesis import recon_synthesis_activity
 
-    doc = recon_synthesis_activity([], tmp_path, "scan-none")
+    out = recon_synthesis_activity([], tmp_path, "scan-none")
+    doc = ArchitectureDoc.model_validate_json(out.doc_json)
     assert doc.build_commands == []
