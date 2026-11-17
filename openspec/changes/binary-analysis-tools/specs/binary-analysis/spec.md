@@ -121,13 +121,13 @@ SHALL be detected by comparing inode numbers.
 
 ### Requirement: Binary analysis activity feeds hunt stage
 
-A Temporal activity `binary_analysis` SHALL execute a deterministic pass over
-the repo root, invoke the binary analysis tools for every discovered binary,
-and produce a structured report persisted as a scan artifact. A
-`ContextInjectorPlugin` targeting `attack_classes=[security_misconfiguration]`
-SHALL read the persisted report artifact and inject it as domain context on
-every `security_misconfiguration` `AgentTask`, including tasks emitted by
-gapfill and reachability-feedback.
+A Temporal activity `binary_analysis` SHALL produce a binary hardening
+report persisted under a well-known artifact key in the scan's artifact
+root. A `BinaryAnalysisContextInjector` plugin SHALL implement
+`ContextInjectorPlugin`, be instantiated with `artifact_root` at consumption
+sites, and inject the report into `security_misconfiguration` tasks'
+`domain_context`. It SHALL return `None` when the artifact is absent or the
+class does not match (portability invariant).
 
 #### Scenario: activity-produces-and-persists-structured-report
 
@@ -135,23 +135,27 @@ gapfill and reachability-feedback.
   binary
 - **THEN** the returned report includes a per-binary section with file type,
   hardening flags, linked libraries, and any SUID/sgid or symlink findings
-- **AND** the report is persisted as an artifact for later consumption by
-  the context injector
+- **AND** the report is persisted under a well-known artifact key in the
+  scan's artifact root
 
-#### Scenario: report-is-injected-via-context-injector
+#### Scenario: report-is-injected-at-hunt-consumption-time
 
-- **WHEN** a `security_misconfiguration` hunt task is assembled via
-  `assemble_domain_context` during `emit-agent-tasks`
+- **WHEN** a `security_misconfiguration` hunt task is rendered for agent
+  execution (hunt activity receives artifact_root and constructs a
+  BinaryAnalysisContextInjector)
 - **THEN** the `BinaryAnalysisContextInjector` plugin reads the persisted
-  report and contributes it to the task's `domain_context`
+  report and contributes it to the task's effective `domain_context`
 - **AND** the task's `domain_context_sources` includes `binary_analysis`
 
 #### Scenario: gapfill-and-feedback-tasks-receive-binary-context
 
-- **WHEN** gapfill or reachability-feedback emits a
-  `security_misconfiguration` `AgentTask`
-- **THEN** the task's `domain_context` includes the binary analysis report
-  from the persisted artifact
+- **WHEN** gapfill or reachability-feedback constructs a
+  `security_misconfiguration` re-hunt task (gapfill activity receives
+  artifact_root)
+- **THEN** the `BinaryAnalysisContextInjector` contributes the binary analysis
+  report to the task's `domain_context` on the same path as hunt tasks
+  (instantiated with artifact_root, mirroring the KbContextInjectorPlugin
+  pattern at gapfill.py:339)
 
 #### Scenario: no-binaries-yields-empty-report
 

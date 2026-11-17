@@ -33,8 +33,8 @@
   `-n <min_length>` flag.
 - [ ] Fallback (when `strings` absent): pure-Python scan for printable
   byte sequences of `min_length` or longer (ASCII printable characters:
-  `string.printable` minus whitespace — no newline, consistent with GNU
-  `strings` behaviour).
+  range 0x20-0x7E plus tab 0x09; newline 0x0A terminates the sequence — 
+  consistent with GNU `strings` behaviour).
 - [ ] `min_length` input key SHALL default to 4.
 - [ ] Unit test: synthetic binary with known embedded strings; verify
   extraction with default and custom min_length.
@@ -96,8 +96,11 @@
   each discovered binary, (c) run `suid_sgid_detect` and `symlink_analysis`
   once over the whole tree, (d) assemble a structured report dict with key
   `binaries` (list of per-binary reports) plus `suid_sgid` and `symlinks`
-  sections, (e) persist the report as a scan artifact via the activity's
-  `artifact_store`.
+  sections, (e) persist the report as a scan artifact under the key
+  `"binary_analysis"` using `LocalArtifactStore` at the artifact_root path
+  (activities receive artifact_root as an explicit arg — pattern at 
+  run_scan.py:612/694/764), and (f) record the artifact key on the scan 
+  metadata for downstream reference at consumption time.
 - [ ] Activity SHALL be deterministic: same repo state → same report.
 - [ ] Activity SHALL NOT crash on missing tool binaries; absent tools
   produce a `tool_unavailable` field in the report for that check.
@@ -113,28 +116,46 @@
   (`src/quarry_plugins/base.py:104-119`), following the `kb_context.py`
   pattern.
 - [ ] `attack_classes` SHALL be `frozenset({VulnerabilityClass.SECURITY_MISCONFIGURATION})`.
-- [ ] `inject_context()` SHALL read the persisted binary analysis report
-  artifact from the artifact store and return it as a `## Domain context:
-  Binary Analysis` block, or `None` when the artifact is absent.
-- [ ] Priority SHALL be 60 (above `kb_context` at 50 — binary report
-  is more specific, should lead).
+- [ ] `priority` SHALL be 40 (below `kb_context` at 50 — ascending sort at
+  budget.py:60 puts lower-priority plugins first; binary analysis report is
+  more specific than KB context and should lead).
+- [ ] `__init__` SHALL accept `artifact_root: str | None` (mirroring
+  KbContextInjectorPlugin at kb_context.py:34), so the plugin is
+  instantiated with the per-scan artifact root at consumption sites
+  (hunt.py:206, gapfill.py:339) rather than resolved from a process-global
+  singleton at emit time.
+- [ ] `inject_context()` SHALL read the persisted `"binary_analysis"` report
+  artifact from the artifact store and return the report text, or `None`
+  when the artifact is absent or the task's `vuln_class` is not
+  `SECURITY_MISCONFIGURATION`. The assembler (budget.py:61) adds the
+  `## Domain context: {name}` header from `plugin.name`; the plugin SHALL
+  return the body text only.
 - [ ] Unit test: injector returns `None` when no binary report artifact
   exists; returns report block when artifact is present.
 
 ## 11. Wire `binary_analysis` activity and context injector into scan workflow
-- [ ] Add a `BINARY_ANALYSIS` stage to `RunScanWorkflow` in
-  `src/quarry_workflows/run_scan.py`, positioned inside RECON after
-  `kb-recon` and before `emit-agent-tasks` (lines 796-797).
+- [ ] Add a `binary_analysis` activity invocation inside the RECON stage of
+  `RunScanWorkflow` in `src/quarry_workflows/run_scan.py`, positioned
+  after `kb-recon` and before `emit-agent-tasks` (lines 796-797).
 - [ ] The workflow SHALL invoke `binary-analysis` activity and pass the
   artifact root so the report is persisted.
-- [ ] Register `BinaryAnalysisContextInjector` via the plugin entry-points
-  mechanism alongside the existing OSS stub injectors.
-- [ ] Verify via `assemble_domain_context`: security_misconfiguration tasks
-  receive binary analysis context; tasks of other vuln_classes do NOT
-  (attack-class filtering).
-- [ ] Integration test assertions: (a) a `security_misconfiguration` task
-  has `domain_context` containing the binary report and
-  `domain_context_sources` containing `binary_analysis`; (b) a `command_injection`
+- [ ] Register `BinaryAnalysisContextInjector` as an entry-point singleton
+  under the `quarry.plugins` group (pyproject.toml, mirroring kb_context at
+  line 63) — the singleton has artifact_root=None and returns None at emit
+  time (portability invariant); real resolution happens at consumption.
+- [ ] Wire injection at hunt consumption: in
+  `src/quarry_activities/hunt.py`, construct
+  `BinaryAnalysisContextInjector(artifact_root=artifact_root)` alongside the
+  existing `KbContextInjectorPlugin` construction (line 206), and merge
+  the returned text into the task's domain_context before rendering.
+- [ ] Wire injection at gapfill consumption: in
+  `src/quarry_activities/gapfill.py`, construct
+  `BinaryAnalysisContextInjector(artifact_root=artifact_root)` alongside the
+  existing `KbContextInjectorPlugin` construction (line 339), and merge
+  the returned text into the task's domain_context for re-hunt tasks.
+- [ ] Integration test assertions: (a) a `security_misconfiguration` hunt
+  task's effective `domain_context` contains the binary report and
+  `domain_context_sources` includes `binary_analysis`; (b) a `command_injection`
   task has NO binary analysis content in its `domain_context`; (c) the
   workflow does not crash when the binary report artifact is absent
   (injector returns `None`).
