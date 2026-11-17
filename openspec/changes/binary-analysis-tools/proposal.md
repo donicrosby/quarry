@@ -46,7 +46,8 @@ the hunt loop.
 - **Code touched**: new files in `src/quarry_tools/` (tools),
   `src/quarry_activities/` (activity), plus wiring into the `BUILTIN_REGISTRY`
   and `RunScanWorkflow`.
-- **External dependencies**: `file`, `strings`, `readelf` (all in binutils;
+- **External dependencies**: `file`, `strings`, `readelf` (`strings` and
+  `readelf` from binutils; `file` from the file/libmagic package;
   `ToolUnavailableError` when absent, consistent with existing opengrep/SCIP
   pattern).
 - **Deterministic**: same binary → same report. No network I/O. Read-only.

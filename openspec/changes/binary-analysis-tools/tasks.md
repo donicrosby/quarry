@@ -147,7 +147,14 @@
   `src/quarry_activities/hunt.py`, construct
   `BinaryAnalysisContextInjector(artifact_root=artifact_root)` alongside the
   existing `KbContextInjectorPlugin` construction (line 206), and merge
-  the returned text into the task's domain_context before rendering.
+  the returned text into the task's domain_context before rendering. When
+  the injector returns text, record provenance in the same frozen-model
+  update — `task.model_copy(update={"domain_context": <merged>,
+  "domain_context_sources": [*task.domain_context_sources,
+  "binary_analysis"]})` (idiom at hunt.py:432; `domain_context_sources` is
+  written nowhere else at consumption time — emit_agent_tasks.py:145 writes
+  it only from emit-time assembly, where the artifact_root-less singleton
+  contributes nothing).
 - [ ] Wire injection at gapfill consumption: in
   `src/quarry_activities/gapfill.py`, construct
   `BinaryAnalysisContextInjector(artifact_root=artifact_root)` alongside the
