@@ -233,6 +233,9 @@ _ALLOWLIST = [
 
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
 
+    # --- browser-worker-playwright: helpers referenced only from tests/ ---
+    src.quarry_activities.playwright_driver.store_screenshot,
+
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
     src.quarry.schemas.VerdictDefaults,
