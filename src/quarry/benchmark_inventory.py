@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from quarry.schemas import VulnerabilityClass
 
@@ -70,10 +70,10 @@ def _ground_truth_counts(ground_truth_dir: Path) -> dict[str, int]:
             continue
         if not isinstance(raw, list):
             continue
-        for entry in raw:
-            if not isinstance(entry, dict):
+        for raw_entry in cast(list[object], raw):
+            if not isinstance(raw_entry, dict):
                 continue
-            vuln_class = entry.get("vuln_class")
+            vuln_class = cast(dict[str, object], raw_entry).get("vuln_class")
             if isinstance(vuln_class, str):
                 counts[vuln_class] = counts.get(vuln_class, 0) + 1
     return counts
