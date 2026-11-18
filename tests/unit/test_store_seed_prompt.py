@@ -133,6 +133,7 @@ def test_write_failure_is_best_effort(tmp_path: Path) -> None:
 
         def close(self) -> None:
             raise NotImplementedError
+
         def append_bytes(
             self,
             key: str,

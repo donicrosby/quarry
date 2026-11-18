@@ -52,7 +52,6 @@ from quarry.schemas import (
     ReasoningCheckResult,
 )
 from quarry_artifacts.store import ArtifactStore, build_artifact_store
-from quarry_artifacts.local import LocalArtifactStore
 from quarry_models.agent_log import (
     AgentLogEvent,
     AgentLogEventType,

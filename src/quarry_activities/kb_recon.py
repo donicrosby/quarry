@@ -38,9 +38,8 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
-from quarry_artifacts.store import build_artifact_store, persist_seed_prompt
 from quarry_artifacts.local import LocalArtifactStore
-from quarry_artifacts.store import persist_seed_prompt
+from quarry_artifacts.store import build_artifact_store, persist_seed_prompt
 from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
