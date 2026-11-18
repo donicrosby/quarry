@@ -372,6 +372,10 @@ class RunScanInput(BaseModel):
     # dispatch passed hours=1; the configured default (300s) is applied by the
     # API layer and documented in the §3.7 PR.
     calibrate_start_to_close_seconds: int = 3600
+    # Write-time credibility economics + the cost-ordered corroboration cascade
+    # (quarry.toml [credibility]). None means the section is absent and the scan
+    # keeps the pre-change behaviour; the API layer serialises the section here.
+    credibility_config_json: str | None = None
     # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
     # None disables budget gating.
     budget_cap_usd: float | None = None
@@ -1171,6 +1175,12 @@ class RunScanWorkflow:
                     agent_tasks_total=len(all_agent_tasks),
                     agent_tasks_scanned=len(all_agent_tasks),
                     skipped_items=[],
+                    # Tier-aware cells (credibility-economics): gapfill skips
+                    # cells already recorded terminal_uncovered, so a discounted
+                    # cell is re-hunted at most once.
+                    tasks=all_agent_tasks,
+                    findings=candidate_findings,
+                    credibility_enabled=scan_input.credibility_config_json is not None,
                     id=str(workflow.uuid4()),
                     created_at=workflow.now(),
                 )
@@ -2133,6 +2143,7 @@ class RunScanWorkflow:
                                 scan_input.scan_seed,
                                 artifact_root,
                                 kb_root_index_key,
+                                scan_input.credibility_config_json,
                             ],
                             start_to_close_timeout=timedelta(hours=4),
                             heartbeat_timeout=timedelta(minutes=3),
@@ -2208,11 +2219,15 @@ class RunScanWorkflow:
                 # candidate so it flows to whichever report section it lands in.
                 credibility = payload_dict.get("credibility")
                 ensemble = payload_dict.get("ensemble")
-                if credibility is not None or ensemble:
+                cascade_corroborated = payload_dict.get("corroborated")
+                cascade_step = payload_dict.get("cascade_step")
+                if credibility is not None or ensemble or cascade_step is not None:
                     candidate = candidate.model_copy(
                         update={
                             "credibility": credibility,
                             "ensemble": ensemble or [],
+                            "corroborated": bool(cascade_corroborated),
+                            "cascade_step": cascade_step,
                         }
                     )
 

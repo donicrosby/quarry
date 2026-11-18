@@ -129,6 +129,34 @@
 # rpm = 3
 
 # --------------------------------------------------------------------------
+# Credibility economics (optional)
+# Write-time credibility gating + the cost-ordered corroboration cascade.
+# Omit the whole section to keep the pre-change behaviour (no discounting, no
+# cascade). Presence enables both.
+#
+# Every finding is tagged at write time as tool-grounded (a parsed HTTP status,
+# a regex/grep match, a proven exploit chain) or a model judgment. A model
+# judgment is discounted by its model's static reliability tier
+# (FRONTIER 1.0 / STRONG 0.9 / MID 0.78 / ECONOMY 0.6, plus MID for unknown
+# models); a tool-grounded finding always keeps weight 1.0. The discounted
+# prior feeds the cascade's step-1 gate and the coverage ledger's covered-cell
+# test — it never modulates the ordinal ensemble credibility posterior.
+#
+# The cascade runs cheapest-first: prior already at/above 0.9 -> free
+# corroboration -> low-severity passive pass -> deterministic probe -> one
+# capped debater call. probe_budget and model_budget are SEPARATE per-scan hard
+# ceilings persisted in SQLite; a resumed scan reads them back instead of
+# re-granting them. A zero cap still gates — set the matching *_unlimited flag
+# to remove the ceiling explicitly.
+# --------------------------------------------------------------------------
+# [credibility]
+# probe_budget = 20              # deterministic probe units per scan (default: 20)
+# model_budget = 5               # paid debater calls per scan (default: 5)
+# probe_unlimited = false        # true removes the probe ceiling (explicit opt-in)
+# model_unlimited = false        # true removes the model ceiling (explicit opt-in)
+# severity_threshold = "medium"  # findings below this take the passive pass (default: medium)
+
+# --------------------------------------------------------------------------
 # Budget limits (optional)
 # --------------------------------------------------------------------------
 # [budget]

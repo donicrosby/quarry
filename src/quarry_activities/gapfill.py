@@ -440,6 +440,21 @@ def gapfill_impl(
             now=datetime.now(UTC),
         )
 
+    # Terminal cells (credibility-economics): a cell whose only occupants are all
+    # discounted and that was already gapfill-hunted gets no further re-hunt —
+    # it is permanently excluded so the loop cannot spin on cells no
+    # tool-grounded evidence exists for.
+    terminal_cells = {
+        (cell.scope, cell.vuln_class) for cell in ledger.cells if cell.terminal_uncovered
+    }
+    if terminal_cells:
+        extra_tasks = [
+            task
+            for task in extra_tasks
+            if ((task.scope or "").replace("\\", "/").strip().strip("/"), task.vuln_class)
+            not in terminal_cells
+        ]
+
     # Binary analysis report consumption (slice-3 C6): enrich
     # security_misconfiguration re-hunt tasks with the persisted hardening report,
     # on the same consumption path as hunt tasks. Idempotent — a task already

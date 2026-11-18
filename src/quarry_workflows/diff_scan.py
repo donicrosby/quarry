@@ -365,6 +365,8 @@ def _candidate_from_secret_match(match: SecretMatch, *, scan_id: str) -> Candida
         ],
         evidence_path=[EvidencePathElement(path=match.file_path, line=match.line_number)],
         confidence=Confidence.MEDIUM,
+        # Deterministic SecretMatch regex over diff regions — tool-observed.
+        grounded=True,
         created_by="secrets-scanner",
         created_at=workflow.now(),
         metadata={
