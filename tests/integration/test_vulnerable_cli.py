@@ -154,6 +154,44 @@ class TestVulnerableCliCommandInjection:
         assert result.exit_code != 0
 
 
+class TestVulnerableCliEnvInjection:
+    """Acceptance proof — attacker-controlled env injection via the controlled env dict.
+
+    ``EDITOR`` is allowlisted to ``/bin/sh`` (attacker-env-injection REQ-1), so
+    handing the CLI that env dict turns its ``--edit`` path into arbitrary command
+    execution over attacker-staged content: ``/bin/sh`` runs the "edited" file.
+    """
+
+    def test_editor_env_injection_executes_staged_content(
+        self, built_binary: Path, tmp_path: Path
+    ) -> None:
+        bin_dest = tmp_path / "vulnerable-cli"
+        shutil.copy2(built_binary, bin_dest)
+        bin_dest.chmod(0o755)
+
+        sandbox = LocalSubprocessSandbox()
+        spec = SandboxExecSpec(
+            command="sh",
+            args=["-c", "./vulnerable-cli --edit pwn.sh"],
+            env={"EDITOR": "/bin/sh"},
+            cwd=".",
+            input_files={"pwn.sh": "echo QUARRY_EDITOR_INJECTION_PROOF\n"},
+            timeout_seconds=10,
+        )
+        result = sandbox.run(
+            spec,
+            work_dir=tmp_path,
+            resolved_env={},
+            target_endpoint=None,
+        )
+        assert result.exit_code == 0, (
+            f"expected the injected editor to run; rc={result.exit_code} stderr={result.stderr!r}"
+        )
+        assert "QUARRY_EDITOR_INJECTION_PROOF" in result.stdout, (
+            f"injected EDITOR=/bin/sh did not execute the staged file; stdout={result.stdout!r}"
+        )
+
+
 class TestVulnerableCliGolden:
     def test_golden_json_exists_and_is_valid(self) -> None:
         golden_path = (
