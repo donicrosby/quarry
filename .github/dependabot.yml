@@ -1,0 +1,51 @@
+# Dependabot configuration — the automated half of Quarry's dependency update
+# policy.
+#
+# Spec:  openspec/changes/supply-chain-hardening
+# Policy: docs/dependency-policy.md
+#
+# `cooldown.default-days` delays *version* update PRs until a new release is at
+# least 7 days old, so a malicious or badly-regressed release is caught upstream
+# before Quarry adopts it. Security updates raised from an advisory are **not**
+# delayed by cooldown — a fix for an actively exploited vulnerability is never
+# held back.
+version: 2
+updates:
+  # Python dependency tree. Quarry is uv-managed and `uv.lock` is the source of
+  # truth, so the `uv` ecosystem (which updates `uv.lock`) is used rather than
+  # `pip`.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+
+  # GitHub Actions are SHA-pinned (see `.github/workflows/` and
+  # `scripts/check_pinned_refs.py`). Dependabot keeps those SHAs moving forward
+  # as upstream publishes new commits, always rewriting the ref as a full
+  # 40-character commit SHA (the `# vN` comment on each `uses:` line tells
+  # Dependabot which release line to follow).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Remote pre-commit hooks are SHA-pinned too; keep those pins current. This
+  # entry is beyond the literal spec task list, but without it the pinned hook
+  # revisions silently rot — the failure mode the SHA pin is meant to prevent.
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit:
+        patterns: ["*"]
