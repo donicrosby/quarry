@@ -21,6 +21,7 @@ from quarry_activities.coverage import build_coverage_ledger_activity
 from quarry_activities.dedup import deduplicate_activity
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
 from quarry_activities.gapfill import gapfill_activity
+from quarry_activities.handoff import load_handoff_artifacts, write_handoff_artifacts
 from quarry_activities.integrations import deliver_integrations_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_orchestrator import recon_orchestrator_activity
@@ -55,6 +56,8 @@ async def test_cancel_mid_scan_sets_cancelled_status(
         task_queue=task_queue,
         workflows=[RunScanWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             persist_scan_state,
             recon_orchestrator_activity,

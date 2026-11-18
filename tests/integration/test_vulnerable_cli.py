@@ -99,7 +99,7 @@ class TestVulnerableCliCommandInjection:
             spec,
             work_dir=tmp_path,
             resolved_env={},
-            target_endpoint=None,
+            egress_policy=None,
         )
         assert result.exit_code == 0
         assert "uid=" in result.stdout, (
@@ -127,7 +127,7 @@ class TestVulnerableCliCommandInjection:
             spec,
             work_dir=tmp_path,
             resolved_env={},
-            target_endpoint=None,
+            egress_policy=None,
         )
         assert result.exit_code == 0
         assert "example-project" in result.stdout
@@ -149,7 +149,7 @@ class TestVulnerableCliCommandInjection:
             spec,
             work_dir=tmp_path,
             resolved_env={},
-            target_endpoint=None,
+            egress_policy=None,
         )
         assert result.exit_code != 0
 

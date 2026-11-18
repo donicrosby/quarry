@@ -12,12 +12,12 @@
 
 ## 3. SandboxBackend protocol update
 - [ ] 3.1 Replace `target_endpoint: TargetEndpoint | None` parameter with `egress_policy: ResolvedEgressPolicy | None` on `SandboxBackend.run()` (protocol + all three tier classes)
-- [ ] 3.2 Update `LocalSubprocessSandbox`: accept `ResolvedEgressPolicy | None`; Tier 1 cannot enforce kernel network NS so it logs a warning and passes through (best-effort, documented caveat)
+- [ ] 3.2 Update `LocalSubprocessSandbox`: accept `ResolvedEgressPolicy | None`; Tier 1 has no kernel-enforced network NS (ADR-024 §A: dev/wiring only), so any non-empty policy SHALL be rejected with a typed error (RED: test that a non-empty policy raises; only `None`/empty keeps the documented by-convention no-network behavior)
 - [ ] 3.3 Update `ContainerSandbox._build_docker_cmd()`: replace `--network none` with per-destination-set Docker network attachment (create restricted network, attach container, allow only resolved IPs)
 - [ ] 3.4 Update `K8sJobSandbox`: construct `NetworkPolicy` egress rules from `ResolvedEgressPolicy` destination sets (RED: test NetworkPolicy shape against resolved IPs)
 
 ## 4. Prove stage integration
-- [ ] 4.1 `build_prove_sandbox_policy()`: scope the scan's egress policy to the destinations the proof scenario needs (browser → `browser-target`, canary → `canary-listener`, none → empty policy)
+- [ ] 4.1 `build_prove_sandbox_policy()`: scope the scan's egress policy to the destinations the proof scenario needs — `target-host` when the proof requires live target access, plus `browser-target` (browser proof) / `canary-listener` (SSRF canary); `model-provider`, `integration-outbound`, and `artifact-store` are host-side sets and SHALL NOT appear in a sandbox-scoped policy (RED: test the scoping mapping incl. host-side exclusion)
 - [ ] 4.2 Wire scoped policy into prove stage sandbox invocation; verify empty-policy case produces no egress
 
 ## 5. Caller migration
@@ -26,14 +26,14 @@
 
 ## 6. DNS rebinding guard
 - [ ] 6.1 `FrozenResolver` helper: wraps resolved IPs, rejects any re-resolution call with a typed error (RED: test that a second resolve raises)
-- [ ] 6.2 Integration test: ContainerSandbox with a policy that includes `example.com` → verify container reaches the resolved IP, not a different IP for the same hostname
+- [ ] 6.2 Integration test: ContainerSandbox with a policy that includes `example.com` → verify container reaches the resolved IP, not a different IP for the same hostname (live-docker; skip when Docker daemon unavailable, per existing ContainerSandbox test convention)
 
 ## 7. Verification
 - [ ] 7.1 Unit tests: `DestinationSet`, `EgressPolicy`, `ResolvedEgressPolicy` model validation
 - [ ] 7.2 Unit tests: `build_egress_policy()` factory output shape
 - [ ] 7.3 Unit tests: `FrozenResolver` re-resolution rejection
-- [ ] 7.4 Integration test: ContainerSandbox with multi-destination policy (target + canary) → target reachable, canary reachable, other hosts blocked
-- [ ] 7.5 Integration test: empty policy → no egress (regression guard)
+- [ ] 7.4 Integration test: ContainerSandbox with multi-destination policy (target + canary) → target reachable, canary reachable, other hosts blocked (live-docker; skip when Docker daemon unavailable)
+- [ ] 7.5 Integration test: empty policy → no egress (regression guard; live-docker, skip when Docker daemon unavailable)
 - [ ] 7.6 Ruff + pyright + vulture clean; full test suite green
 
 ## 8. Landing

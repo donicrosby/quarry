@@ -15,11 +15,15 @@ from temporalio import activity
 
 from quarry.schemas import (
     ArchitectureDoc,
+    ArtifactKind,
     BuildCommand,
     EntryPoint,
     Subsystem,
     TrustBoundary,
 )
+from quarry_activities.handoff import architecture_doc_key
+from quarry_activities.inputs import ReconSynthesisOutput
+from quarry_artifacts.local import LocalArtifactStore
 
 
 def detect_build_commands(repo_root: Path | str) -> list[BuildCommand]:
@@ -149,12 +153,18 @@ def recon_synthesis_activity(
     repo_root: Path | str,
     scan_id: str,
     output_dir: str | None = None,
-) -> ArchitectureDoc:
+    artifact_root: str | None = None,
+    scan_ordinal: int = 1,
+    artifact_version: int = 1,
+) -> ReconSynthesisOutput:
     """Merge subsystem results into an ArchitectureDoc.
 
     When *output_dir* is given, also writes a human-readable architecture report
     to ``<output_dir>/reports/<scan_id>-architecture.md`` so the attack-surface
-    map is findable on disk right after recon.
+    map is findable on disk right after recon. When *artifact_root* is given,
+    additionally persists the ArchitectureDoc as a versioned artifact (task 3.1)
+    under ``ArtifactKind.ARCHITECTURE_DOC`` and returns its ``ArtifactRef`` in the
+    output wrapper (task 3.2).
     """
     with suppress(RuntimeError):
         activity.heartbeat()
@@ -202,6 +212,8 @@ def recon_synthesis_activity(
         build_commands=detect_build_commands(repo_root),
         attack_surface_summary=attack_surface_summary,
         transcript_refs=[scan_id],
+        scan_ordinal=scan_ordinal,
+        artifact_version=artifact_version,
     )
 
     # Write the human-readable architecture report to disk (best-effort; never
@@ -212,4 +224,21 @@ def recon_synthesis_activity(
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(render_architecture_markdown(doc, scan_id), encoding="utf-8")
 
-    return doc
+    # Persist the ArchitectureDoc as a versioned artifact (task 3.1). The
+    # canonical key matches the handoff bundle's so cold-start resume finds one
+    # architecture-doc copy per scan.
+    artifact_ref_json: str | None = None
+    if artifact_root:
+        store = LocalArtifactStore(artifact_root)
+        ref = store.put_json(
+            architecture_doc_key(scan_id),
+            doc,
+            kind=ArtifactKind.ARCHITECTURE_DOC,
+            metadata={
+                "scan_ordinal": str(scan_ordinal),
+                "artifact_version": str(artifact_version),
+            },
+        )
+        artifact_ref_json = ref.model_dump_json()
+
+    return ReconSynthesisOutput(doc_json=doc.model_dump_json(), artifact_ref_json=artifact_ref_json)

@@ -1,6 +1,7 @@
 """Command-line interface for Quarry."""
 
 import asyncio
+import inspect
 import signal
 import time
 from collections.abc import Mapping
@@ -13,7 +14,14 @@ from uuid import uuid4
 import httpx
 import typer
 
-from quarry.benchmark import compare, load_ground_truth
+from quarry.benchmark import (
+    compare,
+    diff_run_results,
+    load_ground_truth,
+    local_benchmark_run_result,
+)
+from quarry.benchmark_artifacts import BenchmarkRunResult
+from quarry.benchmark_inventory import build_inventory, format_inventory_rows
 from quarry.config import QuarrySettings
 from quarry.panel_config import resolve_auth, resolve_focus
 from quarry.schemas import FinalFinding, ScanSummary, Target, VulnerabilityClass
@@ -27,6 +35,8 @@ from quarry_benchmark.cybergym import load_manifest as _load_cybergym_manifest
 from quarry_benchmark.cybergym import select_subset as _select_cybergym_subset
 from quarry_client.client import QuarryClient
 from quarry_models.litellm_client import LiteLLMModelClient
+from quarry_plugins.base import ContextInjectorPlugin
+from quarry_plugins.registry import load_plugins
 
 app = typer.Typer(help="Quarry local vulnerability research harness.")
 scan_app = typer.Typer(help="Run scans.")
@@ -34,7 +44,10 @@ target_app = typer.Typer(help="Manage local targets.")
 report_app = typer.Typer(help="Inspect reports.")
 benchmark_app = typer.Typer(help="Run local benchmarks.")
 provenance_app = typer.Typer(help="Prompt-provenance verification and GC retention.")
+plugin_app = typer.Typer(help="Inspect installed plugins.")
+ci_app = typer.Typer(help="Context-injector dry-run utilities.")
 POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_BENCHMARK_ARTIFACT_ROOT = Path(".quarry/benchmarks")
 TERMINAL_SCAN_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CANCELED"})
 
 app.add_typer(scan_app, name="scan")
@@ -42,6 +55,8 @@ app.add_typer(target_app, name="target")
 app.add_typer(report_app, name="report")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(provenance_app, name="provenance")
+app.add_typer(plugin_app, name="plugin")
+app.add_typer(ci_app, name="context-injector")
 
 
 @scan_app.command("run")
@@ -92,6 +107,14 @@ def run_scan(
             help="Path to an auth-profiles TOML file (ADR-018).",
         ),
     ] = None,
+    plugins_active: Annotated[
+        str | None,
+        typer.Option(
+            "--plugins-active",
+            help="Comma-separated context-injector plugin names to activate for this scan, "
+            "overriding quarry.toml [scan_defaults].plugins_active. Omit to use the toml list.",
+        ),
+    ] = None,
 ) -> None:
     if (dynamic_validation or live_prove) and target is None:
         typer.echo(
@@ -108,6 +131,10 @@ def run_scan(
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from exc
+
+    active_plugins: list[str] | None = None
+    if plugins_active is not None:
+        active_plugins = [p.strip() for p in plugins_active.split(",") if p.strip()]
 
     auth_profiles_json: str | None = None
     if auth_config is not None:
@@ -135,6 +162,7 @@ def run_scan(
                 dynamic_validation_enabled=dynamic_validation,
                 live_prove_enabled=live_prove,
                 auth_profiles_json=auth_profiles_json,
+                plugins_active=active_plugins,
             )
         )
     except httpx.ConnectError:
@@ -233,6 +261,7 @@ async def _run_scan_command(
     dynamic_validation_enabled: bool = False,
     live_prove_enabled: bool = False,
     auth_profiles_json: str | None = None,
+    plugins_active: list[str] | None = None,
 ) -> list[str]:
     # A git URL (--repo https://… / git@… / ssh://…) is cloned by the workflow;
     # a local path is scanned in place.
@@ -246,6 +275,7 @@ async def _run_scan_command(
             dynamic_validation_enabled=dynamic_validation_enabled,
             live_prove_enabled=live_prove_enabled,
             auth_profiles_json=auth_profiles_json,
+            plugins_active=plugins_active,
         )
         scan_id = result["scan_id"]
         if async_mode:
@@ -482,24 +512,86 @@ def benchmark_local(
             help="Probe confirmed findings to collect proof artifacts",
         ),
     ] = False,
+    artifact_root: Annotated[
+        Path,
+        typer.Option(
+            "--artifact-root",
+            help=(
+                "Directory to write the BenchmarkRunResult artifact under "
+                "(one <run_id>/result.json per run)"
+            ),
+        ),
+    ] = DEFAULT_BENCHMARK_ARTIFACT_ROOT,
 ) -> None:
     """Scan the demo app via the server and compare findings to ground truth."""
     settings = QuarrySettings()
     try:
         lines = asyncio.run(
             _benchmark_local_command(
-                settings, repo, ground_truth, target, dynamic_validation, live_prove
+                settings,
+                repo,
+                ground_truth,
+                target,
+                dynamic_validation,
+                live_prove,
+                artifact_root=artifact_root,
             )
         )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
-    except FileNotFoundError:
-        typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+    except FileNotFoundError as exc:
+        # A missing ground-truth file is the common case; anything else that
+        # raises FileNotFoundError (e.g. a checkout without prompts/) must not
+        # be mislabelled as the ground truth.
+        if not Path(ground_truth).is_file():
+            typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+        else:
+            typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     _echo_lines(lines)
+
+
+@benchmark_app.command("inventory")
+def benchmark_inventory(
+    prompts_dir: Annotated[
+        Path,
+        typer.Option(
+            "--prompts-dir",
+            help="Prompts root; hunt templates are read from <root>/hunt.",
+        ),
+    ] = Path("prompts"),
+    ground_truth_dir: Annotated[
+        Path,
+        typer.Option(
+            "--ground-truth-dir",
+            help="Directory of ground-truth manifests (*.json).",
+        ),
+    ] = Path("tests/golden/ground_truth"),
+) -> None:
+    """List every VulnerabilityClass as huntable and/or benchmarkable."""
+    rows = build_inventory(prompts_dir=prompts_dir, ground_truth_dir=ground_truth_dir)
+    _echo_lines(format_inventory_rows(rows))
+
+
+@benchmark_app.command("diff")
+def benchmark_diff(
+    a: Annotated[Path, typer.Option("--a", help="Path to run A's result.json artifact.")],
+    b: Annotated[Path, typer.Option("--b", help="Path to run B's result.json artifact.")],
+) -> None:
+    """Compare two BenchmarkRunResult artifacts field-by-field (deltas are B - A)."""
+    try:
+        run_a = BenchmarkRunResult.load(a)
+        run_b = BenchmarkRunResult.load(b)
+    except FileNotFoundError as exc:
+        typer.echo(f"Error: benchmark artifact not found: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        typer.echo(f"Error: invalid benchmark artifact: {exc}", err=True)
+        raise typer.Exit(1) from None
+    _echo_lines(diff_run_results(run_a, run_b).summary_lines())
 
 
 @benchmark_app.command("cybergym")
@@ -616,6 +708,8 @@ async def _benchmark_local_command(
     target: str | None,
     dynamic_validation: bool = False,
     live_prove: bool = False,
+    *,
+    artifact_root: Path = DEFAULT_BENCHMARK_ARTIFACT_ROOT,
 ) -> list[str]:
     if ground_truth_is_inside_repo(repo, ground_truth):
         raise ValueError(
@@ -644,13 +738,33 @@ async def _benchmark_local_command(
                 break
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
         runtime_seconds = time.monotonic() - started
+        scan = await client.get_scan(scan_id)
         findings = await client.get_findings(scan_id)
 
     final_findings = [
         finding for finding in findings["final_findings"] if isinstance(finding, FinalFinding)
     ]
     benchmark = compare(final_findings, truth, runtime_seconds=runtime_seconds)
-    return [f"scan_id={scan_id}", *benchmark.summary_lines()]
+    # bench 1.3/1.4: persist the full BenchmarkRunResult (metrics + provenance),
+    # not just the summary lines, so local runs are diffable field-by-field.
+    run_result = local_benchmark_run_result(
+        benchmark,
+        scan=scan,
+        config={
+            "repo": repo,
+            "ground_truth": ground_truth,
+            "target": target,
+            "dynamic_validation": dynamic_validation,
+            "live_prove": live_prove,
+            "vuln_classes": [vuln_class.value for vuln_class in truth_classes],
+        },
+    )
+    artifact_path = run_result.save(Path(artifact_root).expanduser().resolve())
+    return [
+        f"scan_id={scan_id}",
+        *benchmark.summary_lines(),
+        f"artifact={artifact_path}",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -713,10 +827,14 @@ def provenance_verify(
         expected_user_prompt_hash=user_hash,
     )
 
-    if ok and prompt_store is not None:
-        from quarry_artifacts.local import LocalArtifactStore
+    if ok and prompt_store is not None and inv.prompt_ref is not None:
+        from quarry_artifacts.store import resolve_artifact_store
 
-        stored_ok = verify_stored_prompt(inv, LocalArtifactStore(prompt_store))
+        # Route by the ref's URI scheme (ADR-024 §B) so a prompt stored under a
+        # network backend verifies too; the file scheme resolves through
+        # build_artifact_store().
+        store = resolve_artifact_store(inv.prompt_ref, root=str(prompt_store))
+        stored_ok = verify_stored_prompt(inv, store)
         if stored_ok is False:
             typer.echo(f"FAIL  {inv.id}  stored prompt bytes do not match record", err=True)
             raise typer.Exit(code=1)
@@ -829,3 +947,121 @@ def provenance_gc_run(
         return
     for scan_id in reclaimed:
         typer.echo(scan_id)
+
+
+# ---------------------------------------------------------------------------
+# quarry plugin sub-commands
+# ---------------------------------------------------------------------------
+
+
+@plugin_app.command("list")
+def plugin_list() -> None:
+    """List every installed plugin (all types) with name, type, and version.
+
+    Context-injector plugins additionally show their attack classes and
+    priority. Loads the entry-points registry locally — no server required.
+    """
+    plugins = sorted(load_plugins(), key=lambda p: p.name)
+    if not plugins:
+        typer.echo("No plugins installed.")
+        return
+    typer.echo("name\tplugin_type\tversion\tattack_classes\tpriority")
+    for plugin in plugins:
+        attack_classes = ""
+        priority = ""
+        if isinstance(plugin, ContextInjectorPlugin):
+            attack_classes = ",".join(sorted(cls.value for cls in plugin.attack_classes))
+            priority = str(plugin.priority)
+        typer.echo(
+            f"{plugin.name}\t{plugin.plugin_type.value}\t{plugin.version}\t"
+            f"{attack_classes}\t{priority}"
+        )
+
+
+@plugin_app.command("show")
+def plugin_show(name: Annotated[str, typer.Argument(help="Plugin name to inspect")]) -> None:
+    """Print one plugin's protocol attributes.
+
+    Every plugin prints name, version, and plugin_type. Context-injector
+    plugins additionally print attack_classes, priority, and the inject_context
+    signature/docstring. A missing plugin exits 1.
+    """
+    found = {plugin.name: plugin for plugin in load_plugins()}
+    plugin = found.get(name)
+    if plugin is None:
+        typer.echo(f"Error: no installed plugin named {name!r}", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"name: {plugin.name}")
+    typer.echo(f"version: {plugin.version}")
+    typer.echo(f"plugin_type: {plugin.plugin_type.value}")
+    if isinstance(plugin, ContextInjectorPlugin):
+        attack_classes = ", ".join(sorted(cls.value for cls in plugin.attack_classes))
+        typer.echo(f"attack_classes: {attack_classes}")
+        typer.echo(f"priority: {plugin.priority}")
+        typer.echo(f"inject_context: {_inject_context_summary(plugin)}")
+
+
+def _inject_context_summary(plugin: ContextInjectorPlugin) -> str:
+    """Render the inject_context signature plus the first docstring line."""
+    method = plugin.inject_context
+    signature = str(inspect.signature(method))
+    doc = inspect.getdoc(method) or ""
+    first_line = doc.splitlines()[0] if doc else ""
+    if first_line:
+        return f"inject_context{signature} — {first_line}"
+    return f"inject_context{signature}"
+
+
+# ---------------------------------------------------------------------------
+# quarry context-injector sub-commands
+# ---------------------------------------------------------------------------
+
+
+@ci_app.command("preview")
+def context_injector_preview(
+    attack_class: Annotated[
+        str,
+        typer.Option("--attack-class", help="Vulnerability class to preview (e.g. ssti)."),
+    ],
+    repo_type: Annotated[
+        str,
+        typer.Option(
+            "--repo-type",
+            help="Repository type plugins target (e.g. template-heavy, saas-multitenant).",
+        ),
+    ],
+) -> None:
+    """Dry-run context-injector assembly for an attack class and repo type.
+
+    Loads the context-injector plugins, calls assemble_domain_context with a
+    synthetic task, and prints the assembled domain context plus the names of
+    the plugins that contributed. Loads plugins locally — no server required.
+    """
+    from quarry.schemas import AgentTask
+    from quarry_plugins.budget import assemble_domain_context
+
+    try:
+        attack_class_value = VulnerabilityClass(attack_class)
+    except ValueError:
+        valid = ", ".join(sorted(cls.value for cls in VulnerabilityClass))
+        typer.echo(
+            f"Error: unknown attack class {attack_class!r}. Valid classes: {valid}",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+    injectors: list[ContextInjectorPlugin] = [
+        plugin for plugin in load_plugins() if isinstance(plugin, ContextInjectorPlugin)
+    ]
+    task = AgentTask(
+        id="preview",
+        scan_id="preview",
+        role="hunter",
+        task_name="context-injector-preview",
+        scope="preview",
+        status="pending",
+        created_at=datetime.now(UTC),
+    )
+    text, names = assemble_domain_context(injectors, attack_class_value, task, repo_type)
+    typer.echo(text)
+    typer.echo("Contributing plugins: " + (", ".join(names) if names else "(none)"))

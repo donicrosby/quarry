@@ -349,6 +349,29 @@ class QuarryRepository:
         with session_scope(self.engine) as session:
             return Scan.model_validate_json(_get_scan_record(session, scan_id).scan_json)
 
+    def max_scan_ordinal_for_repo(self, repo_path: str) -> int:
+        """Highest ``scan_ordinal`` recorded across scans of the same repo.
+
+        The durable cross-scan ordinal source (versioned-handoff-artifacts):
+        each scan creates a fresh Target row, so target id is not stable across
+        scans — the repo path is the durable target identity. Scans whose
+        metadata lacks the stamp (or carry a non-int value) count as 0.
+        """
+        with session_scope(self.engine) as session:
+            records = session.scalars(
+                select(ScanRecord).where(ScanRecord.target_repo_path == repo_path)
+            ).all()
+            highest = 0
+            for record in records:
+                try:
+                    scan = Scan.model_validate_json(record.scan_json)
+                except Exception:
+                    continue
+                value = scan.metadata.get("scan_ordinal")
+                if isinstance(value, int) and value > highest:
+                    highest = value
+            return highest
+
     def load_candidate_findings(self, scan_id: str) -> list[CandidateFinding]:
         with session_scope(self.engine) as session:
             records = session.scalars(

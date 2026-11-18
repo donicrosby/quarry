@@ -207,6 +207,10 @@ class ArtifactKind(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
+    # versioned-handoff-artifacts: handoff artifacts addressable through the same
+    # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
+    ARCHITECTURE_DOC = "architecture_doc"
+    HUNT_HANDOFF = "hunt_handoff"
 
 
 class RedactionStatus(StrEnum):
@@ -229,6 +233,10 @@ def _empty_source_refs() -> list[SourceRef]:
 
 
 def _empty_artifact_refs() -> list[ArtifactRef]:
+    return []
+
+
+def _empty_candidate_findings() -> list[CandidateFinding]:
     return []
 
 
@@ -507,6 +515,11 @@ class ModelPanelEntry(BaseModel):
     # module, so the reverse would be circular). Reconstructed into ModelTier by
     # panel_json_for_role when building the per-role RoleConfig for the worker.
     tiers: list[dict[str, Any]] = Field(default_factory=_empty_tier_dicts)
+    # Per-role context-window enforcement (hunter-context-reset), frozen with the
+    # rest of the panel so the worker's loop sees the scan's configured limit.
+    # None = no limit (unbounded conversation history).
+    context_window_tokens: int | None = None
+    context_window_threshold: float = 0.8
 
 
 class ScopeExclusion(BaseModel):
@@ -757,6 +770,10 @@ class WorkflowEvent(BaseModel):
       ``agent.reasoning_rejected`` — emitted when a retry is consumed or the loop halts
         with ``reasoning_rejected``. Payload: ``agent_kind``, ``iteration``, ``tool_name``,
         ``failed_checks``, ``retries_remaining``.
+      ``agent.context_reset`` — emitted when the loop compresses history after crossing
+        the role's context-window threshold (hunter-context-reset). Payload: ``agent_kind``,
+        ``iteration``, ``tokens_before``, ``tokens_after``, ``turns_compressed``,
+        ``strategy``.
 
     All ``agent.*`` payloads are scrubbed before emission. Raw ``args`` and full reasoning
     text are never included in the payload; only the scrubbed ``reasoning_summary`` (hypothesis
@@ -914,6 +931,11 @@ class CoverageLedger(BaseModel):
     file_coverage: list[ProductionFileAccounting] = Field(
         default_factory=_empty_production_file_accounting
     )
+    # versioned-handoff-artifacts: version stamps make every ledger uniquely
+    # identifiable and diffable across scans (ADR-026 rule 6). Both default to 1
+    # so ledgers serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
     created_at: datetime
 
     def file_gap_paths(self) -> list[str]:
@@ -928,6 +950,12 @@ class GroundTruthFinding(BaseModel):
     route: str | None = None
     severity: Severity
     expected_fingerprint_hint: str | None = None
+    # Planted-regression manifests flag the vulns they seed so the benchmark can
+    # report recall drops on exactly those, and record the proof the harness is
+    # expected to produce (e.g. "command_output", "file_read"). Both default off
+    # so pre-existing fixtures stay valid.
+    planted: bool = False
+    expected_proof_type: str | None = None
 
 
 class ModelInvocation(BaseModel):
@@ -1230,6 +1258,52 @@ class ArchitectureDoc(BaseModel):
     build_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
     attack_surface_summary: str = ""
     transcript_refs: list[str] = Field(default_factory=_empty_strings)
+    # versioned-handoff-artifacts: version stamps (see CoverageLedger). Default to
+    # 1 so docs serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+
+
+class HuntHandoff(BaseModel):
+    """Structured per-round hunt handoff (ADR-026 rule 6 — handoff over compaction).
+
+    Records what a hunt round covered, what it found, what tasks remain for the
+    next round, and any unproven hypotheses. Together with the ArchitectureDoc
+    and CoverageLedger it forms the cold-start contract: a fresh agent process
+    given only these artifacts (plus the scan id) can resume a hunt without
+    access to Temporal workflow state, in-memory data, or conversation history.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    scan_id: str
+    workspace_id: str
+    round_number: int
+    stage: Literal["HUNT"] = "HUNT"
+    covered_scope_units: list[str] = Field(default_factory=_empty_strings)
+    candidate_finding_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_count: int = 0
+    open_hypotheses: list[str] = Field(default_factory=_empty_strings)
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+    created_at: datetime
+
+
+class ContextResetEvent(BaseModel):
+    """Audit record of one agent-loop history reset (hunter-context-reset).
+
+    Recorded on the iteration's ``AgentStep.context_reset`` and emitted as an
+    ``agent.context_reset`` workflow event, so the reset survives the loop without
+    the conversation history it replaced.
+    """
+
+    iteration: int
+    tokens_before: int
+    tokens_after: int
+    turns_compressed: int
+    strategy: str
 
 
 class AgentStep(BaseModel):
@@ -1260,6 +1334,9 @@ class AgentStep(BaseModel):
     # None when the iteration had no proposed_actions (e.g. a pure tool-execution turn or
     # when the iteration ended in reasoning_rejected before any action was accepted).
     reasoning_summary: str | None = None
+    # hunter-context-reset: set on the iteration whose completion crossed the role's
+    # context-window threshold and folded the older turns into a summary message.
+    context_reset: ContextResetEvent | None = None
 
 
 def _empty_agent_steps() -> list[AgentStep]:
@@ -1403,6 +1480,111 @@ class TargetEndpoint(BaseModel):
     base_path: str = "/"
 
 
+# ---------------------------------------------------------------------------
+# Per-destination-set egress policy (ADR-024 §A — sandbox network containment)
+# ---------------------------------------------------------------------------
+
+
+class DestinationSet(BaseModel):
+    """One named category of outbound destinations for a sandbox egress policy.
+
+    A destination set groups the domains and IPs that belong to a single
+    capability (``target-host``, ``canary-listener``, …).  Every destination the
+    sandbox may reach must appear in some set; the policy denies all else.  The
+    model is pure data — resolution to IPs happens in ``quarry.egress``.
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_domains: list[str] = Field(default_factory=_empty_strings)
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_destination_sets() -> list[DestinationSet]:
+    return []
+
+
+class EgressPolicy(BaseModel):
+    """An unresolved destination-set policy for sandbox egress.
+
+    Carries named :class:`DestinationSet` entries; domains are resolved to IPs
+    once at policy construction (see ``quarry.egress.resolve_egress_policy``).
+    ``deny_all_else`` defaults to True — anything not in a declared set is
+    refused at the sandbox tier.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[DestinationSet] = Field(default_factory=_empty_destination_sets)
+    deny_all_else: bool = True
+
+    def is_empty(self) -> bool:
+        """True when the policy declares no reachable destination."""
+        return not any(ds.allowed_domains or ds.allowed_ips for ds in self.destination_sets)
+
+
+class ResolvedDestinationSet(BaseModel):
+    """A :class:`DestinationSet` with every domain resolved to pinned IPs.
+
+    ``allowed_ips`` is the union of the set's declared IPs and the IPs each
+    domain resolved to at construction time.  The IPs are frozen for the policy
+    lifetime — re-resolution is rejected (DNS-rebinding guard).
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_resolved_destination_sets() -> list[ResolvedDestinationSet]:
+    return []
+
+
+class ResolvedEgressPolicy(BaseModel):
+    """An :class:`EgressPolicy` with all domains resolved to pinned IPs.
+
+    This is what every sandbox tier enforces: Tier 2 attaches the container to
+    a restricted network carrying only these destinations; Tier 3 renders the
+    IPs as NetworkPolicy egress rules.  ``resolution_frozen`` records that the
+    IP set is final — no destination is re-resolved during execution.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[ResolvedDestinationSet] = Field(
+        default_factory=_empty_resolved_destination_sets
+    )
+    deny_all_else: bool = True
+    resolution_frozen: bool = True
+
+    @model_validator(mode="after")
+    def _require_frozen(self) -> ResolvedEgressPolicy:
+        """A resolved policy is frozen by definition — refuse an unfrozen one.
+
+        Enforcement tiers trust the pinned IPs; a policy that was never frozen
+        could still be re-resolved, defeating the DNS-rebinding guard.
+        """
+        if not self.resolution_frozen:
+            msg = "ResolvedEgressPolicy must carry resolution_frozen=True"
+            raise ValueError(msg)
+        return self
+
+    def all_allowed_ips(self) -> list[str]:
+        """Union of every set's pinned IPs, de-duplicated and sorted."""
+        ips: list[str] = []
+        for ds in self.destination_sets:
+            for ip in ds.allowed_ips:
+                if ip not in ips:
+                    ips.append(ip)
+        return sorted(ips)
+
+    def is_empty(self) -> bool:
+        """True when no destination is reachable (empty policy ⇒ no egress)."""
+        return not self.all_allowed_ips()
+
+
 class HttpRequestSpec(BaseModel):
     """The HTTP request a dynamic_validate or prove agent proposes.
 
@@ -1446,6 +1628,25 @@ class HttpResponseCapture(BaseModel):
     # captures construct without it and evaluators treat a missing body as
     # non-corroboration, never an error.
     body_artifact_key: str | None = None
+    # Deterministic session-token/JWT/cookie analysis, attached in-activity by
+    # ``http_request_activity`` ONLY when the request carried an ``auth_profile``
+    # (session-jwt-cookie-analysis). None for unauthenticated captures and for
+    # legacy captures; the workflow persists ``findings`` through the existing
+    # ``persist-scan-state`` path.
+    session_token_analysis: SessionTokenAnalysisResult | None = None
+
+
+class SessionTokenAnalysisResult(BaseModel):
+    """Emitted session-token analysis attached to an auth-related capture.
+
+    Carries the candidate findings produced by
+    ``quarry_activities.session_analysis.analyze_session_tokens`` for one captured
+    response. Findings are placeholder-redacted (never the raw token/cookie value)
+    and fingerprinted deterministically on (artifact ref, check name, token index),
+    so replaying the same capture yields the same finding ids.
+    """
+
+    findings: list[CandidateFinding] = Field(default_factory=_empty_candidate_findings)
 
 
 class DynamicEvidenceLink(BaseModel):

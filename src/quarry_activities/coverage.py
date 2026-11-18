@@ -9,7 +9,6 @@ surfaced in the report so coverage gaps are never hidden.
 import json
 from contextlib import suppress
 from datetime import datetime
-from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from uuid import uuid4
@@ -24,11 +23,11 @@ from quarry.schemas import (
     FileManifestEntry,
     ProductionFileAccounting,
     ProductionFileStatus,
-    RedactionStatus,
     VulnerabilityClass,
     utc_now,
 )
 from quarry_activities.inputs import BuildCoverageLedgerInput, BuildCoverageLedgerOutput
+from quarry_artifacts.local import LocalArtifactStore
 
 # ---------------------------------------------------------------------------
 # Proactive production-file accounting (candidate-precision-and-calibration).
@@ -220,6 +219,8 @@ def build_coverage_ledger(
     finding_file_paths: list[str] | None = None,
     id: str | None = None,
     created_at: Any = None,
+    scan_ordinal: int = 1,
+    artifact_version: int = 1,
 ) -> CoverageLedger:
     """Build a coverage ledger from already-computed scan facts (no I/O).
 
@@ -251,26 +252,29 @@ def build_coverage_ledger(
         vuln_classes_completed=completed_vuln_classes or [],
         skipped_items=skipped_items or [],
         file_coverage=file_coverage,
+        scan_ordinal=scan_ordinal,
+        artifact_version=artifact_version,
         created_at=created_at if isinstance(created_at, datetime) else utc_now(),
     )
 
 
 def write_coverage_artifact(ledger: CoverageLedger, artifact_root: Path | str) -> ArtifactRef:
-    """Persist a coverage ledger as a JSON artifact and return its ArtifactRef."""
-    ledger_path = Path(artifact_root) / ledger.scan_id / f"coverage-{ledger.id}.json"
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    data = ledger.model_dump_json().encode("utf-8")
-    ledger_path.write_bytes(data)
-    return ArtifactRef(
-        id=str(uuid4()),
-        uri=f"file://{ledger_path}",
+    """Persist a coverage ledger as a versioned JSON artifact and return its ArtifactRef.
+
+    Routed through ``LocalArtifactStore.put_json`` (versioned-handoff-artifacts
+    task 2.1) rather than a direct filesystem write, so every handoff artifact
+    shares one write path. The version stamps live inside the ledger payload and
+    are mirrored onto the ArtifactRef metadata for cross-scan diffing.
+    """
+    store = LocalArtifactStore(artifact_root)
+    return store.put_json(
+        f"{ledger.scan_id}/coverage-{ledger.id}.json",
+        ledger,
         kind=ArtifactKind.COVERAGE_LEDGER,
-        content_type="application/json",
-        sha256=sha256(data).hexdigest(),
-        size_bytes=len(data),
-        redaction_status=RedactionStatus.NOT_REQUIRED,
-        created_at=utc_now(),
-        metadata={"path": str(ledger_path)},
+        metadata={
+            "scan_ordinal": str(ledger.scan_ordinal),
+            "artifact_version": str(ledger.artifact_version),
+        },
     )
 
 
@@ -289,6 +293,8 @@ def build_coverage_ledger_activity(
         agent_tasks_total=input.agent_tasks_total,
         agent_tasks_scanned=input.agent_tasks_scanned,
         skipped_items=_coverage_gaps_from_json(input.scan_id, input.skipped_json),
+        scan_ordinal=input.scan_ordinal,
+        artifact_version=input.artifact_version,
     )
     artifact_ref = write_coverage_artifact(ledger, input.artifact_root)
     return BuildCoverageLedgerOutput(

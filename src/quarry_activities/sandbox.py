@@ -1,33 +1,44 @@
-"""SandboxBackend Protocol and local-dev implementation (ADR-017 §5).
+"""SandboxBackend Protocol and tier implementations (ADR-017 §5, ADR-024 §A).
 
-Three tiers are defined here; only Tier 1 is implemented:
+Three tiers are defined here; only Tier 1 runs in-process today:
 
-  Tier 1  LocalSubprocessSandbox  — subprocess + POSIX rlimits (this file, build now)
-  Tier 2  ContainerSandbox        — throwaway container per invocation  (deferred, stub)
+  Tier 1  LocalSubprocessSandbox  — subprocess + POSIX rlimits (dev/wiring only)
+  Tier 2  ContainerSandbox        — throwaway container on a restricted network
   Tier 3  K8sJobSandbox           — K8s Job + NetworkPolicy (deferred, stub)
 
-**Isolation caveat (Tier 1):**
-LocalSubprocessSandbox provides *resource* containment (RLIMIT_CPU / RLIMIT_AS / RLIMIT_NPROC)
-and *no-network-by-convention* (scrubbed env, no proxy vars, target_endpoint=None means no
-egress is intended), but it does NOT provide a kernel-enforced network namespace on
-macOS/Colima.  Use it for wiring/correctness tests only.  Production network containment is
-ContainerSandbox (``--network none``) or K8sJobSandbox + NetworkPolicy.
+**Egress model:** every tier takes an ``egress_policy: ResolvedEgressPolicy | None``
+— a destination-set policy with deny-all-else.  A ``None`` or empty policy means
+"no egress intended".  The policy is resolved (domains pinned to IPs) once before
+it reaches a tier, so no tier ever re-resolves a destination (DNS-rebinding guard,
+see :mod:`quarry.egress`).
 
-See ADR-017 §5 and ADR-022 for the full tier rationale.
+**Isolation caveat (Tier 1):** LocalSubprocessSandbox provides *resource*
+containment (RLIMIT_CPU / RLIMIT_AS / RLIMIT_NPROC) and no-network-by-convention,
+but it does NOT provide a kernel-enforced network namespace on macOS/Colima
+(ADR-024 §A: "dev/wiring only").  It therefore *refuses* any non-empty egress
+policy with :class:`~quarry.egress.EgressPolicyError` rather than pretending to
+enforce one.  Production network containment is ContainerSandbox (Tier 2) or
+K8sJobSandbox + NetworkPolicy (Tier 3).
+
+See ADR-017 §5 and ADR-024 §A for the full tier rationale.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import ipaddress
+import json
 import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel
 
-from quarry.schemas import SandboxExecSpec, TargetEndpoint
+from quarry.egress import EgressPolicyError
+from quarry.schemas import ResolvedEgressPolicy, SandboxExecSpec
 
 # ---------------------------------------------------------------------------
 # Security error
@@ -82,7 +93,7 @@ class SandboxBackend(Protocol):
         *,
         work_dir: Path,
         resolved_env: dict[str, str],
-        target_endpoint: TargetEndpoint | None,
+        egress_policy: ResolvedEgressPolicy | None,
     ) -> SandboxResult: ...
 
 
@@ -221,9 +232,11 @@ def _decode_timeout_stream(raw: bytes | str | None) -> str:
 class LocalSubprocessSandbox:
     """Tier-1 sandbox: subprocess with POSIX rlimits.
 
-    Provides resource containment and no-network-by-convention.
-    Does NOT provide a kernel-enforced network namespace on macOS/Colima.
-    Use for wiring/correctness tests only.  See module docstring for caveats.
+    Provides resource containment and no-network-by-convention.  Does NOT provide
+    a kernel-enforced network namespace on macOS/Colima, so it cannot enforce a
+    destination-set policy: any non-empty ``egress_policy`` is rejected with
+    :class:`~quarry.egress.EgressPolicyError`.  Use for wiring/correctness tests
+    only; production containment is Tier 2/3.  See module docstring.
     """
 
     def run(
@@ -232,9 +245,19 @@ class LocalSubprocessSandbox:
         *,
         work_dir: Path,
         resolved_env: dict[str, str],
-        target_endpoint: TargetEndpoint | None,
+        egress_policy: ResolvedEgressPolicy | None,
     ) -> SandboxResult:
         """Execute spec.command inside work_dir and return captured output."""
+        if egress_policy is not None and not egress_policy.is_empty():
+            msg = (
+                "LocalSubprocessSandbox (Tier 1) cannot enforce a destination-set "
+                "egress policy — it has no kernel-enforced network namespace "
+                "(ADR-024 §A: dev/wiring only). Refusing a non-empty egress policy "
+                "rather than running with unrestricted egress. Use ContainerSandbox "
+                "(Tier 2) or K8sJobSandbox (Tier 3)."
+            )
+            raise EgressPolicyError(msg)
+
         self._validate_command(spec.command)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
         _stage_input_files(spec.input_files, work_dir)
@@ -289,8 +312,73 @@ class LocalSubprocessSandbox:
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — ContainerSandbox (deferred, production default)
+# Tier 2 — ContainerSandbox (production default)
 # ---------------------------------------------------------------------------
+
+#: Env var carrying the pinned destination IPs into the container for audit.
+EGRESS_ALLOWED_IPS_ENV = "QUARRY_EGRESS_ALLOWED_IPS"
+
+#: Prefix of the per-policy restricted Docker network name.
+EGRESS_NETWORK_PREFIX = "quarry-egress-"
+
+
+def egress_network_name(egress_policy: ResolvedEgressPolicy | None) -> str | None:
+    """Return the restricted network name for *egress_policy*, or None.
+
+    None means "no egress": either no policy, or a policy whose destination sets
+    carry no pinned IPs.  The name is content-addressed by the sorted pinned IPs
+    so every run of the same policy reuses one restricted network.
+    """
+    if egress_policy is None or egress_policy.is_empty():
+        return None
+    digest = hashlib.sha256(",".join(egress_policy.all_allowed_ips()).encode("utf-8")).hexdigest()
+    return f"{EGRESS_NETWORK_PREFIX}{digest[:12]}"
+
+
+def _verify_internal_network(name: str, inspect_output: str) -> None:
+    """Fail closed unless *inspect_output* proves *name* is an internal bridge.
+
+    Docker network names are one global namespace, so an existing network with
+    the content-addressed name we expect cannot be trusted: an actor with
+    ``docker network create`` access can squat it with an externally routed
+    bridge and a naive reuse would grant the sandbox full egress.  Reuse is
+    therefore conditional on proof parsed from ``docker network inspect``: the
+    output must be a JSON array whose first entry is an object carrying
+    ``Internal: true`` (and, when present, ``Driver: "bridge"``).  Any mismatch,
+    missing field, or unparseable output raises :class:`~quarry.egress.EgressPolicyError`
+    rather than attaching to the network.
+    """
+    try:
+        parsed = json.loads(inspect_output)
+    except (json.JSONDecodeError, TypeError):
+        msg = (
+            f"refusing to reuse Docker network '{name}': `docker network inspect` "
+            "output was not valid JSON, so the network could not be verified as "
+            "--internal."
+        )
+        raise EgressPolicyError(msg) from None
+    if not isinstance(parsed, list) or not parsed or not isinstance(parsed[0], dict):
+        msg = (
+            f"refusing to reuse Docker network '{name}': `docker network inspect` "
+            "returned no inspectable network entry to verify."
+        )
+        raise EgressPolicyError(msg)
+    entry: dict[str, Any] = cast("dict[str, Any]", parsed[0])
+    if entry.get("Internal") is not True:
+        msg = (
+            f"refusing to reuse existing Docker network '{name}': it is not an "
+            "internal network (Internal != true). A pre-existing network with "
+            "the expected content-addressed name may have been squatted and "
+            "would grant the sandbox unrestricted egress."
+        )
+        raise EgressPolicyError(msg)
+    driver = entry.get("Driver")
+    if driver is not None and driver != "bridge":
+        msg = (
+            f"refusing to reuse existing Docker network '{name}': unexpected "
+            f"driver '{driver}' (expected 'bridge')."
+        )
+        raise EgressPolicyError(msg)
 
 
 def _kill_container(container_name: str) -> None:
@@ -310,24 +398,38 @@ def _kill_container(container_name: str) -> None:
 class ContainerSandbox:
     """Tier-2 sandbox: one throwaway container per invocation (Docker/Podman).
 
-    Provides real kernel isolation (``--network none`` for CLI prove) without
-    requiring Kubernetes.  The expected production default.
+    Provides real kernel isolation without requiring Kubernetes.  The expected
+    production default.
 
     Each ``run()`` call:
       1. Stages ``input_files`` into *work_dir*.
       2. Builds a ``docker run --rm`` command with:
-         - ``--network none`` when no *target_endpoint* (CLI prove).
+         - ``--network none`` when the egress policy is empty (no egress);
+         - otherwise ``--network <restricted>``: a dedicated **internal** Docker
+           network carrying only the policy's destination services.  An internal
+           network has no external route, so a compromised process can reach the
+           declared destinations and nothing else — enforced by the kernel, not
+           application code.  The network is created (idempotently) before the
+           container starts, and an existing network with the expected name is
+           reused **only after** being verified ``--internal`` (a squatted name
+           fails closed); the pinned IPs ride along as
+           ``QUARRY_EGRESS_ALLOWED_IPS`` for audit.
          - *work_dir* bind-mounted to the same path inside the container.
          - Only cleaned ``resolved_env`` forwarded (no proxy vars).
       3. Runs with a hard timeout cap and captures stdout/stderr.
       4. On timeout: kills the container then returns ``timed_out=True``.
       5. Caps and returns output as a :class:`SandboxResult`.
 
-    Live egress (Docker network attachment when *target_endpoint* is provided)
-    is deferred to the live-egress follow-on.  See ADR-022 §A.
-
     ``image`` defaults to ``python:3.12-slim``; override via constructor for
-    language-specific minimal runtime images (ADR-022 §A).
+    language-specific minimal runtime images (ADR-024 §A).
+
+    Known residual (accepted): the restricted network is content-addressed per
+    policy, so concurrent sandboxes with the *same* pinned ip-union share one
+    bridge and can see each other's L2 traffic.  Containers also keep Docker's
+    default caps (incl. ``NET_RAW``) because ping-based proof payloads need raw
+    sockets.  Reuse is deliberate — a per-run network would diverge from the
+    reviewed spec's reuse intent and break the live fixture that pre-creates the
+    content-addressed network.  See impl-review F2 (t_987a8d13).
     """
 
     # Default runtime image — minimal, no build toolchain.
@@ -342,13 +444,18 @@ class ContainerSandbox:
         *,
         work_dir: Path,
         resolved_env: dict[str, str],
-        target_endpoint: TargetEndpoint | None,
+        egress_policy: ResolvedEgressPolicy | None,
     ) -> SandboxResult:
         """Execute *spec* inside a throwaway Docker container."""
         _stage_input_files(spec.input_files, work_dir)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
         env = _build_safe_env(resolved_env)
         timeout = min(spec.timeout_seconds, HARD_TIMEOUT_SECONDS)
+
+        # Materialize the restricted network (if any) before the container runs.
+        network = egress_network_name(egress_policy)
+        if network is not None:
+            self._ensure_restricted_network(network)
 
         # Unique name so we can force-kill on timeout without ambiguity.
         container_name = f"quarry-prove-{uuid.uuid4().hex[:12]}"
@@ -357,7 +464,8 @@ class ContainerSandbox:
             work_dir=work_dir,
             resolved_cwd=resolved_cwd,
             env=env,
-            target_endpoint=target_endpoint,
+            egress_policy=egress_policy,
+            network=network,
             container_name=container_name,
         )
 
@@ -397,6 +505,53 @@ class ContainerSandbox:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _ensure_restricted_network(self, name: str) -> None:
+        """Ensure the internal restricted network *name* exists and stays internal.
+
+        Idempotent by design: the name is content-addressed by the policy's
+        pinned IPs, so every run of the same policy reuses one restricted
+        network (its membership *is* the egress allow-list, so reuse is
+        intended).  Reuse is NOT blind, however.  Docker network names live in a
+        single global namespace, so an actor able to run ``docker network
+        create`` can pre-create the expected ``quarry-egress-*`` name as an
+        *external* bridge; reusing it unverified would silently hand the sandbox
+        full outbound egress, defeating the containment primitive.  A present
+        network is therefore only reused after it proves it is ``--internal``
+        (:func:`_verify_internal_network`); a mismatch fails closed with
+        :class:`~quarry.egress.EgressPolicyError` — never a silent reuse.
+
+        A failing ``inspect`` (absent, or Docker unavailable) is left for
+        ``docker run`` to surface when it tries to attach; there is no network
+        to verify in that case.
+        """
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            inspect = subprocess.run(
+                ["docker", "network", "inspect", name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if inspect.returncode == 0:
+                _verify_internal_network(name, inspect.stdout)
+                return
+            # Absent — create it internal, then re-inspect and verify so a
+            # network that appears in the create→attach window (a name-squat
+            # race) is still checked rather than trusted.
+            subprocess.run(
+                ["docker", "network", "create", "--internal", name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            reinspect = subprocess.run(
+                ["docker", "network", "inspect", name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if reinspect.returncode == 0:
+                _verify_internal_network(name, reinspect.stdout)
+
     def _build_docker_cmd(
         self,
         *,
@@ -404,19 +559,22 @@ class ContainerSandbox:
         work_dir: Path,
         resolved_cwd: Path,
         env: dict[str, str],
-        target_endpoint: TargetEndpoint | None,
+        egress_policy: ResolvedEgressPolicy | None,
+        network: str | None,
         container_name: str,
     ) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", container_name]
 
-        if target_endpoint is None:
-            # CLI prove: deny all egress with kernel-enforced network namespace.
+        if network is None:
+            # No egress: kernel-enforced network namespace with no routes.
             cmd += ["--network", "none"]
-        # else: live egress wiring (Docker network attachment) is deferred to
-        # the live-egress follow-on.  The target_endpoint parameter is accepted
-        # but not yet wired.
-        # TODO(live-egress): attach container to a restricted Docker network when
-        # target_endpoint is set (ref: ADR-017, ADR-022 §A).
+        else:
+            # Restricted internal network: only the declared destinations are
+            # reachable; the network has no external route.  The pinned IPs are
+            # carried into the container for audit.
+            allowed = ",".join(egress_policy.all_allowed_ips()) if egress_policy else ""
+            cmd += ["--network", network]
+            cmd += ["-e", f"{EGRESS_ALLOWED_IPS_ENV}={allowed}"]
 
         # Bind-mount work_dir to the same path in the container so relative
         # resolved_cwd values remain valid inside the container.
@@ -438,13 +596,53 @@ class ContainerSandbox:
 # ---------------------------------------------------------------------------
 
 
+def _ip_block_cidr(ip: str) -> str:
+    """Render *ip* as a single-host CIDR block for a NetworkPolicy ``ipBlock``."""
+    addr = ipaddress.ip_address(ip)
+    return f"{ip}/{addr.max_prefixlen}"
+
+
+def build_network_policy(
+    egress_policy: ResolvedEgressPolicy,
+    *,
+    name: str = "quarry-sandbox-egress",
+    pod_labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Render *egress_policy* as a Kubernetes NetworkPolicy manifest (Tier 3).
+
+    One egress rule per destination set, each listing the set's pinned IPs as
+    single-host ``ipBlock`` entries.  ``policyTypes: ["Egress"]`` with a
+    ``podSelector`` makes the policy default-deny: only the listed IPs are
+    reachable.  An empty policy yields an egress list with no allow rules — i.e.
+    deny-all egress.
+    """
+    egress_rules: list[dict[str, Any]] = []
+    for ds in egress_policy.destination_sets:
+        if not ds.allowed_ips:
+            continue
+        egress_rules.append(
+            {"to": [{"ipBlock": {"cidr": _ip_block_cidr(ip)}} for ip in ds.allowed_ips]}
+        )
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": name},
+        "spec": {
+            "podSelector": {"matchLabels": pod_labels or {}},
+            "policyTypes": ["Egress"],
+            "egress": egress_rules,
+        },
+    }
+
+
 class K8sJobSandbox:
-    """Tier-3 sandbox: Kubernetes Job + NetworkPolicy (deny-all egress).
+    """Tier-3 sandbox: Kubernetes Job + NetworkPolicy (destination-set egress).
 
     Reserved for hostile multi-tenant isolation.  Most deployments stop at
     Tier 2 (ContainerSandbox).
 
-    Not implemented yet.  See ADR-017 §5 and ADR-022 §A.
+    ``run`` is not implemented yet (ADR-017 §5, ADR-024 §A) — the manifest that
+    the deferred tier will apply is available now via :func:`build_network_policy`.
     """
 
     def run(
@@ -453,12 +651,22 @@ class K8sJobSandbox:
         *,
         work_dir: Path,
         resolved_env: dict[str, str],
-        target_endpoint: TargetEndpoint | None,
+        egress_policy: ResolvedEgressPolicy | None,
     ) -> SandboxResult:
         raise NotImplementedError(
             "K8sJobSandbox is deferred to the CLI hunting follow-on. "
-            "See ADR-017 §5, ADR-022 §A, and feat/cli-hunting-path."
+            "See ADR-017 §5, ADR-024 §A, and feat/cli-hunting-path."
         )
+
+    def build_network_policy(
+        self,
+        egress_policy: ResolvedEgressPolicy,
+        *,
+        name: str = "quarry-sandbox-egress",
+        pod_labels: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Render the tier's egress NetworkPolicy for *egress_policy*."""
+        return build_network_policy(egress_policy, name=name, pod_labels=pod_labels)
 
 
 # ---------------------------------------------------------------------------

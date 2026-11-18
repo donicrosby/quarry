@@ -59,6 +59,38 @@ jobs:
       - name: vulture
         run: uvx --from 'vulture==2.16' vulture src ci/vulture_allowlist.py --min-confidence 60
 
+  # Benchmark gate: the benchmark suite must be runnable in CI. Tests only —
+  # no absolute-score thresholds (spec non-goal: metrics first, thresholds
+  # later). A score shift is reported by `quarry benchmark diff` for a human to
+  # judge; it must never fail the build on its own.
+  benchmark-gate:
+    name: benchmark gate (suite runnable, no score thresholds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - run: uv sync --group dev --frozen
+      - name: fixture inventory (huntable vs benchmarkable)
+        run: uv run quarry benchmark inventory
+      - name: pytest (benchmark suite)
+        run: >
+          uv run pytest tests/unit/test_benchmark.py
+          tests/unit/test_benchmark_artifacts.py
+          tests/unit/test_benchmark_cli.py
+          tests/unit/test_benchmark_inventory.py
+          tests/unit/test_benchmark_no_context_injection.py
+          tests/unit/test_benchmark_no_integrations.py
+          tests/unit/test_benchmark_web_fixtures.py
+          tests/unit/test_benchmark_planted_fixtures.py
+          -q --dist loadfile
+      - name: pytest (planted-target launch + scoring, bench 2.3)
+        run: uv run pytest tests/integration/test_benchmark_planted_target.py -q -n 0
+
   # Unit + golden suite, split across 4 free 4-core runners by pytest-shard
   # (deterministic hash split, no stored durations state to rot). Same
   # --dist loadfile per shard: file-affinity for sandbox-fork tests is preserved
