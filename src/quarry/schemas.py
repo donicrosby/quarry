@@ -512,6 +512,11 @@ class ModelPanelEntry(BaseModel):
     # module, so the reverse would be circular). Reconstructed into ModelTier by
     # panel_json_for_role when building the per-role RoleConfig for the worker.
     tiers: list[dict[str, Any]] = Field(default_factory=_empty_tier_dicts)
+    # Per-role context-window enforcement (hunter-context-reset), frozen with the
+    # rest of the panel so the worker's loop sees the scan's configured limit.
+    # None = no limit (unbounded conversation history).
+    context_window_tokens: int | None = None
+    context_window_threshold: float = 0.8
 
 
 class ScopeExclusion(BaseModel):
@@ -762,6 +767,10 @@ class WorkflowEvent(BaseModel):
       ``agent.reasoning_rejected`` — emitted when a retry is consumed or the loop halts
         with ``reasoning_rejected``. Payload: ``agent_kind``, ``iteration``, ``tool_name``,
         ``failed_checks``, ``retries_remaining``.
+      ``agent.context_reset`` — emitted when the loop compresses history after crossing
+        the role's context-window threshold (hunter-context-reset). Payload: ``agent_kind``,
+        ``iteration``, ``tokens_before``, ``tokens_after``, ``turns_compressed``,
+        ``strategy``.
 
     All ``agent.*`` payloads are scrubbed before emission. Raw ``args`` and full reasoning
     text are never included in the payload; only the scrubbed ``reasoning_summary`` (hypothesis
@@ -1279,6 +1288,21 @@ class HuntHandoff(BaseModel):
     created_at: datetime
 
 
+class ContextResetEvent(BaseModel):
+    """Audit record of one agent-loop history reset (hunter-context-reset).
+
+    Recorded on the iteration's ``AgentStep.context_reset`` and emitted as an
+    ``agent.context_reset`` workflow event, so the reset survives the loop without
+    the conversation history it replaced.
+    """
+
+    iteration: int
+    tokens_before: int
+    tokens_after: int
+    turns_compressed: int
+    strategy: str
+
+
 class AgentStep(BaseModel):
     """One iteration recorded inside an agent loop."""
 
@@ -1307,6 +1331,9 @@ class AgentStep(BaseModel):
     # None when the iteration had no proposed_actions (e.g. a pure tool-execution turn or
     # when the iteration ended in reasoning_rejected before any action was accepted).
     reasoning_summary: str | None = None
+    # hunter-context-reset: set on the iteration whose completion crossed the role's
+    # context-window threshold and folded the older turns into a summary message.
+    context_reset: ContextResetEvent | None = None
 
 
 def _empty_agent_steps() -> list[AgentStep]:

@@ -239,6 +239,8 @@ def _panel_for_scan_role(
                 rpm=entry.rate_limit_rpm,
                 turn_timeout_seconds=entry.turn_timeout_seconds,
                 tiers=tiers,
+                context_window_tokens=entry.context_window_tokens,
+                context_window_threshold=entry.context_window_threshold,
             ),
         )
     return _resolve_panel_selection(

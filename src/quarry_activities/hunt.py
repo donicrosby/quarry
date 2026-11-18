@@ -177,12 +177,19 @@ def hunt_impl(
     limiter: Any | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    context_window_tokens: int | None = None,
+    context_window_threshold: float = 0.8,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
     Returns ``(findings, coverage_gaps)``. Each ``HunterGap`` carries the area the
     hunter did not fully cover, its reason, and this hunter's ``vuln_class`` — so
     gapfill can turn it straight into a targeted re-hunt task.
+
+    ``context_window_tokens`` / ``context_window_threshold`` are the hunt role's
+    ``RoleConfig`` values, handed straight to ``run_agent_loop`` so a long-running
+    hunter's history is compressed instead of growing without bound. ``None``
+    (the default here) leaves the history unbounded.
 
     KB consumption by reference (cpc slice 3): when *kb_root_index_key* is
     supplied (the reference the kb-recon stage recorded on the scan metadata),
@@ -279,6 +286,8 @@ def hunt_impl(
         turn_timeout_seconds=turn_timeout_seconds,
         tool_call_cap=tool_call_cap,
         limiter=limiter,
+        context_window_tokens=context_window_tokens,
+        context_window_threshold=context_window_threshold,
     )
 
     if artifact_root is not None:
@@ -452,6 +461,8 @@ def _hunt_activity_impl(
         limiter=limiter,
         artifact_root=artifact_root,
         kb_root_index_key=effective_kb_key,
+        context_window_tokens=role_cfg.context_window_tokens,
+        context_window_threshold=role_cfg.context_window_threshold,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

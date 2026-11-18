@@ -33,6 +33,7 @@ ADR-020 re-prompt sub-loop:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from quarry.schemas import (
     AgentLoopResult,
     AgentStep,
     ArtifactKind,
+    ContextResetEvent,
     ProposedAction,
     ReasoningCheckResult,
 )
@@ -52,6 +54,7 @@ from quarry_artifacts.store import ArtifactStore, build_artifact_store
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import (
+    CHARS_PER_TOKEN,
     BudgetSpec,
     ModelMessage,
     ModelRequest,
@@ -63,6 +66,15 @@ from quarry_prompts.build_prompt import build_prompt
 from quarry_tools.errors import UnauthorizedToolError
 
 _log = logging.getLogger(__name__)
+
+# ── Context-window reset (hunter-context-reset) ──────────────────────────────
+# On reset the loop keeps the most recent ``_RESET_RECENT_TURNS`` assistant+user
+# turn pairs and folds every older turn into one deterministic summary message.
+_RESET_STRATEGY = "sliding_window"
+_RESET_RECENT_TURNS = 2
+# One-line cap on a turn's condensed tool-result observation. A verbose
+# read_file/grep output must not re-inflate the context the reset just shrank.
+_OBSERVATION_MAX_CHARS = 200
 
 
 def _hash_text(text: str) -> str:
@@ -133,6 +145,128 @@ def _wrap_tool_result(tool_name: str, output: str) -> str:
     """Wrap a tool result in <target_content> tags after scrubbing."""
     scrubbed = scrub(output).text
     return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
+
+
+def _estimate_tokens(messages: list[ModelMessage]) -> int:
+    """Estimate the token count of *messages* with the shared char/4 heuristic.
+
+    Mirrors ``quarry_plugins.budget.enforce_context_budget``: every message's full
+    content string is counted, then divided by ``CHARS_PER_TOKEN``. Deterministic
+    and dependency-free — a per-model tokenizer is out of scope (proposal Non-goals).
+    """
+    return sum(len(message.content) for message in messages) // CHARS_PER_TOKEN
+
+
+def _summarise_value(value: object) -> str:
+    """Render one summary field as a stable, single-line JSON literal."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return json.dumps(str(value), ensure_ascii=False)
+
+
+def _collect_structured_items(parsed: object, field: str) -> list[dict[str, Any]]:
+    """Collect one list-of-items field from a parsed model response.
+
+    ``hunt``'s response carries ``findings`` / ``coverage_gaps``; other roles'
+    response models simply have no such field, so a missing or non-list value
+    yields an empty list.
+    """
+    raw = getattr(parsed, field, None)
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in cast("list[object]", raw):
+        if isinstance(item, BaseModel):
+            items.append(item.model_dump(mode="json"))
+        elif isinstance(item, dict):
+            items.append({str(key): value for key, value in cast("dict[Any, Any]", item).items()})
+    return items
+
+
+def _condense_tool_results(tool_results: list[str]) -> str:
+    """Condense one turn's tool results into a single-line observation.
+
+    Keeps the first non-empty line of each result and caps the whole observation,
+    so a verbose ``read_file``/``grep`` output cannot re-inflate the context the
+    reset exists to shrink.
+    """
+    lines: list[str] = []
+    for result in tool_results:
+        first = next((line.strip() for line in result.splitlines() if line.strip()), "")
+        if first:
+            lines.append(first)
+    condensed = " | ".join(lines)
+    if len(condensed) > _OBSERVATION_MAX_CHARS:
+        condensed = condensed[: _OBSERVATION_MAX_CHARS - 3].rstrip() + "..."
+    return condensed
+
+
+def _build_reset_summary(
+    steps: list[AgentStep],
+    findings: list[dict[str, Any]],
+    gaps: list[dict[str, Any]],
+    observations: list[str],
+) -> str:
+    """Render the deterministic Markdown summary injected on a history reset.
+
+    Sections and keys are fixed so downstream parsers (gapfill, report) can extract
+    the compressed state without re-parsing conversation history. Every input is an
+    explicit parameter: this builder never reads raw history.
+    """
+    lines: list[str] = ["## Compressed context", "", "### Findings"]
+    for index, finding in enumerate(findings, start=1):
+        lines.append(
+            f"- finding {index}: title={_summarise_value(finding.get('title', ''))} "
+            f"component={_summarise_value(finding.get('affected_component', ''))} "
+            f"confidence={_summarise_value(finding.get('confidence', ''))} "
+            f"severity={_summarise_value(finding.get('severity', ''))} "
+            f"hypothesis={_summarise_value(finding.get('hypothesis', ''))}"
+        )
+    if not findings:
+        lines.append("- none")
+    lines.extend(["", "### Coverage Gaps"])
+    for index, gap in enumerate(gaps, start=1):
+        lines.append(
+            f"- gap {index}: area={_summarise_value(gap.get('area', ''))} "
+            f"reason={_summarise_value(gap.get('reason', ''))} "
+            f"vuln_class={_summarise_value(gap.get('vuln_class', ''))}"
+        )
+    if not gaps:
+        lines.append("- none")
+    lines.extend(["", "### Key Observations"])
+    for step in steps:
+        lines.append(
+            f"- step {step.iteration}: tools={_summarise_value(list(step.tool_calls))} "
+            f"reasoning={_summarise_value(step.reasoning_summary or '')}"
+        )
+    lines.extend(f"- {observation}" for observation in observations)
+    if not steps and not observations:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _reset_history(
+    history: list[ModelMessage],
+    system_prompt: str,
+    task_directive: str,
+    summary: str,
+    recent_n: int,
+) -> list[ModelMessage]:
+    """Rebuild *history* as [system, task directive, summary, ...recent turn pairs].
+
+    The task directive keeps its own message: the summary covers turn 1 onward, so
+    the pre-turn directive would otherwise be dropped by the reset.
+    """
+    retained = history[-2 * recent_n :] if recent_n > 0 else []
+    return [
+        ModelMessage(role="system", content=system_prompt),
+        ModelMessage(role="user", content=task_directive),
+        ModelMessage(role="user", content=summary),
+        *retained,
+    ]
 
 
 def _try_emit(
@@ -249,6 +383,13 @@ def run_agent_loop(
     # Per-tier cap on the total number of tool calls this loop may issue (MDASH
     # per-role caps, task 1.3).  ``None`` = bounded only by ``max_iterations``.
     tool_call_cap: int | None = None,
+    # Per-loop context-window enforcement (hunter-context-reset).  ``None`` = no
+    # limit: history grows unbounded exactly as before.  When set, the loop folds
+    # all but the most recent turns into a summary once the accumulated history
+    # reaches ``context_window_threshold`` of this limit.  The activity layer
+    # resolves both values from the role's ``RoleConfig``.
+    context_window_tokens: int | None = None,
+    context_window_threshold: float = 0.8,
     # Optional per-(provider, role) rate limiter (MDASH, design D5).  When set,
     # ``limiter.acquire()`` is called once per model turn before dispatch to
     # throttle to the role's configured rpm.  ``None`` = unthrottled.  The limiter
@@ -296,6 +437,19 @@ def run_agent_loop(
         payloads (``agent.action_proposed`` or ``agent.reasoning_rejected``). Raw
         ``args`` and unredacted reasoning text are never passed through the sink.
         Callers (activities) use this to persist ``WorkflowEvent`` rows to the scan DB.
+        When a context-window reset fires, the loop additionally emits
+        ``agent.context_reset`` with ``agent_kind``, ``iteration``, ``tokens_before``,
+        ``tokens_after``, ``turns_compressed`` and ``strategy``.
+    context_window_tokens:
+        Per-loop context-window limit in tokens (hunter-context-reset). ``None``
+        (the default) leaves history unbounded, exactly as before. When set, the
+        loop estimates the accumulated history with the shared char/4 heuristic
+        after each turn and, once it reaches ``context_window_threshold`` of the
+        limit, folds all but the most recent ``_RESET_RECENT_TURNS`` turns into a
+        deterministic summary message that enumerates every finding and coverage
+        gap seen in the compressed turns.
+    context_window_threshold:
+        Fraction of ``context_window_tokens`` at which a reset fires. Default 0.8.
 
     Returns
     -------
@@ -315,6 +469,13 @@ def run_agent_loop(
     final_answer: BaseModel | None = None
     ctx = task_context or {}
     parsed: Any = None  # last parsed model response; referenced after loop exhaustion
+
+    # Context-window reset bookkeeping (hunter-context-reset): each iteration's
+    # structured output and a condensed tool-result summary, retained so a reset
+    # summarises exactly the turns it compresses without re-parsing raw history.
+    turn_findings: dict[int, list[dict[str, Any]]] = {}
+    turn_gaps: dict[int, list[dict[str, Any]]] = {}
+    turn_results: dict[int, str] = {}
 
     # Build the ArtifactStore lazily if a path was provided.  None = no store.
     _store: ArtifactStore | None = (
@@ -579,6 +740,10 @@ def run_agent_loop(
         assert response is not None
         assert parsed is not None
 
+        # Structured output this turn contributes to a future reset summary.
+        turn_findings[iteration] = _collect_structured_items(parsed, "findings")
+        turn_gaps[iteration] = _collect_structured_items(parsed, "coverage_gaps")
+
         # Extract tool_calls from the response (field is optional on the model)
         tool_calls: list[ToolCallRequest] = []
         raw_calls = getattr(parsed, "tool_calls", None)
@@ -682,6 +847,9 @@ def run_agent_loop(
             # (both use the same scrubber).
             tool_results.append(_wrap_tool_result(tc.tool, output_text))
 
+        # Condensed tool-call result summary for a future reset summary.
+        turn_results[iteration] = _condense_tool_results(tool_results)
+
         # Record the model's actual JSON response so open models don't echo our
         # synthetic summary string back on the next turn.
         history.append(ModelMessage(role="assistant", content=parsed.model_dump_json()))
@@ -697,6 +865,67 @@ def run_agent_loop(
                 stop_reason="budget_exceeded",
                 unauthorized_tool_denials=list(unauthorized_denials),
             )
+
+        # ── Context-window enforcement (hunter-context-reset) ───────────────
+        # History has been appended for this turn; if it now reaches the role's
+        # threshold, fold every turn except the most recent _RESET_RECENT_TURNS into
+        # the summary before the next model call. No limit = no estimation at all.
+        if context_window_tokens is not None:
+            tokens_before = _estimate_tokens(history)
+            if tokens_before >= int(context_window_tokens * context_window_threshold):
+                turns_compressed = iteration - _RESET_RECENT_TURNS
+                if turns_compressed >= 1:
+                    compressed_steps = [
+                        step for step in steps if step.iteration <= turns_compressed
+                    ]
+                    compressed_range = range(1, turns_compressed + 1)
+                    summary = _build_reset_summary(
+                        compressed_steps,
+                        [f for i in compressed_range for f in turn_findings.get(i, [])],
+                        [g for i in compressed_range for g in turn_gaps.get(i, [])],
+                        [
+                            f"result {i}: {turn_results[i]}"
+                            for i in compressed_range
+                            if turn_results.get(i)
+                        ],
+                    )
+                    new_history = _reset_history(
+                        history,
+                        system_prompt,
+                        initial_user_message,
+                        summary,
+                        _RESET_RECENT_TURNS,
+                    )
+                    reset_event = ContextResetEvent(
+                        iteration=iteration,
+                        tokens_before=tokens_before,
+                        tokens_after=_estimate_tokens(new_history),
+                        turns_compressed=turns_compressed,
+                        strategy=_RESET_STRATEGY,
+                    )
+                    history = new_history
+                    steps[-1] = steps[-1].model_copy(update={"context_reset": reset_event})
+                    _log.info(
+                        "[%s turn=%d] context reset: %d turns compressed, %d→%d tokens",
+                        agent_kind,
+                        iteration,
+                        reset_event.turns_compressed,
+                        reset_event.tokens_before,
+                        reset_event.tokens_after,
+                    )
+                    if event_sink is not None:
+                        _try_emit(
+                            event_sink,
+                            "agent.context_reset",
+                            {
+                                "agent_kind": agent_kind,
+                                "iteration": str(iteration),
+                                "tokens_before": reset_event.tokens_before,
+                                "tokens_after": reset_event.tokens_after,
+                                "turns_compressed": reset_event.turns_compressed,
+                                "strategy": reset_event.strategy,
+                            },
+                        )
 
     # Exhausted iterations — preserve findings from the last response if the model
     # never submitted a clean final answer (no tool_calls). This prevents losing
