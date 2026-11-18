@@ -206,3 +206,118 @@ def ssrf_candidates_from_activity_payload(
             )
         )
     return candidates
+
+
+def fuzz_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+    vuln_class: VulnerabilityClass,
+) -> list[CandidateFinding]:
+    """Convert a ``fuzz`` activity payload to one candidate per unique crash.
+
+    Deterministic-sweep parity with the secrets/SSRF converters: the payload
+    crosses the workflow/activity boundary as a plain dict (a ``FuzzResult``
+    serialised by Temporal), and no activity-side classes are imported here
+    (Temporal sandbox determinism).  A non-``ran`` pass (skipped/refused/failed)
+    yields nothing, so the caller records the skip and proceeds.
+
+    ``vuln_class`` is the scan's single focused class — the fuzz dispatch gate
+    guarantees exactly one (requirement ``Fuzz dispatch gates on single-class
+    focus``).  *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    data = _as_mapping(payload)
+    if data is None or data.get("status") != "ran":
+        return []
+    raw_crashes = data.get("crashes")
+    if not isinstance(raw_crashes, list):
+        return []
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", raw_crashes):
+        record = _as_mapping(item)
+        if record is None:
+            continue
+        candidate = _fuzz_candidate_from_crash_record(
+            record, scan_id=scan_id, created_at=created_at, vuln_class=vuln_class
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+def _as_mapping(value: object) -> dict[str, object] | None:
+    """Return *value* as a ``dict`` when it is one (or model-dumps like one)."""
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        if isinstance(dumped, dict):
+            return cast("dict[str, object]", dumped)
+    return None
+
+
+def _fuzz_candidate_from_crash_record(
+    record: dict[str, object],
+    *,
+    scan_id: str,
+    created_at: datetime,
+    vuln_class: VulnerabilityClass,
+) -> CandidateFinding | None:
+    """Workflow-deterministic builder for one fuzz crash candidate."""
+    crash_hash = str(record.get("crash_hash", "") or "")
+    if not crash_hash:
+        return None
+    trigger_input = str(record.get("trigger_input", "") or "")
+    signal = str(record.get("signal", "") or "")
+    sanitizer = str(record.get("sanitizer", "") or "")
+    kind = str(record.get("kind", "") or "")
+    seed = int(str(record.get("seed", 0) or 0))
+    run_index = int(str(record.get("run_index", 0) or 0))
+    stderr_length = int(str(record.get("stderr_length", 0) or 0))
+    stderr_artifact_ref = str(record.get("stderr_artifact_ref", "") or "")
+    component = str(record.get("component", "") or "") or "fuzz"
+    crash_kind = sanitizer or signal or kind or "unknown"
+    fingerprint = _compute_fingerprint(
+        vuln_class=vuln_class,
+        file_path=component,
+        start_line=0,
+        key_name=crash_hash[:16],
+        evidence_kind="fuzz_crash",
+    )
+    root_cause_key = _compute_root_cause_key(
+        vuln_class=vuln_class,
+        file_path=component,
+        sink=crash_hash[:16],
+    )
+    return CandidateFinding(
+        id=fingerprint[:32],
+        scan_id=scan_id,
+        workspace_id="local",
+        vuln_class=vuln_class,
+        title=f"Fuzz crash ({crash_kind}) in {component}",
+        hypothesis=f"Fuzzing the entry point {component} produced a {crash_kind} "
+        f"crash (hash {crash_hash[:16]}); the crashing input was replayed in the "
+        f"sandbox.",
+        root_cause_key=root_cause_key,
+        affected_component=component,
+        source_refs=[],
+        evidence_path=[],
+        confidence=Confidence.MEDIUM,
+        created_by="fuzz",
+        created_at=created_at,
+        trigger_input=trigger_input,
+        metadata={
+            "source": "fuzz",
+            "fingerprint": fingerprint,
+            "crash_hash": crash_hash,
+            "kind": kind,
+            "signal": signal,
+            "sanitizer": sanitizer,
+            "seed": seed,
+            "run_index": run_index,
+            "stderr_length": stderr_length,
+            "stderr_artifact_ref": stderr_artifact_ref,
+        },
+    )

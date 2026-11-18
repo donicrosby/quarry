@@ -126,7 +126,7 @@ def _resolve_credentials(auth_profile_set_json: str | None) -> dict[str, str]:
     return env
 
 
-def _build_sandbox_backend() -> SandboxBackend:
+def build_sandbox_backend() -> SandboxBackend:
     """Return the configured SandboxBackend.
 
     Reads QUARRY_SANDBOX_BACKEND (via QuarrySettings):
@@ -203,7 +203,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     egress_policy = _resolve_policy_json(inp.egress_policy_json)
 
     store = build_artifact_store(inp.artifact_store_path)
-    sandbox = _build_sandbox_backend()
+    sandbox = build_sandbox_backend()
 
     with tempfile.TemporaryDirectory(prefix="quarry-sandbox-") as _work_dir:
         work_dir = Path(_work_dir)
