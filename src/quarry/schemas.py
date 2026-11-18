@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from enum import StrEnum
+from fnmatch import fnmatch
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -204,6 +205,8 @@ class ArtifactKind(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
+    # Multi-persona authorization matrix: endpoint × persona status/hash grid.
+    AUTHZ_MATRIX = "authz_matrix"
 
 
 class RedactionStatus(StrEnum):
@@ -474,6 +477,54 @@ class Target(BaseModel):
     created_at: datetime
 
 
+# Privilege vocabulary a persona declares. ``unauthenticated`` is the
+# no-credential persona; the rest order low → high privilege.
+PrivilegeLevel = Literal["unauthenticated", "guest", "user", "admin"]
+
+
+def _default_persona_paths() -> list[str]:
+    """Default ``allowed_paths`` for a persona — the whole host root."""
+    return ["/"]
+
+
+def _path_pattern_matches(path: str, pattern: str) -> bool:
+    """Match *path* against a scope pattern (glob or exact/prefix).
+
+    Mirrors the ``do_not_test`` matching convention enforced by the
+    live-exploitation rules of engagement (``quarry_workflows.roe._path_matches``):
+    ``fnmatch`` globs first, then an exact-or-prefix comparison. Kept local so
+    ``quarry.schemas`` never imports ``quarry_workflows``.
+    """
+    if fnmatch(path, pattern):
+        return True
+    prefix = pattern.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+class PersonaScope(BaseModel):
+    """One named persona in a multi-persona ``TargetAuthorization``.
+
+    ``profile_ref`` names an ``AuthProfile`` in the scan's ``AuthProfileSet``;
+    ``None`` declares an unauthenticated persona (no credential injection).
+    ``allowed_hosts`` / ``allowed_paths`` bound where the persona applies;
+    ``privilege_level`` orders personas for privilege-escalation reasoning;
+    ``expected_denied_paths`` is the *declared ground truth* the matrix violation
+    rules evaluate against (a 2xx on one of these paths is a violation).
+    """
+
+    name: str
+    profile_ref: str | None = None
+    allowed_hosts: list[str] = Field(default_factory=_empty_strings)
+    allowed_paths: list[str] = Field(default_factory=_default_persona_paths)
+    do_not_test: list[str] = Field(default_factory=_empty_strings)
+    privilege_level: PrivilegeLevel
+    expected_denied_paths: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_personas() -> list[PersonaScope]:
+    return []
+
+
 class TargetAuthorization(BaseModel):
     id: str
     target_id: str
@@ -485,6 +536,45 @@ class TargetAuthorization(BaseModel):
     notes: str | None = None
     do_not_test: list[str] = Field(default_factory=_empty_strings)
     created_at: datetime
+    # Optional multi-persona declaration. Empty preserves the historical
+    # single-authorization behavior exactly.
+    personas: list[PersonaScope] = Field(default_factory=_empty_personas)
+
+    @model_validator(mode="after")
+    def _validate_persona_scopes(self) -> TargetAuthorization:
+        """Reject persona declarations that escape the top-level authorization.
+
+        - duplicate persona names within one authorization
+        - a persona host absent from the top-level ``allowed_hosts``
+        - a persona ``allowed_paths`` / ``expected_denied_paths`` entry that
+          intersects a top-level ``do_not_test`` pattern
+
+        Zero personas is valid (backward compatibility).
+        """
+        seen_names: set[str] = set()
+        for persona in self.personas:
+            if persona.name in seen_names:
+                msg = f"duplicate persona name: '{persona.name}'."
+                raise ValueError(msg)
+            seen_names.add(persona.name)
+
+            for host in persona.allowed_hosts:
+                if host not in self.allowed_hosts:
+                    msg = (
+                        f"persona '{persona.name}' allowed_hosts contains host "
+                        f"'{host}' absent from the top-level allowed_hosts."
+                    )
+                    raise ValueError(msg)
+
+            for path in (*persona.allowed_paths, *persona.expected_denied_paths):
+                for pattern in self.do_not_test:
+                    if _path_pattern_matches(path, pattern):
+                        msg = (
+                            f"persona '{persona.name}' path '{path}' intersects "
+                            f"top-level do_not_test pattern '{pattern}'."
+                        )
+                        raise ValueError(msg)
+        return self
 
 
 def _empty_tier_dicts() -> list[dict[str, Any]]:
@@ -1443,6 +1533,70 @@ class HttpResponseCapture(BaseModel):
     # captures construct without it and evaluators treat a missing body as
     # non-corroboration, never an error.
     body_artifact_key: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Multi-persona authorization matrix (endpoint × persona status/hash grid)
+# ---------------------------------------------------------------------------
+
+
+def _empty_authz_personas() -> list[AuthzMatrixPersona]:
+    return []
+
+
+def _empty_authz_cells() -> list[AuthzMatrixCell]:
+    return []
+
+
+def _empty_authz_rows() -> list[AuthzMatrixRow]:
+    return []
+
+
+class AuthzMatrixEndpoint(BaseModel):
+    """One attack-map endpoint probed by the matrix."""
+
+    method: str
+    path: str
+
+
+class AuthzMatrixPersona(BaseModel):
+    """A persona as the matrix needs it: pre-resolved, no credential values.
+
+    ``profile_ref`` is the explicit ``AuthProfile`` name the workflow resolved
+    for this cell (``None`` = unauthenticated). ``expected_denied_paths`` is the
+    declared ground truth the violation rules evaluate against.
+    """
+
+    name: str
+    profile_ref: str | None = None
+    privilege_level: PrivilegeLevel
+    expected_denied_paths: list[str] = Field(default_factory=_empty_strings)
+
+
+class AuthzMatrixCell(BaseModel):
+    """One (endpoint, persona) probe result: status code, body hash, error."""
+
+    persona: str
+    status_code: int | None = None
+    body_hash: str | None = None
+    error: str | None = None
+
+
+class AuthzMatrixRow(BaseModel):
+    """One endpoint's row across every persona."""
+
+    endpoint_path: str
+    endpoint_method: str
+    cells: list[AuthzMatrixCell] = Field(default_factory=_empty_authz_cells)
+
+
+class AuthzMatrixResult(BaseModel):
+    """The persisted matrix: personas, rows, and the artifact it was stored in."""
+
+    scan_id: str
+    personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
+    rows: list[AuthzMatrixRow] = Field(default_factory=_empty_authz_rows)
+    artifact_ref: ArtifactRef | None = None
 
 
 class DynamicEvidenceLink(BaseModel):

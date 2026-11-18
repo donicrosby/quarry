@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import ChangedFile
+from quarry.schemas import AuthzMatrixEndpoint, AuthzMatrixPersona, ChangedFile
 
 
 class CreateSnapshotInput(BaseModel):
@@ -237,3 +237,32 @@ class SandboxExecActivityInput(BaseModel):
     candidate_finding_id: str
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
     prove_corpus_json: str | None = None  # ProveCorpus serialized; None = HTTP prove
+
+
+def _empty_authz_endpoints() -> list[AuthzMatrixEndpoint]:
+    return []
+
+
+def _empty_authz_personas() -> list[AuthzMatrixPersona]:
+    return []
+
+
+class AuthzMatrixActivityInput(BaseModel):
+    """Input payload for the authz-matrix activity (multi-persona authZ matrix).
+
+    All values are JSON-serializable primitives at the Temporal boundary; the
+    workflow pre-resolves each persona's ``profile_ref`` and pre-filters
+    endpoints by top-level ``request_in_scope`` before the call. The activity
+    performs NO persona selection — it probes every supplied (endpoint, persona)
+    pair with that persona's explicit ``profile_ref``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    target_endpoint_json: str  # TargetEndpoint serialized
+    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
+    artifact_store_path: str  # path for LocalArtifactStore
+    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+    endpoints: list[AuthzMatrixEndpoint] = Field(default_factory=_empty_authz_endpoints)
+    personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
