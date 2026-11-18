@@ -1697,6 +1697,9 @@ class RunScanWorkflow:
                 headers=headers,
                 body=spec_dict.get("body"),
                 auth_profile=spec_dict.get("auth_profile"),
+                multipart_fields=spec_dict.get("multipart_fields"),
+                follow_redirects=bool(spec_dict.get("follow_redirects", False)),
+                cookies=cast("dict[str, str]", spec_dict.get("cookies") or {}),
             )
 
             # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
