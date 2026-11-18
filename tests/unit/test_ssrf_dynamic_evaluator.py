@@ -122,7 +122,26 @@ class TestSsrfEvaluator:
         assert ssrf_evaluator(ev) == "corroborated"
 
     def test_identical_bodies_not_corroborated(self) -> None:
-        """The parameter drives no observable difference → no SSRF signal."""
+        """The parameter drives no observable difference → no SSRF signal.
+
+        Re-encoded for verify-oracle-upgrade R5: identical bodies with the SAME
+        status read as structurally equivalent.  Identical bodies with a
+        DIFFERING status are inconclusive (see
+        ``test_identical_bodies_mismatched_status_inconclusive``) because the
+        server treated two equivalent responses differently.
+        """
+        from quarry_activities.verdict_evaluators import ssrf_evaluator
+
+        same = '{"detail": "Only local URLs are accepted"}'
+        ev = LiveProbeEvidence(
+            status_code=200,
+            body_text=same,
+            additional=(LiveProbeEvidence(status_code=200, body_text=same),),
+        )
+        assert ssrf_evaluator(ev) == "not_corroborated"
+
+    def test_identical_bodies_mismatched_status_inconclusive(self) -> None:
+        """R5 S2: bodies equivalent but the server treated them differently."""
         from quarry_activities.verdict_evaluators import ssrf_evaluator
 
         same = '{"detail": "Only local URLs are accepted"}'
@@ -131,7 +150,7 @@ class TestSsrfEvaluator:
             body_text=same,
             additional=(LiveProbeEvidence(status_code=400, body_text=same),),
         )
-        assert ssrf_evaluator(ev) == "not_corroborated"
+        assert ssrf_evaluator(ev) == "inconclusive"
 
     def test_single_probe_inconclusive(self) -> None:
         """No baseline → the differential cannot decide, even on a 2xx body."""
@@ -197,7 +216,7 @@ class TestSsrfEvaluator:
             status_code=200,
             body_text=same,
             additional=(
-                LiveProbeEvidence(status_code=400, body_text=same),
+                LiveProbeEvidence(status_code=200, body_text=same),
                 LiveProbeEvidence(status_code=200, body_text="zzz"),
             ),
         )

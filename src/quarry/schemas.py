@@ -1712,6 +1712,19 @@ class HttpRequestSpec(BaseModel):
     # Per-request cookie injection; values are registered with the run scrubber
     # and redacted from stored request artifacts.
     cookies: dict[str, str] = Field(default_factory=dict)
+    # Timing-oracle annotations (verify-oracle-upgrade), declared by the
+    # proposing agent alongside the delay payload. injected_delay_ms opts the
+    # probe into the statistical timing path; absent leaves the hardened
+    # differential path (the timing path never guesses a delay).
+    injected_delay_ms: int | None = None
+    # The exact payload substrings this probe injects, declared by the agent
+    # alongside the payload. Differential evaluators normalize these out of the
+    # response bodies (a reflected payload must not read as a difference).
+    injected_values: tuple[str, ...] | None = None
+    # Optional hunter-supplied success marker. When present, the differential
+    # evaluator tests for it in the raw response bodies before generic
+    # heuristics; present-in-attack-only decides the finding on its own.
+    indicator: str | None = None
 
     @model_validator(mode="after")
     def _warn_multipart_and_body(self) -> HttpRequestSpec:
