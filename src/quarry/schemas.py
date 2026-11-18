@@ -585,15 +585,39 @@ class ModelPanelEntry(BaseModel):
     context_window_threshold: float = 0.8
 
 
+VALID_SCOPE_EXCLUSION_KINDS: frozenset[str] = frozenset(
+    {
+        "route",
+        "path_glob",
+        "functional_area",
+        "vuln_class",
+        "command",
+        "binary",
+        "filesystem_path",
+        "note",
+    }
+)
+
+
 class ScopeExclusion(BaseModel):
     """Identifies a scope element that must not be tested."""
 
     model_config = {"frozen": True}
 
-    kind: str  # e.g. "route", "vuln_class", "note"
+    kind: str  # one of VALID_SCOPE_EXCLUSION_KINDS
     value: str
     reason: str
     block_dynamic: bool = False
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, value: str) -> str:
+        """Reject unknown exclusion kinds at construction (fail-closed)."""
+        if value not in VALID_SCOPE_EXCLUSION_KINDS:
+            valid = ", ".join(sorted(VALID_SCOPE_EXCLUSION_KINDS))
+            msg = f"Unknown scope exclusion kind '{value}'. Valid kinds: {valid}"
+            raise ValueError(msg)
+        return value
 
 
 def _empty_scope_exclusions() -> list[ScopeExclusion]:
