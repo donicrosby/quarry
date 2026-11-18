@@ -48,8 +48,8 @@ class _JsonArtifact(Protocol):
 class ArtifactStore(Protocol):
     """Protocol shared by all artifact-store backends.
 
-    LocalArtifactStore satisfies this structurally; the Redis/S3 backends
-    (deferred) will implement it explicitly.
+    Every backend (local filesystem, Redis, S3) implements this interface
+    explicitly, including ``append_bytes``.
     """
 
     def put_bytes(

@@ -33,6 +33,8 @@ class RedisClient(Protocol):
 
     def get(self, name: str) -> bytes | None: ...
 
+    def append(self, name: str, value: bytes) -> Any: ...
+
     def close(self) -> None: ...
 
 
@@ -142,6 +144,45 @@ class RedisArtifactStore:
             content_type="application/json",
             metadata=metadata,
             redaction_status=redaction_status,
+        )
+
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the value at *key* (redis ``APPEND``), creating it if absent.
+
+        Append-only counterpart to ``put_bytes`` (which rewrites): existing
+        bytes are never truncated, which is the property the per-agent
+        execution log relies on for replay safety.  The returned ``ArtifactRef``
+        describes the appended chunk (its ``sha256`` and ``size_bytes`` are of
+        *data*), keeping each append O(len(data)) rather than O(object size).
+        """
+        self._ensure_open()
+        if len(data) > self._max_artifact_bytes:
+            msg = (
+                f"Artifact '{key}' is {len(data)} bytes, exceeding the Redis backend "
+                f"maximum of {self._max_artifact_bytes} bytes; use the S3 backend for "
+                "large artifacts."
+            )
+            raise ValueError(msg)
+        self._retry(lambda: self._client.append(self._namespace + key, data))
+        return ArtifactRef(
+            id=str(uuid4()),
+            uri=self._ref_uri(key),
+            kind=kind,
+            content_type=content_type,
+            sha256=sha256(data).hexdigest(),
+            size_bytes=len(data),
+            redaction_status=redaction_status,
+            created_at=datetime.now(UTC),
+            metadata=metadata or {},
         )
 
     def get_bytes(self, artifact_ref: ArtifactRef) -> bytes:

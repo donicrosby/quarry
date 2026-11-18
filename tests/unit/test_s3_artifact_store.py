@@ -25,6 +25,10 @@ class _NoCredentialsError(Exception):
 class _NotFoundError(Exception):
     """Stands in for an S3 NoSuchKey client error (non-transient)."""
 
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.response = {"Error": {"Code": "NoSuchKey"}}
+
 
 class _Body:
     def __init__(self, data: bytes) -> None:
@@ -161,6 +165,45 @@ class TestS3ArtifactStore:
         with pytest.raises(ValueError, match="closed"):
             store.get_bytes(ref)
         store.close()  # idempotent
+
+    def test_append_bytes_to_missing_object_creates_it(self) -> None:
+        fake = _FakeS3()
+        store = _store(fake)
+        ref = store.append_bytes(
+            "scan-1/agent.jsonl",
+            b"line-1\n",
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+        assert fake.objects[("quarry-bucket", "quarry/scan-1/agent.jsonl")] == b"line-1\n"
+        assert ref.sha256 == sha256(b"line-1\n").hexdigest()
+        assert ref.size_bytes == 7
+        assert ref.uri == "s3://quarry-bucket/scan-1/agent.jsonl"
+
+    def test_append_bytes_extends_existing_object_without_truncation(self) -> None:
+        fake = _FakeS3()
+        store = _store(fake)
+        _put(store, "scan-1/agent.jsonl", b"line-1\n")
+        store.append_bytes(
+            "scan-1/agent.jsonl",
+            b"line-2\n",
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+        assert fake.objects[("quarry-bucket", "quarry/scan-1/agent.jsonl")] == b"line-1\nline-2\n"
+
+    def test_append_bytes_propagates_non_notfound_read_errors(self) -> None:
+        fake = _FakeS3()
+        store = _store(fake)
+        fake.raise_exc = _NoCredentialsError("no creds")
+        with pytest.raises(_NoCredentialsError):
+            store.append_bytes(
+                "scan-1/agent.jsonl",
+                b"line-1\n",
+                kind=ArtifactKind.AGENT_LOG,
+                content_type="application/x-ndjson",
+            )
+        assert fake.objects == {}  # no silent object creation on read failure
 
     def test_get_text_none_for_missing_key(self) -> None:
         fake = _FakeS3()

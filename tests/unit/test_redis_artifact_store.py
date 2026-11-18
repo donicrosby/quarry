@@ -34,6 +34,12 @@ class _FakeRedis:
         self.data[name] = value
         return True
 
+    def append(self, name: str, value: bytes) -> Any:
+        self.calls += 1
+        self._maybe_fail()
+        self.data[name] = self.data.get(name, b"") + value
+        return len(self.data[name])
+
     def get(self, name: str) -> bytes | None:
         self.calls += 1
         self._maybe_fail()
@@ -168,6 +174,28 @@ class TestRedisArtifactStore:
         with pytest.raises(ValueError, match="closed"):
             store.get_bytes(ref)
         store.close()  # idempotent
+
+    def test_append_bytes_creates_then_extends_without_truncation(self) -> None:
+        fake = _FakeRedis()
+        store = _store(fake)
+        ref1 = store.append_bytes(
+            "scan-1/agent.jsonl",
+            b"line-1\n",
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+        ref2 = store.append_bytes(
+            "scan-1/agent.jsonl",
+            b"line-2\n",
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+        assert fake.data["quarry:scan-1/agent.jsonl"] == b"line-1\nline-2\n"
+        assert ref1.sha256 == sha256(b"line-1\n").hexdigest()
+        assert ref1.size_bytes == 7
+        assert ref2.sha256 == sha256(b"line-2\n").hexdigest()
+        assert ref2.size_bytes == 7
+        assert ref2.uri == "redis://myredis:6379/scan-1/agent.jsonl"
 
     def test_get_text_none_for_missing_key(self) -> None:
         fake = _FakeRedis()
