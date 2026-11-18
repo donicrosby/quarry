@@ -150,7 +150,12 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         RedactionStatus.REDACTED if scrubber_hits > 0 else RedactionStatus.NOT_REQUIRED
     )
 
-    resp_artifact = capture_response_artifact(store, response, key_prefix=f"{inp.scan_id}/")
+    resp_artifact = capture_response_artifact(
+        store,
+        response,
+        key_prefix=f"{inp.scan_id}/",
+        scan_id=inp.scan_id,
+    )
 
     capture = HttpResponseCapture(
         status_code=response.status_code,
@@ -161,6 +166,7 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         redaction_status=redaction_status,
         request_artifact_ref=req_artifact.id,
         body_artifact_key=response_artifact_key(response),
+        artifact_refs=[req_artifact, resp_artifact],
     )
 
     # Deterministic session-token/JWT/cookie analysis (session-jwt-cookie-analysis,
