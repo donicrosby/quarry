@@ -141,6 +141,7 @@ def run_replay(
             vuln_class=vuln_class or "secrets",
             panel_name=panel_name,
             mock=mock,
+            artifact_root=artifact_root,
         )
     elif stage == "gapfill":
         inputs = resolve_gapfill_inputs(

@@ -240,3 +240,29 @@ def make_hunt_task(scan_id: str, vuln_class: VulnerabilityClass, scope: str) -> 
         status="pending",
         created_at=utc_now(),
     )
+
+
+def persist_hunt_tasks(
+    db_path: str,
+    scan_id: str,
+    arch_doc: ArchitectureDoc,
+    *,
+    vuln_classes: list[VulnerabilityClass] | None = None,
+) -> list[AgentTask]:
+    """Persist recon-derived hunt tasks the way the workflow does.
+
+    Mirrors ``run_scan``: one task per (vuln_class, subsystem scope), saved with
+    ``save_agent_task`` (upsert-by-id). Persisting these is what gives a replay
+    the ORIGINAL task ids to overlay onto a fresh ``emit_agent_tasks``
+    derivation — the ids that key the per-agent execution log.
+    """
+    repository = make_repository(Path(db_path))
+    scopes = [s.root_paths[0] if s.root_paths else s.name for s in arch_doc.subsystems] or ["."]
+    tasks = [
+        make_hunt_task(scan_id, vuln_class, scope)
+        for vuln_class in (vuln_classes or [VulnerabilityClass.SECRETS])
+        for scope in scopes
+    ]
+    for task in tasks:
+        repository.save_agent_task(task)
+    return tasks
