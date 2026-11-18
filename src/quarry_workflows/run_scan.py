@@ -4135,6 +4135,39 @@ def build_differential_evidence(
 # (the canonical home — see the import block above).
 
 
+def _legacy_proof_evidence_refs(capture: "Any", now: "datetime") -> list[ArtifactRef]:
+    """Reconstruct id-only evidence refs for a capture that predates D6.
+
+    Legacy and replay captures carry only artifact ids (no hash), so the refs are
+    rebuilt from the ids with an empty sha256 — the pre-quarantine behaviour.
+    """
+    evidence_ids: list[str] = []
+
+    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
+    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
+        evidence_ids.append(capture.stdout_artifact_ref)
+    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
+        evidence_ids.append(capture.stderr_artifact_ref)
+    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
+    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
+        evidence_ids.append(capture.request_artifact_ref)
+    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
+        evidence_ids.append(capture.body_artifact_ref)
+
+    return [
+        ArtifactRef(
+            id=ref_id,
+            uri=f"file://{ref_id}",
+            kind=ArtifactKind.TOOL_STDOUT,
+            content_type="text/plain",
+            sha256="",
+            size_bytes=0,
+            created_at=now,
+        )
+        for ref_id in evidence_ids
+    ]
+
+
 def build_proof_artifact(
     candidate: "CandidateFinding",
     capture: "Any",  # SandboxExecCapture | HttpResponseCapture
@@ -4150,32 +4183,14 @@ def build_proof_artifact(
     *proof_type* is "cli_exec" for sandbox results or "dynamic_http" for HTTP.
     The evidence_refs are populated from stdout/stderr artifact refs (sandbox)
     or request/body artifact refs (HTTP), whichever are non-empty.
+
+    Quarantine (D6): the capture's stored ``artifact_refs`` carry the sha256 and
+    byte count the artifact store recorded, so the evidence refs report the real
+    hash. Legacy/replay captures that carry only ref ids fall back to
+    reconstructed refs with an empty hash.
     """
-    evidence_ids: list[str] = []
-
-    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
-    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
-        evidence_ids.append(capture.stdout_artifact_ref)
-    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
-        evidence_ids.append(capture.stderr_artifact_ref)
-    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
-    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
-        evidence_ids.append(capture.request_artifact_ref)
-    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
-        evidence_ids.append(capture.body_artifact_ref)
-
-    evidence_refs = [
-        ArtifactRef(
-            id=ref_id,
-            uri=f"file://{ref_id}",
-            kind=ArtifactKind.TOOL_STDOUT,
-            content_type="text/plain",
-            sha256="",
-            size_bytes=0,
-            created_at=now,
-        )
-        for ref_id in evidence_ids
-    ]
+    stored_refs = cast("list[ArtifactRef]", getattr(capture, "artifact_refs", []) or [])
+    evidence_refs = list(stored_refs) or _legacy_proof_evidence_refs(capture, now)
 
     scrubber_hits: int = getattr(capture, "scrubber_hits", 0)
     redaction_status: RedactionStatus = (

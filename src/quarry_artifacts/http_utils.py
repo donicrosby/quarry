@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
+from quarry_artifacts.quarantine import put_quarantined_json
 from quarry_artifacts.store import ArtifactStore
 
 # Maximum response body size to store (10KB)
@@ -130,16 +131,25 @@ def capture_response_artifact(
     artifact_key: str | None = None,
     *,
     key_prefix: str = "",
+    backend: str | None = None,
+    scan_id: str = "",
 ) -> ArtifactRef:
     """Serialize an httpx.Response to JSON artifact and store it.
 
     Response body is truncated to 10KB max.
+
+    The body is attacker-controlled proof output, so it is stored through the
+    proof-artifact quarantine pipeline (D6): local-only by default, size-gated,
+    malware-scan-hook inspected, and marked quarantined in the artifact metadata.
 
     Args:
         store: ArtifactStore instance
         response: httpx.Response to capture
         artifact_key: Optional storage key (auto-generated if not provided)
         key_prefix: Prefix prepended to the auto-generated key (scan scoping)
+        backend: Artifact backend name; None resolves the configured
+            QUARRY_ARTIFACT_BACKEND (drives the local-only guard)
+        scan_id: Scan id stamped on recorded quarantine events
 
     Returns:
         ArtifactRef for the stored response artifact
@@ -178,10 +188,12 @@ def capture_response_artifact(
         RedactionStatus.CONTAINS_SENSITIVE if was_truncated else RedactionStatus.NOT_REQUIRED
     )
 
-    return store.put_json(
-        key=artifact_key,
-        data=artifact_model,
+    return put_quarantined_json(
+        store,
+        artifact_key,
+        artifact_model,
         kind=ArtifactKind.HTTP_RESPONSE,
+        backend=backend,
         metadata={
             "status_code": response.status_code,
             "host": response.request.url.host,
@@ -189,4 +201,5 @@ def capture_response_artifact(
             "original_size": len(body_bytes),
         },
         redaction_status=redaction_status,
-    )
+        scan_id=scan_id,
+    ).artifact_ref
