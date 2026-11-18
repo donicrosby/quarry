@@ -30,5 +30,50 @@
     "route": "/fetch-local",
     "severity": "medium",
     "expected_fingerprint_hint": "ssrf:app.py:fetch_local"
+  },
+  {
+    "id": "gt-sql-injection-search",
+    "vuln_class": "sql_injection",
+    "file_path": "app.py",
+    "route": "/search",
+    "severity": "critical",
+    "expected_fingerprint_hint": "sql_injection:app.py:search",
+    "expected_proof_type": "response_differential"
+  },
+  {
+    "id": "gt-xss-greet",
+    "vuln_class": "xss",
+    "file_path": "app.py",
+    "route": "/greet",
+    "severity": "high",
+    "expected_fingerprint_hint": "xss:app.py:greet",
+    "expected_proof_type": "response_reflection"
+  },
+  {
+    "id": "gt-ssti-render",
+    "vuln_class": "ssti",
+    "file_path": "app.py",
+    "route": "/render",
+    "severity": "critical",
+    "expected_fingerprint_hint": "ssti:app.py:render",
+    "expected_proof_type": "template_evaluation"
+  },
+  {
+    "id": "gt-open-redirect-go",
+    "vuln_class": "open_redirect",
+    "file_path": "app.py",
+    "route": "/go",
+    "severity": "medium",
+    "expected_fingerprint_hint": "open_redirect:app.py:go",
+    "expected_proof_type": "redirect_location"
+  },
+  {
+    "id": "gt-file-upload-upload",
+    "vuln_class": "file_upload",
+    "file_path": "app.py",
+    "route": "/upload",
+    "severity": "high",
+    "expected_fingerprint_hint": "file_upload:app.py:upload",
+    "expected_proof_type": "upload_accepted"
   }
 ]

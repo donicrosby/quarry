@@ -85,6 +85,7 @@ jobs:
           tests/unit/test_benchmark_inventory.py
           tests/unit/test_benchmark_no_context_injection.py
           tests/unit/test_benchmark_no_integrations.py
+          tests/unit/test_benchmark_web_fixtures.py
           -q --dist loadfile
 
   # Unit + golden suite, split across 4 free 4-core runners by pytest-shard
