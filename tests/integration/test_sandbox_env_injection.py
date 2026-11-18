@@ -23,7 +23,7 @@ _REDACTION_LINE_RE = re.compile(r"^\d+ environment variables present \(redacted\
 
 def _run(spec: SandboxExecSpec, work_dir: Path) -> SandboxResult:
     return LocalSubprocessSandbox().run(
-        spec, work_dir=work_dir, resolved_env={}, target_endpoint=None
+        spec, work_dir=work_dir, resolved_env={}, egress_policy=None
     )
 
 
