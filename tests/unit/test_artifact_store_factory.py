@@ -1,27 +1,36 @@
-"""Tests for the ArtifactStore Protocol + build_artifact_store() factory (Phase 1c).
-
-Written RED first — these fail until:
-  - ArtifactStore Protocol is declared in src/quarry_artifacts/
-  - build_artifact_store() factory is added
-  - artifact_backend/redis_url/s3_bucket added to QuarrySettings
+"""Tests for the ArtifactStore Protocol + build_artifact_store() factory.
 
 The default (QUARRY_ARTIFACT_BACKEND unset) must return a LocalArtifactStore so
-existing behaviour is byte-identical.
-
-Redis and S3 backends are NOT implemented yet — the factory should raise
-NotImplementedError for those, but the Protocol contract tests confirm the
-interface is fully defined.
+existing behaviour is byte-identical. Redis/S3 backends are dispatched by
+build_artifact_store() and get_bytes dispatches by ref URI scheme through
+resolve_artifact_store() (ADR-024 §B).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
 from quarry_artifacts import LocalArtifactStore
-from quarry_artifacts.store import ArtifactStore, build_artifact_store
+from quarry_artifacts.redis_store import RedisArtifactStore
+from quarry_artifacts.s3_store import S3ArtifactStore
+from quarry_artifacts.store import ArtifactStore, build_artifact_store, resolve_artifact_store
+
+
+def _ref(uri: str) -> ArtifactRef:
+    return ArtifactRef(
+        id="ref-1",
+        uri=uri,
+        kind=ArtifactKind.TOOL_STDOUT,
+        content_type="text/plain",
+        sha256="0" * 64,
+        size_bytes=0,
+        redaction_status=RedactionStatus.NOT_REQUIRED,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
 
 
 class TestArtifactStoreProtocol:
@@ -68,23 +77,25 @@ class TestBuildArtifactStoreFactory:
         store = build_artifact_store(root=str(tmp_path))
         assert isinstance(store, LocalArtifactStore)
 
-    def test_redis_backend_raises_not_implemented(
+    def test_redis_backend_returns_redis_store(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Redis backend is deferred; factory must raise NotImplementedError."""
+        """Redis backend is dispatched to RedisArtifactStore (no NotImplementedError)."""
         monkeypatch.setenv("QUARRY_ARTIFACT_BACKEND", "redis")
         monkeypatch.setenv("QUARRY_REDIS_URL", "redis://localhost:6379/0")
-        with pytest.raises(NotImplementedError, match="redis|deferred"):
-            build_artifact_store(root=str(tmp_path))
+        store = build_artifact_store(root=str(tmp_path))
+        assert isinstance(store, RedisArtifactStore)
+        store.close()
 
-    def test_s3_backend_raises_not_implemented(
+    def test_s3_backend_returns_s3_store(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """S3 backend is deferred; factory must raise NotImplementedError."""
+        """S3 backend is dispatched to S3ArtifactStore (no NotImplementedError)."""
         monkeypatch.setenv("QUARRY_ARTIFACT_BACKEND", "s3")
         monkeypatch.setenv("QUARRY_S3_BUCKET", "my-bucket")
-        with pytest.raises(NotImplementedError, match="s3|deferred"):
-            build_artifact_store(root=str(tmp_path))
+        store = build_artifact_store(root=str(tmp_path))
+        assert isinstance(store, S3ArtifactStore)
+        store.close()
 
     def test_unknown_backend_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("QUARRY_ARTIFACT_BACKEND", "mysql")
@@ -151,3 +162,38 @@ class TestQuarrySettingsArtifactFields:
         s = QuarrySettings()
         assert hasattr(s, "s3_bucket")
         assert s.s3_bucket == ""
+
+    def test_retry_and_size_knob_defaults(self) -> None:
+        from quarry.config import QuarrySettings
+
+        s = QuarrySettings()
+        assert s.redis_max_artifact_bytes == 1_048_576
+        assert s.artifact_retry_max_attempts == 3
+        assert s.artifact_retry_backoff_seconds == 1.0
+
+
+class TestResolveArtifactStoreScheme:
+    """resolve_artifact_store dispatches a ref by URI scheme (ADR-024 §B)."""
+
+    def test_file_ref_returns_local_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("QUARRY_ARTIFACT_BACKEND", raising=False)
+        store = resolve_artifact_store(_ref(f"file://{tmp_path}/k"), root=str(tmp_path))
+        assert isinstance(store, LocalArtifactStore)
+
+    def test_redis_ref_returns_redis_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("QUARRY_REDIS_URL", "redis://localhost:6379/0")
+        store = resolve_artifact_store(_ref("redis://localhost:6379/k"))
+        assert isinstance(store, RedisArtifactStore)
+        store.close()
+
+    def test_s3_ref_returns_s3_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("QUARRY_S3_BUCKET", "my-bucket")
+        store = resolve_artifact_store(_ref("s3://my-bucket/k"))
+        assert isinstance(store, S3ArtifactStore)
+        store.close()
+
+    def test_unknown_scheme_raises(self) -> None:
+        with pytest.raises(ValueError, match="scheme"):
+            resolve_artifact_store(_ref("ftp://host/key"))

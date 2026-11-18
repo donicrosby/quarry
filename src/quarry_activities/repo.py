@@ -34,7 +34,7 @@ from quarry.schemas import (
     utc_now,
 )
 from quarry_activities.inputs import CreateSnapshotInput, PersistScanStateInput
-from quarry_artifacts import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_persistence import QuarryRepository
 
 IGNORED_DIRS = frozenset(
@@ -97,7 +97,7 @@ def _create_repository_snapshot_impl(
 ) -> RepositorySnapshot:
     root = repo_path.resolve()
     manifest = build_file_manifest(root)
-    store = LocalArtifactStore(artifact_root)
+    store = build_artifact_store(str(artifact_root))
     manifest_ref = store.put_json(
         f"{scan_id}/repo_manifest.json",
         manifest,
@@ -185,6 +185,11 @@ def persist_scan_state(input: PersistScanStateInput | dict[str, str]) -> object:
                 return repository.load_scan(payload["scan_id"]).model_dump(mode="json")
             except ValueError:
                 return None
+        case "load_scan_ordinal":
+            # versioned-handoff-artifacts: next durable scan ordinal for the
+            # target (max recorded + 1). Keyed by repo path — the stable target
+            # identity across scans.
+            return repository.max_scan_ordinal_for_repo(payload["repo_path"]) + 1
         case "load_candidate_findings":
             return [
                 finding.model_dump(mode="json")

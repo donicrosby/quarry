@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import time
-from pathlib import Path
+from datetime import UTC, datetime
 
 import httpx
 from temporalio import activity
@@ -30,12 +30,13 @@ from quarry.schemas import (
 )
 from quarry_activities.credentials import CredentialCache, resolve_credentials
 from quarry_activities.inputs import HttpRequestActivityInput
+from quarry_activities.session_analysis import analyze_session_tokens
 from quarry_artifacts.http_utils import (
     capture_request_artifact,
     capture_response_artifact,
     response_artifact_key,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_models.redaction import Scrubber
 
 # Body cap — applied before scrubbing so prompts never receive huge payloads.
@@ -96,9 +97,7 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
     )
     url = f"{base_url}{spec.path}"
 
-    store = LocalArtifactStore(
-        Path(inp.artifact_store_path) / inp.scan_id,
-    )
+    store = build_artifact_store(inp.artifact_store_path)
 
     # Per-run scrubber.  If credential resolution is wired later, the resolved
     # secret value is registered here before the request is sent (ADR-018 §4.4).
@@ -140,8 +139,8 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
     if response.status_code == 401 and cache is not None and spec.auth_profile:
         cache.invalidate(spec.auth_profile)
 
-    # Capture request artifact (auth headers already redacted by http_utils)
-    req_artifact = capture_request_artifact(store, request)
+    # Capture request artifact (auth headers already redacted by http_utils).
+    req_artifact = capture_request_artifact(store, request, key_prefix=f"{inp.scan_id}/")
 
     # Cap and scrub response body before storing
     raw_body = response.text[:MAX_BODY_BYTES] if response.text else ""
@@ -151,9 +150,9 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         RedactionStatus.REDACTED if scrubber_hits > 0 else RedactionStatus.NOT_REQUIRED
     )
 
-    resp_artifact = capture_response_artifact(store, response)
+    resp_artifact = capture_response_artifact(store, response, key_prefix=f"{inp.scan_id}/")
 
-    return HttpResponseCapture(
+    capture = HttpResponseCapture(
         status_code=response.status_code,
         headers=dict(response.headers),
         body_artifact_ref=resp_artifact.id,
@@ -163,3 +162,18 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         request_artifact_ref=req_artifact.id,
         body_artifact_key=response_artifact_key(response),
     )
+
+    # Deterministic session-token/JWT/cookie analysis (session-jwt-cookie-analysis,
+    # task 7.1).  Runs synchronously, in-activity, only for auth-bearing requests.
+    # It reads the raw httpx.Response (multi-value Set-Cookie via get_list, before
+    # the dict collapse above) and the freshly-built capture (body_artifact_ref).
+    if spec.auth_profile is not None:
+        capture.session_token_analysis = analyze_session_tokens(
+            response,
+            capture,
+            scan_id=inp.scan_id,
+            target_scheme=endpoint.scheme,
+            capture_time=datetime.now(UTC),
+        )
+
+    return capture

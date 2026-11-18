@@ -69,6 +69,8 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             rate_limit_rpm=cfg.rpm,
             turn_timeout_seconds=cfg.turn_timeout_seconds,
             tiers=[t.model_dump(mode="json") for t in cfg.tiers],
+            context_window_tokens=cfg.context_window_tokens,
+            context_window_threshold=cfg.context_window_threshold,
         )
         for role, cfg in resolved.items()
     ]

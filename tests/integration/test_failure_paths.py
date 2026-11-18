@@ -13,6 +13,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from quarry.schemas import ScanStatus, SubsystemAssignment
 from quarry_activities.emit_agent_tasks import emit_agent_tasks
+from quarry_activities.handoff import load_handoff_artifacts, write_handoff_artifacts
 from quarry_activities.hunt import hunt_activity
 from quarry_activities.provenance import build_scan_manifest_activity
 from quarry_activities.recon_subsystem import recon_subsystem_activity
@@ -52,6 +53,8 @@ async def test_failed_scan_sets_failed_status_and_preserves_artifacts(
         task_queue=task_queue,
         workflows=[RunScanWorkflow],
         activities=[
+            load_handoff_artifacts,
+            write_handoff_artifacts,
             create_repository_snapshot,
             persist_scan_state,
             failing_recon_orchestrator,

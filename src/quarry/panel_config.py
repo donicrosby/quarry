@@ -101,6 +101,13 @@ class RoleConfig(BaseModel):
     # Per-role caps (also settable per tier). Unset = bounded only by global caps.
     tool_call_cap: int | None = None
     thinking_budget_tokens: int | None = None
+    # Per-role context-window enforcement (hunter-context-reset). Unset = unbounded
+    # history growth (the pre-reset behaviour). When set, the agent loop folds all
+    # but the most recent turns into a summary once the accumulated history reaches
+    # ``context_window_threshold`` of this limit.
+    context_window_tokens: int | None = None
+    # Fraction of ``context_window_tokens`` that triggers a history reset.
+    context_window_threshold: float = 0.8
     # Optional ordered tier set. Empty = single-model role (implicit reasoner tier).
     tiers: list[ModelTier] = Field(default_factory=_empty_tiers)
 
@@ -154,7 +161,11 @@ def enforce_vendor_allowlist(panel: dict[str, RoleConfig], allowlist: list[str])
 # The default built-in panel.  All roles fall back here if not overridden.
 DEFAULT_PANEL: dict[str, RoleConfig] = {
     "recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
-    "hunt": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    # Hunters accumulate the most conversation history (read_file/grep output over
+    # 40 iterations), so the hunt role carries a conservative limit out of the box.
+    "hunt": RoleConfig(
+        provider=Provider.MOCK, model="mock-v1", rpm=30, context_window_tokens=32000
+    ),
     "validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     # calibrate: post-validation severity calibration (severity-calibration
     # capability). Separate from validate to keep the adversarial-review

@@ -15,7 +15,7 @@ from quarry.schemas import (
     IntegrationStatus,
     utc_now,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore
 
 
 def build_idempotency_key(scan_id: str, sink_name: str, fingerprint: str) -> str:
@@ -32,7 +32,7 @@ class DeliveryContext:
     scan_id: str
     workspace_id: str
     dry_run: bool
-    artifact_store: LocalArtifactStore | None = None
+    artifact_store: ArtifactStore | None = None
     already_delivered: set[str] = field(default_factory=_empty_str_set)
 
 

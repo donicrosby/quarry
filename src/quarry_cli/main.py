@@ -14,7 +14,14 @@ from uuid import uuid4
 import httpx
 import typer
 
-from quarry.benchmark import compare, load_ground_truth
+from quarry.benchmark import (
+    compare,
+    diff_run_results,
+    load_ground_truth,
+    local_benchmark_run_result,
+)
+from quarry.benchmark_artifacts import BenchmarkRunResult
+from quarry.benchmark_inventory import build_inventory, format_inventory_rows
 from quarry.config import QuarrySettings
 from quarry.panel_config import resolve_auth, resolve_focus
 from quarry.schemas import FinalFinding, ScanSummary, Target, VulnerabilityClass
@@ -40,6 +47,7 @@ provenance_app = typer.Typer(help="Prompt-provenance verification and GC retenti
 plugin_app = typer.Typer(help="Inspect installed plugins.")
 ci_app = typer.Typer(help="Context-injector dry-run utilities.")
 POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_BENCHMARK_ARTIFACT_ROOT = Path(".quarry/benchmarks")
 TERMINAL_SCAN_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CANCELED"})
 
 app.add_typer(scan_app, name="scan")
@@ -504,24 +512,86 @@ def benchmark_local(
             help="Probe confirmed findings to collect proof artifacts",
         ),
     ] = False,
+    artifact_root: Annotated[
+        Path,
+        typer.Option(
+            "--artifact-root",
+            help=(
+                "Directory to write the BenchmarkRunResult artifact under "
+                "(one <run_id>/result.json per run)"
+            ),
+        ),
+    ] = DEFAULT_BENCHMARK_ARTIFACT_ROOT,
 ) -> None:
     """Scan the demo app via the server and compare findings to ground truth."""
     settings = QuarrySettings()
     try:
         lines = asyncio.run(
             _benchmark_local_command(
-                settings, repo, ground_truth, target, dynamic_validation, live_prove
+                settings,
+                repo,
+                ground_truth,
+                target,
+                dynamic_validation,
+                live_prove,
+                artifact_root=artifact_root,
             )
         )
     except httpx.ConnectError:
         _exit_server_not_reachable(settings)
-    except FileNotFoundError:
-        typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+    except FileNotFoundError as exc:
+        # A missing ground-truth file is the common case; anything else that
+        # raises FileNotFoundError (e.g. a checkout without prompts/) must not
+        # be mislabelled as the ground truth.
+        if not Path(ground_truth).is_file():
+            typer.echo(f"Error: ground truth file not found at {ground_truth}", err=True)
+        else:
+            typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
     _echo_lines(lines)
+
+
+@benchmark_app.command("inventory")
+def benchmark_inventory(
+    prompts_dir: Annotated[
+        Path,
+        typer.Option(
+            "--prompts-dir",
+            help="Prompts root; hunt templates are read from <root>/hunt.",
+        ),
+    ] = Path("prompts"),
+    ground_truth_dir: Annotated[
+        Path,
+        typer.Option(
+            "--ground-truth-dir",
+            help="Directory of ground-truth manifests (*.json).",
+        ),
+    ] = Path("tests/golden/ground_truth"),
+) -> None:
+    """List every VulnerabilityClass as huntable and/or benchmarkable."""
+    rows = build_inventory(prompts_dir=prompts_dir, ground_truth_dir=ground_truth_dir)
+    _echo_lines(format_inventory_rows(rows))
+
+
+@benchmark_app.command("diff")
+def benchmark_diff(
+    a: Annotated[Path, typer.Option("--a", help="Path to run A's result.json artifact.")],
+    b: Annotated[Path, typer.Option("--b", help="Path to run B's result.json artifact.")],
+) -> None:
+    """Compare two BenchmarkRunResult artifacts field-by-field (deltas are B - A)."""
+    try:
+        run_a = BenchmarkRunResult.load(a)
+        run_b = BenchmarkRunResult.load(b)
+    except FileNotFoundError as exc:
+        typer.echo(f"Error: benchmark artifact not found: {exc}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        typer.echo(f"Error: invalid benchmark artifact: {exc}", err=True)
+        raise typer.Exit(1) from None
+    _echo_lines(diff_run_results(run_a, run_b).summary_lines())
 
 
 @benchmark_app.command("cybergym")
@@ -638,6 +708,8 @@ async def _benchmark_local_command(
     target: str | None,
     dynamic_validation: bool = False,
     live_prove: bool = False,
+    *,
+    artifact_root: Path = DEFAULT_BENCHMARK_ARTIFACT_ROOT,
 ) -> list[str]:
     if ground_truth_is_inside_repo(repo, ground_truth):
         raise ValueError(
@@ -666,13 +738,33 @@ async def _benchmark_local_command(
                 break
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
         runtime_seconds = time.monotonic() - started
+        scan = await client.get_scan(scan_id)
         findings = await client.get_findings(scan_id)
 
     final_findings = [
         finding for finding in findings["final_findings"] if isinstance(finding, FinalFinding)
     ]
     benchmark = compare(final_findings, truth, runtime_seconds=runtime_seconds)
-    return [f"scan_id={scan_id}", *benchmark.summary_lines()]
+    # bench 1.3/1.4: persist the full BenchmarkRunResult (metrics + provenance),
+    # not just the summary lines, so local runs are diffable field-by-field.
+    run_result = local_benchmark_run_result(
+        benchmark,
+        scan=scan,
+        config={
+            "repo": repo,
+            "ground_truth": ground_truth,
+            "target": target,
+            "dynamic_validation": dynamic_validation,
+            "live_prove": live_prove,
+            "vuln_classes": [vuln_class.value for vuln_class in truth_classes],
+        },
+    )
+    artifact_path = run_result.save(Path(artifact_root).expanduser().resolve())
+    return [
+        f"scan_id={scan_id}",
+        *benchmark.summary_lines(),
+        f"artifact={artifact_path}",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -735,10 +827,14 @@ def provenance_verify(
         expected_user_prompt_hash=user_hash,
     )
 
-    if ok and prompt_store is not None:
-        from quarry_artifacts.local import LocalArtifactStore
+    if ok and prompt_store is not None and inv.prompt_ref is not None:
+        from quarry_artifacts.store import resolve_artifact_store
 
-        stored_ok = verify_stored_prompt(inv, LocalArtifactStore(prompt_store))
+        # Route by the ref's URI scheme (ADR-024 §B) so a prompt stored under a
+        # network backend verifies too; the file scheme resolves through
+        # build_artifact_store().
+        store = resolve_artifact_store(inv.prompt_ref, root=str(prompt_store))
+        stored_ok = verify_stored_prompt(inv, store)
         if stored_ok is False:
             typer.echo(f"FAIL  {inv.id}  stored prompt bytes do not match record", err=True)
             raise typer.Exit(code=1)
