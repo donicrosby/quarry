@@ -1,0 +1,7 @@
+{
+  "name": "dependency-manifest-fixture",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node setup.js"
+  }
+}

@@ -109,6 +109,9 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # Supply-chain risk detected statically from dependency manifests by the
+    # deterministic dependency-risk scanner.
+    SUPPLY_CHAIN = "supply_chain"
 
 
 class TriageLabel(StrEnum):

@@ -284,6 +284,10 @@ def _empty_run_plugins_active() -> list[str]:
     return []
 
 
+def _empty_typosquat_patterns() -> list[str]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -297,6 +301,9 @@ class RunScanInput(BaseModel):
     repo_url: str | None = None
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
+    # Typosquat name patterns for the pre-recon dependency-manifest scanner
+    # (resolved from QuarrySettings outside the workflow). Empty = no-op.
+    typosquat_patterns: list[str] = Field(default_factory=_empty_typosquat_patterns)
     hunt_max_concurrent: int = 8
     # Cap on concurrently in-flight per-finding ``tracer-finding`` activities in
     # the TRACER stage (scan-stage-fanout). Trace is heavier per call than hunt,
@@ -601,6 +608,11 @@ class RunScanWorkflow:
 
         scan_manifest = await self._record_manifest(scan_input, scan)
 
+        # Candidate accumulator: declared pre-RECON so the deterministic
+        # dependency-manifest sweep below can seed it; the coverage loop appends
+        # agent/sweep candidates as it runs.
+        candidate_findings: list[CandidateFinding] = []
+
         snapshot: RepositorySnapshot | None = None
         if not _stage_completed(completed_stage, "SNAPSHOT"):
             self._current_stage = "SNAPSHOT"
@@ -632,6 +644,44 @@ class RunScanWorkflow:
                 },
             )
             await _persist_scan_stage(scan_input.db_path, scan.id, "SNAPSHOT")
+
+        # ── Deterministic dependency-manifest sweep (pre-recon) ──────────────
+        # Static supply-chain scan of the five manifest formats; deterministic,
+        # no model calls, no network. Runs between SNAPSHOT and RECON (no new
+        # canonical stage) and feeds its findings into the candidate pool so
+        # they flow through the normal validate/dedup pipeline. Gated on the
+        # SUPPLY_CHAIN class being in scope, mirroring the secrets/SSRF sweeps.
+        if VulnerabilityClass.SUPPLY_CHAIN in scan.profile.vuln_classes:
+            dependency_raw = await workflow.execute_activity(
+                "dependency-risk-scanner",
+                args=[
+                    repo_path,
+                    json.dumps({"typosquat_patterns": scan_input.typosquat_patterns}),
+                ],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=self._retry_policy,
+            )
+            dependency_candidates = _candidate_findings_from_activity(dependency_raw)
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in dependency_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                stamped = candidate.model_copy(
+                    update={"scan_id": scan.id, "created_at": workflow.now()}
+                )
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(stamped)},
+                )
+                candidate_findings.append(stamped)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": stamped.id, "source": "dependency-risk-scan"},
+                )
 
         # ── RECON stage ──────────────────────────────────────────────────────
         # Runs the recon agent (orchestrator → subsystems → synthesis) to
@@ -832,7 +882,6 @@ class RunScanWorkflow:
         # completed_stage-based resume only applies to round 0 — resuming a
         # partially-run loop (round_index > 0) is not supported (see
         # openspec/changes/iterative-coverage-loop/design.md Non-Goals).
-        candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
         needs_proof_findings: list[CandidateFinding] = []
         proof_artifacts: list[ProofArtifact] = []
@@ -3972,6 +4021,16 @@ def _agent_tasks_from_activity(payload: object) -> list[AgentTask]:
         return []
     return [
         item if isinstance(item, AgentTask) else AgentTask.model_validate(item)
+        for item in cast(list[object], payload)
+    ]
+
+
+def _candidate_findings_from_activity(payload: object) -> list[CandidateFinding]:
+    """Coerce a dependency-risk-scanner payload into CandidateFindings."""
+    if not isinstance(payload, list):
+        return []
+    return [
+        item if isinstance(item, CandidateFinding) else CandidateFinding.model_validate(item)
         for item in cast(list[object], payload)
     ]
 

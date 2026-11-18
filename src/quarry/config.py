@@ -1,5 +1,6 @@
 """Quarry configuration management."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,3 +53,8 @@ class QuarrySettings(BaseSettings):
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+
+    # Dependency-manifest supply-chain scanner. Configurable typosquat name
+    # patterns; the check is a no-op until at least one pattern is configured.
+    # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')
+    typosquat_patterns: list[str] = Field(default_factory=list)
