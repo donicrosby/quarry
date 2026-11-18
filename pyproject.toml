@@ -45,7 +45,7 @@ artifacts-s3 = ["boto3>=1.35"]
   dev = [
   "pre-commit>=4.5.0",
   "pyright>=1.1.401",
-  "pytest>=8.3.5",
+  "pytest>=9.2.0",
   "pytest-asyncio>=0.26.0",
   "pytest-shard>=0.1.2",
   "pytest-timeout>=2.3.1",
