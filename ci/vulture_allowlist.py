@@ -278,6 +278,7 @@ _ALLOWLIST = [
     src.quarry_models.validation.parse_and_validate_output,
     src.quarry_persistence.repositories.QuarryRepository.from_engine,
     src.quarry_plugins.context.kb_context.KB_CONTEXT_PLUGIN,
+    src.quarry_plugins.context.binary_analysis_context.BINARY_ANALYSIS_PLUGIN,
     src.quarry_plugins.context.multitenant_isolation.MULTITENANT_ISOLATION_PLUGIN,
     src.quarry_plugins.context.template_injection.TEMPLATE_INJECTION_PLUGIN,
     src.quarry_plugins.hooks.slack_notify.SLACK_NOTIFY_HOOK,

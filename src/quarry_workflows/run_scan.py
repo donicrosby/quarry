@@ -836,6 +836,49 @@ class RunScanWorkflow:
                     {"error": _describe_failure(exc)},
                 )
 
+            # ── Binary analysis (slice-3 C6) ────────────────────────────────
+            # Deterministic, read-only static inspection of the repo's binaries
+            # (file type, hardening, linked libraries, SUID/sgid, symlinks),
+            # run inside RECON BEFORE the hunt stage. The report is persisted to
+            # the artifact store under a well-known key; the hunt/gapfill stages
+            # consume it at execution time. Best-effort like kb-recon: a failure
+            # never blocks the scan — the injector returns None when the report
+            # is absent.
+            try:
+                binary_payload = await workflow.execute_activity(
+                    "binary-analysis",
+                    args=[repo_path, artifact_root],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                binary_key = _binary_analysis_key_from_activity(binary_payload)
+                if binary_key is not None:
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "update_scan_metadata",
+                        {
+                            "scan_id": scan.id,
+                            "metadata": {
+                                "binary_analysis_artifact_key": binary_key,
+                                "binary_analysis_completed_at": workflow.now().isoformat(),
+                            },
+                        },
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "binary_analysis.completed",
+                        {"artifact_key": binary_key},
+                    )
+            except Exception as exc:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "binary_analysis.failed",
+                    {"error": _describe_failure(exc)},
+                )
+
             # Emit one AgentTask per (vuln_class, scope)
             emit_payload = await workflow.execute_activity(
                 "emit-agent-tasks",
@@ -4167,6 +4210,39 @@ def build_differential_evidence(
 # (the canonical home — see the import block above).
 
 
+def _legacy_proof_evidence_refs(capture: "Any", now: "datetime") -> list[ArtifactRef]:
+    """Reconstruct id-only evidence refs for a capture that predates D6.
+
+    Legacy and replay captures carry only artifact ids (no hash), so the refs are
+    rebuilt from the ids with an empty sha256 — the pre-quarantine behaviour.
+    """
+    evidence_ids: list[str] = []
+
+    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
+    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
+        evidence_ids.append(capture.stdout_artifact_ref)
+    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
+        evidence_ids.append(capture.stderr_artifact_ref)
+    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
+    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
+        evidence_ids.append(capture.request_artifact_ref)
+    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
+        evidence_ids.append(capture.body_artifact_ref)
+
+    return [
+        ArtifactRef(
+            id=ref_id,
+            uri=f"file://{ref_id}",
+            kind=ArtifactKind.TOOL_STDOUT,
+            content_type="text/plain",
+            sha256="",
+            size_bytes=0,
+            created_at=now,
+        )
+        for ref_id in evidence_ids
+    ]
+
+
 def build_proof_artifact(
     candidate: "CandidateFinding",
     capture: "Any",  # SandboxExecCapture | HttpResponseCapture
@@ -4182,32 +4258,14 @@ def build_proof_artifact(
     *proof_type* is "cli_exec" for sandbox results or "dynamic_http" for HTTP.
     The evidence_refs are populated from stdout/stderr artifact refs (sandbox)
     or request/body artifact refs (HTTP), whichever are non-empty.
+
+    Quarantine (D6): the capture's stored ``artifact_refs`` carry the sha256 and
+    byte count the artifact store recorded, so the evidence refs report the real
+    hash. Legacy/replay captures that carry only ref ids fall back to
+    reconstructed refs with an empty hash.
     """
-    evidence_ids: list[str] = []
-
-    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
-    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
-        evidence_ids.append(capture.stdout_artifact_ref)
-    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
-        evidence_ids.append(capture.stderr_artifact_ref)
-    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
-    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
-        evidence_ids.append(capture.request_artifact_ref)
-    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
-        evidence_ids.append(capture.body_artifact_ref)
-
-    evidence_refs = [
-        ArtifactRef(
-            id=ref_id,
-            uri=f"file://{ref_id}",
-            kind=ArtifactKind.TOOL_STDOUT,
-            content_type="text/plain",
-            sha256="",
-            size_bytes=0,
-            created_at=now,
-        )
-        for ref_id in evidence_ids
-    ]
+    stored_refs = cast("list[ArtifactRef]", getattr(capture, "artifact_refs", []) or [])
+    evidence_refs = list(stored_refs) or _legacy_proof_evidence_refs(capture, now)
 
     scrubber_hits: int = getattr(capture, "scrubber_hits", 0)
     redaction_status: RedactionStatus = (
@@ -4361,6 +4419,20 @@ def _kb_root_index_key_from_activity(payload: object) -> str | None:
     except Exception:
         return None
     return "kb/index.json" if index.entity_keys or index.dependency_graph_key else None
+
+
+def _binary_analysis_key_from_activity(payload: object) -> str | None:
+    """Extract the binary-analysis artifact key from the activity payload.
+
+    Returns None when the payload carries no key, so the workflow records
+    nothing on the scan metadata (the report is still readable at its
+    well-known artifact-root key by the consumption-time injector).
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = cast(dict[str, Any], payload)
+    key = data.get("artifact_key")
+    return key if isinstance(key, str) and key else None
 
 
 def _scan_kb_root_index_key(scan: Scan) -> str | None:

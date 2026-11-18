@@ -105,7 +105,14 @@ class BenchmarkRunResult(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def save(self, root: Path) -> Path:
-        """Persist to ``<root>/<run_id>/result.json``; returns the written path."""
+        """Persist to ``<root>/<run_id>/result.json``; returns the written path.
+
+        Overwrite semantics: the path is keyed on ``run_id`` (e.g.
+        ``local-<scan_id>``), so re-running the same scan against the same
+        artifact root silently replaces the prior ``result.json`` — there is no
+        run-history suffix and no collision guard. Use a distinct artifact root
+        (or a distinct run) to retain an earlier result.
+        """
         root = Path(root)
         if not root.is_absolute():
             msg = f"artifact root must be absolute, got {root!r}"
