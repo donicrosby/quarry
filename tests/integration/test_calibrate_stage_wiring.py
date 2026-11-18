@@ -98,6 +98,7 @@ def _validating_validator_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: object = None,
 ) -> dict[str, object]:
@@ -410,6 +411,7 @@ def _rejecting_validator_activity_fn() -> Callable[..., dict[str, object]]:
         scan_seed: int | None = None,
         artifact_root: str | None = None,
         kb_root_index_key: str | None = None,
+        credibility_config_json: str | None = None,
     ) -> dict[str, object]:
         finding_dict: dict[str, Any] = (
             cast("dict[str, Any]", finding) if isinstance(finding, dict) else {}
