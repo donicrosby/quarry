@@ -182,7 +182,7 @@ class TestVulnerableCliEnvInjection:
             spec,
             work_dir=tmp_path,
             resolved_env={},
-            target_endpoint=None,
+            egress_policy=None,
         )
         assert result.exit_code == 0, (
             f"expected the injected editor to run; rc={result.exit_code} stderr={result.stderr!r}"

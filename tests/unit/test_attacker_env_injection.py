@@ -219,7 +219,7 @@ class TestContainerArgRejection:
             patch("subprocess.run", return_value=_make_proc()) as mock_run,
             pytest.raises(ToolSecurityError, match="NAME=VALUE"),
         ):
-            ContainerSandbox().run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            ContainerSandbox().run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
         mock_run.assert_not_called()
 
 
@@ -281,14 +281,14 @@ class TestContainerEnvHandling:
         payload = "EDITOR=/bin/sh\nPATH=/usr/local/bin:/usr/bin:/bin\n"
         with patch("subprocess.run", return_value=_make_proc(stdout=payload)):
             result = ContainerSandbox().run(
-                spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None
+                spec, work_dir=tmp_path, resolved_env={}, egress_policy=None
             )
         assert result.stdout == "2 environment variables present (redacted)"
 
     def test_allowlisted_env_forwarded_as_dash_e(self, tmp_path: Path) -> None:
         spec = SandboxExecSpec(command="echo", args=["hi"], env={"EDITOR": "/bin/sh"})
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            ContainerSandbox().run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            ContainerSandbox().run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
         docker_args: list[str] = mock_run.call_args[0][0]
         env_values = [docker_args[i + 1] for i, a in enumerate(docker_args) if a == "-e"]
         assert "EDITOR=/bin/sh" in env_values
