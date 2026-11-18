@@ -16,13 +16,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from quarry.schemas import EnvProfile
+from quarry.schemas import ENV_VAR_ALLOWLIST, EnvProfile
+from quarry_tools.errors import ToolSecurityError
 
 # Wire strings for the env_profile tool-schema enum and dispatch default are
 # owned by the spec-backed EnvProfile enum (quarry.schemas) — the JSON wire
 # format is exactly the enum's values.
 _ENV_PROFILE_ENUM = [e.value for e in EnvProfile]
 _DEFAULT_ENV_PROFILE = EnvProfile.NONE.value
+
+# Allowlisted env-var names surfaced in the tool schema; must match the
+# ENV_VAR_ALLOWLIST the schema boundary enforces on SandboxExecSpec.env.
+_ALLOWED_ENV_NAMES: list[str] = sorted(ENV_VAR_ALLOWLIST)
+
+# env_profile values with a registered resolution implementation.  Only "none"
+# (empty env) is supported today: REPO_READONLY has no resolver, so requesting
+# it is refused at the tool-call boundary rather than silently dispatched.
+SUPPORTED_ENV_PROFILES: frozenset[str] = frozenset({EnvProfile.NONE.value})
 
 
 class _RunInSandboxTool:
@@ -59,6 +69,16 @@ class _RunInSandboxTool:
                 "enum": _ENV_PROFILE_ENUM,
                 "description": "Named environment profile; 'none' (default) = empty env",
             },
+            "env": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Environment variables applied to the target subprocess only. "
+                    f"Allowlisted names only: {_ALLOWED_ENV_NAMES}; each value must "
+                    "come from that name's fixed allowlist (e.g. EDITOR=/bin/sh). "
+                    "Never free-form."
+                ),
+            },
             "cwd": {
                 "type": "string",
                 "description": "Working directory relative to the sandbox root (default '.')",
@@ -88,7 +108,20 @@ class _RunInSandboxTool:
         The actual execution is performed by ``sandbox_exec_activity`` on the
         ``quarry-control`` Temporal task queue, after all six safety layers
         (ADR-017) have been verified by the activity worker.
+
+        Refuses any ``env_profile`` other than ``"none"``: no resolution
+        implementation is registered yet, so a named profile would be dispatched
+        with no defined (and no fail-safe) environment.
         """
+        requested_profile = str(inputs.get("env_profile", _DEFAULT_ENV_PROFILE))
+        if requested_profile not in SUPPORTED_ENV_PROFILES:
+            msg = (
+                f"env_profile '{requested_profile}' has no registered resolution "
+                f"implementation; only {sorted(SUPPORTED_ENV_PROFILES)} is accepted. "
+                "Set environment variables explicitly via the allowlisted 'env' field."
+            )
+            raise ToolSecurityError(msg)
+
         dispatch_payload: dict[str, Any] = {
             "dispatch": "quarry-control",
             "tool": self.name,
@@ -96,6 +129,7 @@ class _RunInSandboxTool:
             "args": inputs.get("args", []),
             "stdin": inputs.get("stdin"),
             "env_profile": inputs.get("env_profile", _DEFAULT_ENV_PROFILE),
+            "env": inputs.get("env", {}),
             "cwd": inputs.get("cwd", "."),
             "input_files": inputs.get("input_files", {}),
             "timeout_seconds": inputs.get("timeout_seconds", 30),

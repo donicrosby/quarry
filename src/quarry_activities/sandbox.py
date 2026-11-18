@@ -19,6 +19,7 @@ See ADR-017 §5 and ADR-022 for the full tier rationale.
 from __future__ import annotations
 
 import contextlib
+import re
 import subprocess
 import time
 import uuid
@@ -127,6 +128,56 @@ BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
     "ftp_proxy",
 )
 
+# Leading args matching a NAME=VALUE prefix are the `NAME=VALUE command` /
+# `env NAME=VALUE command` env-setting idiom.  Rejected as defense-in-depth
+# (ADR-017 §5): shell `-c` payloads and inline code can still set environment at
+# runtime, so the primary defense remains the empty base environment, the
+# credential scrubber, and egress gating.
+_REJECTED_ARG_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# Content-keyed environment-dump detection: stdout where KEY=VALUE lines are
+# both numerous (>= 2) and dominant (>= half of all non-empty lines) is treated
+# as an environment dump and redacted to a variable-count line.
+_ENV_DUMP_LINE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_DUMP_MIN_LINES: int = 2
+
+
+def _validate_args(args: list[str]) -> None:
+    """Reject LEADING ``NAME=VALUE`` args before execution.
+
+    Only the leading run of ``NAME=VALUE`` args is inspected (scan from
+    ``args[0]`` until the first non-matching arg) — the ``NAME=VALUE command``
+    and ``env NAME=VALUE command`` idioms.  ``-e`` / ``--env`` flags and
+    non-leading matches (e.g. a ``sh -c "x=1; echo"`` payload) are permitted.
+    Shared by all sandbox tiers.
+    """
+    for arg in args:
+        if not _REJECTED_ARG_PREFIX_PATTERN.match(arg):
+            break
+        msg = (
+            f"Sandbox arg '{arg}' sets an environment variable (leading NAME=VALUE). "
+            "Use the allowlisted SandboxExecSpec 'env' field instead of the arg idiom."
+        )
+        raise ToolSecurityError(msg)
+
+
+def _redact_env_dump_output(raw_stdout: str) -> str:
+    """Return *raw_stdout*, or a variable-count line when it is an env dump.
+
+    Content-keyed (not command-keyed): when at least two non-empty stdout lines
+    match ``^[A-Za-z_][A-Za-z0-9_]*=`` and those matching lines comprise at least
+    half of all non-empty lines, stdout is replaced with
+    ``"<N> environment variables present (redacted)"`` (N = matching-line count).
+    Otherwise stdout is returned unchanged.  Exit codes are never touched.
+    """
+    lines = [line for line in raw_stdout.splitlines() if line.strip()]
+    if len(lines) < _ENV_DUMP_MIN_LINES:
+        return raw_stdout
+    matching = sum(1 for line in lines if _ENV_DUMP_LINE_PATTERN.match(line))
+    if matching < _ENV_DUMP_MIN_LINES or matching * 2 < len(lines):
+        return raw_stdout
+    return f"{matching} environment variables present (redacted)"
+
 
 def _set_rlimits() -> None:
     """preexec_fn: apply POSIX resource limits inside the child process."""
@@ -193,19 +244,27 @@ def _stage_input_files(input_files: dict[str, str], work_dir: Path) -> None:
         resolved.write_text(content, encoding="utf-8")
 
 
-def _build_safe_env(resolved_env: dict[str, str]) -> dict[str, str]:
-    """Build a minimal, safe environment dict from *resolved_env*.
+def _build_safe_env(
+    resolved_env: dict[str, str],
+    injected_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a minimal, safe environment dict from *resolved_env* and *injected_env*.
 
-    Inherits nothing from the parent process.  Only resolved_env values
-    (QUARRY_INJECTED_CRED_* and similar) are forwarded.  Proxy vars are
-    explicitly excluded so the subprocess/container cannot make unintended
-    network calls.  Shared by all sandbox tiers.
+    Inherits nothing from the parent process.  *resolved_env* values
+    (QUARRY_INJECTED_CRED_* and similar) and the schema-allowlisted
+    ``SandboxExecSpec.env`` entries are forwarded.  Proxy vars are explicitly
+    excluded so the subprocess/container cannot make unintended network calls.
+    *injected_env* is merged AFTER proxy-var blocking and is applied to the target
+    subprocess only (the sandbox runtime process never inherits it).  Shared by
+    all sandbox tiers.
     """
     env: dict[str, str] = {}
     env.update(resolved_env)
     for key in list(env):
         if any(key.startswith(prefix) or key == prefix for prefix in BLOCKED_ENV_PREFIXES):
             del env[key]
+    if injected_env:
+        env.update(injected_env)
     return env
 
 
@@ -236,9 +295,10 @@ class LocalSubprocessSandbox:
     ) -> SandboxResult:
         """Execute spec.command inside work_dir and return captured output."""
         self._validate_command(spec.command)
+        _validate_args(spec.args)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
         _stage_input_files(spec.input_files, work_dir)
-        env = _build_safe_env(resolved_env)
+        env = _build_safe_env(resolved_env, spec.env)
         timeout = min(spec.timeout_seconds, HARD_TIMEOUT_SECONDS)
 
         cmd = [spec.command, *spec.args]
@@ -266,7 +326,9 @@ class LocalSubprocessSandbox:
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        # Cap output before it leaves the sandbox layer.
+        # Redact a content-keyed environment dump, then cap before output leaves
+        # the sandbox layer.
+        stdout = _redact_env_dump_output(stdout)
         stdout = _cap_bytes(stdout, MAX_OUTPUT_BYTES)
         stderr = _cap_bytes(stderr, MAX_OUTPUT_BYTES)
 
@@ -345,9 +407,10 @@ class ContainerSandbox:
         target_endpoint: TargetEndpoint | None,
     ) -> SandboxResult:
         """Execute *spec* inside a throwaway Docker container."""
+        _validate_args(spec.args)
         _stage_input_files(spec.input_files, work_dir)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
-        env = _build_safe_env(resolved_env)
+        env = _build_safe_env(resolved_env, spec.env)
         timeout = min(spec.timeout_seconds, HARD_TIMEOUT_SECONDS)
 
         # Unique name so we can force-kill on timeout without ambiguity.
@@ -382,6 +445,7 @@ class ContainerSandbox:
             _kill_container(container_name)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        stdout = _redact_env_dump_output(stdout)
         stdout = _cap_bytes(stdout, MAX_OUTPUT_BYTES)
         stderr = _cap_bytes(stderr, MAX_OUTPUT_BYTES)
 

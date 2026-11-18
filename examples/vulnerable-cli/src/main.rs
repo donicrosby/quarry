@@ -3,6 +3,7 @@
 /// Vulnerabilities (intentional):
 /// 1. Command injection: --run-cmd passes user input directly to sh -c.
 /// 2. Path traversal: --read-file reads any path without canonicalization.
+/// 3. Env injection: --edit executes the attacker-controlled $EDITOR value.
 ///
 /// DO NOT deploy in any real environment.
 use std::env;
@@ -16,6 +17,7 @@ fn main() {
         eprintln!("Usage: vulnerable-cli <subcommand> [args]");
         eprintln!("  --run-cmd <shell-expression>  Execute shell expression (UNSAFE)");
         eprintln!("  --read-file <path>            Read and print file contents");
+        eprintln!("  --edit <path>                 Open path with $EDITOR (UNSAFE)");
         exit(1);
     }
 
@@ -49,6 +51,20 @@ fn main() {
                     exit(1);
                 }
             }
+        }
+        "--edit" => {
+            if args.len() < 3 {
+                eprintln!("--edit requires an argument");
+                exit(1);
+            }
+            // VULNERABILITY: attacker-controlled $EDITOR is executed with an
+            // attacker-controlled path (environment-variable injection).
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&args[2])
+                .status()
+                .expect("failed to launch editor");
+            exit(status.code().unwrap_or(1));
         }
         other => {
             eprintln!("Unknown subcommand: {}", other);

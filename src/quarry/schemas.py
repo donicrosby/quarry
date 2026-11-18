@@ -1513,16 +1513,30 @@ class ExploitChain(BaseModel):
 # Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
 # ---------------------------------------------------------------------------
 
+# Allowlisted environment-variable names and their permitted values for target
+# subprocess execution.  Both the names and the values are fixed and
+# infrastructure-provided: the prove agent selects from this map and never
+# supplies a free-form value.  LD_PRELOAD / LD_LIBRARY_PATH are deliberately
+# absent (no dynamic-loader injection surface) and PATH values are restricted to
+# standard system directories.
+ENV_VAR_ALLOWLIST: dict[str, frozenset[str]] = {
+    "EDITOR": frozenset({"/bin/sh"}),
+    "PATH": frozenset({"/usr/local/bin:/usr/bin:/bin"}),
+}
+
 
 class EnvProfile(StrEnum):
     """Named, vetted environment profiles for sandbox execution.
 
     The prove agent picks a NAME, never raw env-var values.  Credential injection
     (QUARRY_INJECTED_CRED_*) is the sole exception and is resolved worker-side (ADR-018).
+
+    REPO_READONLY is deferred: until a fixed, enumerated resolution map ships, any
+    env_profile other than NONE is refused at the tool-call boundary (fail-safe).
     """
 
     NONE = "none"  # empty env — default; tightest containment
-    REPO_READONLY = "repo_readonly"  # minimal PATH + repo root only, no credentials
+    REPO_READONLY = "repo_readonly"  # deferred: no resolution implementation yet
 
 
 class SandboxExecSpec(BaseModel):
@@ -1531,16 +1545,39 @@ class SandboxExecSpec(BaseModel):
     Parallels HttpRequestSpec: carries no inline secrets; auth_profile and env_profile
     are NAMES resolved worker-side at dispatch (ADR-018).  input_files are crafted
     attacker-controlled files staged into the sandbox working dir before execution.
+    env carries allowlisted variables (fixed, infrastructure-provided values) and is
+    applied to the target subprocess only — the sandbox runtime never inherits it.
     """
 
     command: str
     args: list[str] = Field(default_factory=list)
     stdin: str | None = None
     env_profile: EnvProfile = EnvProfile.NONE
+    env: dict[str, str] = Field(default_factory=dict)  # allowlisted names + values only
     cwd: str = "."  # relative to sandbox working dir; restricted worker-side
     input_files: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = 30  # hard-capped worker-side (max 60 s)
     auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("env")
+    @classmethod
+    def _reject_non_allowlisted_env(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject env names/values outside the fixed ENV_VAR_ALLOWLIST."""
+        for name, value in v.items():
+            allowed_values = ENV_VAR_ALLOWLIST.get(name)
+            if allowed_values is None:
+                msg = (
+                    f"env var name '{name}' is not on the sandbox allowlist. "
+                    f"Permitted names: {sorted(ENV_VAR_ALLOWLIST)}"
+                )
+                raise ValueError(msg)
+            if value not in allowed_values:
+                msg = (
+                    f"env var value for '{name}' is not allowed. "
+                    f"Permitted values: {sorted(allowed_values)}"
+                )
+                raise ValueError(msg)
+        return v
 
     @field_validator("auth_profile")
     @classmethod
