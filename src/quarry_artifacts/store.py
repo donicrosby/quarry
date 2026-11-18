@@ -63,6 +63,24 @@ class ArtifactStore(Protocol):
         redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
     ) -> ArtifactRef: ...
 
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the object at *key* instead of rewriting it.
+
+        The append-only counterpart to ``put_bytes`` (which truncates).  The
+        per-agent execution log relies on it so a replay appends after the
+        original run's lines rather than truncating them.
+        """
+        ...
+
     def put_json(
         self,
         key: str,

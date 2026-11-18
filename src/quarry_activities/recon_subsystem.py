@@ -20,7 +20,9 @@ from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import EntryPoint, Provider, Subsystem, SubsystemAssignment
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
@@ -50,6 +52,7 @@ def recon_subsystem_activity(
     max_iterations: int = 40,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    replay_mode: bool = False,
 ) -> Subsystem:
     """Run the recon agent loop for one subsystem and return a Subsystem.
 
@@ -83,6 +86,7 @@ def recon_subsystem_activity(
             max_iterations,
             scan_seed,
             artifact_root,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -99,6 +103,7 @@ def _recon_subsystem_impl(
     max_iterations: int = 40,
     scan_seed: int | None = None,
     artifact_root: str | None = None,
+    replay_mode: bool = False,
 ) -> Subsystem:
     if isinstance(assignment, dict):
         assignment = SubsystemAssignment.model_validate(assignment)
@@ -170,6 +175,9 @@ def _recon_subsystem_impl(
         prompt_provenance=PromptProvenance.from_rendered(rendered),
         scan_id=scan_id,
         turn_timeout_seconds=recon_role.turn_timeout_seconds,
+        agent_instance_id=compute_agent_instance_id("recon", assignment.name),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:

@@ -2515,6 +2515,7 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan_input.dedup_max_iterations,
                             scan_input.scan_seed,
+                            artifact_root,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),

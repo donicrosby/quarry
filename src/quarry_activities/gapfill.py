@@ -34,7 +34,9 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
@@ -287,6 +289,7 @@ def gapfill_impl(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -396,6 +399,9 @@ def gapfill_impl(
         scan_id=scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        agent_instance_id=compute_agent_instance_id("gapfill", scan_id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -459,6 +465,7 @@ def gapfill_activity(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -503,6 +510,7 @@ def gapfill_activity(
             kb_root_index_key,
             exploratory_injection_fraction,
             exploratory_gap_paths,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -526,6 +534,7 @@ def _gapfill_activity_impl(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -583,6 +592,7 @@ def _gapfill_activity_impl(
         kb_root_index_key=kb_root_index_key,
         exploratory_injection_fraction=exploratory_injection_fraction,
         exploratory_gap_paths=exploratory_gap_paths,
+        replay_mode=replay_mode,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

@@ -133,6 +133,17 @@ def test_write_failure_is_best_effort(tmp_path: Path) -> None:
 
         def close(self) -> None:
             raise NotImplementedError
+        def append_bytes(
+            self,
+            key: str,
+            data: bytes,
+            *,
+            kind: ArtifactKind,
+            content_type: str,
+            metadata: dict[str, Any] | None = None,
+            redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+        ) -> ArtifactRef:
+            raise OSError("disk full")
 
     invs = [_inv("seed")]
     # Best-effort: an IO failure under redacted must not raise (scan continues).
