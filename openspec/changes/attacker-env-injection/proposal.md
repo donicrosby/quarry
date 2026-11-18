@@ -19,9 +19,11 @@ schema-level additionalProperties gate), three gaps persist:
    implementation that resolves it could introduce an attacker-controlled injection surface
    if the resolution map includes agent-controllable keys or values.
 
-3. **Environment-dump output leaks non-credential variables.** Commands that dump the
-   process environment (`env`, `printenv`, `python3 -c "import os; print(dict(os.environ))"`)
-   leak non-credential variable names and values into the evidence stream. While credential
+3. **Environment-dump output leaks non-credential variables on both streams.** Commands
+   that dump the process environment (`env`, `printenv`,
+   `python3 -c "import os; print(dict(os.environ))"`) leak non-credential variable names
+   and values into the evidence stream — via stdout directly, and via stderr when the
+   dump is redirected (e.g. `sh -c 'env 1>&2'` — live-proven in review). While credential
    values are scrubbed, non-credential vars (PATH, HOME, sandbox paths, and
    QUARRY_INJECTED_CRED_* variable names) leak and could inform escape attempts.
 
@@ -44,14 +46,15 @@ Add four requirements to `proof-and-sandbox-execution`:
   and inline code can set environment at runtime, and the actual protection is the empty
   base environment plus credential scrubbing plus egress gating.
 
-- **Content-keyed env-dump redaction** — any command whose stdout matches an
-  environment-dump shape (predominantly KEY=VALUE lines) SHALL have its output redacted
-  to a variable-count line before returning to the prompt stream, regardless of which
-  allowlisted command produced it.
+- **Content-keyed env-dump redaction on both streams** — any command whose stdout or
+  stderr matches an environment-dump shape (predominantly KEY=VALUE lines) SHALL have
+  its output redacted to a variable-count line before returning to the prompt stream,
+  regardless of which allowlisted command produced it. Detection is symmetric across
+  both streams.
 
 ## Impact
 
-- **Specs touched:** `proof-and-sandbox-execution` (4 ADDED requirements, 14 scenarios)
+- **Specs touched:** `proof-and-sandbox-execution` (4 ADDED requirements, 15 scenarios)
 - **Code touched:** `src/quarry/schemas.py` (SandboxExecSpec gains `env` field with
   allowlist validation), `src/quarry_activities/sandbox.py` (arg validation, env-dump
   output filter, env forwarding to subprocess), `src/quarry_tools/sandbox_tool.py`
@@ -78,8 +81,8 @@ Add four requirements to `proof-and-sandbox-execution`:
   empty base environment plus credential scrubbing plus egress gating
 - Obfuscated or transformed environment dumps (Python dict reprs such as
   `print(dict(os.environ))`, base64/hex encodings) — the shape detector matches
-  plaintext `KEY=VALUE` dumps only; credential values in any form remain covered by
-  the pre-existing scrubber
+  plaintext `KEY=VALUE` dumps on both stdout and stderr; credential values in any
+  form remain covered by the pre-existing scrubber
 
 ## Reconciled from 2026-09-10 ticket (t_f92a6a98)
 

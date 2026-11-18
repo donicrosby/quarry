@@ -77,12 +77,11 @@ egress gating.
 
 ### Requirement: Environment-dump output is content-keyed redacted
 
-When any allowlisted command produces stdout matching an environment-dump shape, the
-sandbox SHALL redact it to a variable-count line. Detection SHALL be content-keyed:
-stdout with at least two KEY=VALUE lines comprising at least half of non-empty lines
-SHALL be redacted regardless of which command produced it. The exit code SHALL be
-preserved. Obfuscated dump forms (dict reprs, encodings) are outside detection scope;
-credential scrubbing still applies to them.
+When any allowlisted command produces stdout or stderr matching an env-dump shape, the
+sandbox SHALL redact it to a variable-count line on both streams. Detection SHALL be
+content-keyed (at least two KEY=VALUE lines, at least half of non-empty lines) and
+symmetric across stdout and stderr. The exit code SHALL be preserved. Obfuscated
+forms are outside detection scope; credential scrubbing still applies.
 
 #### Scenario: env-command-output-is-redacted
 
@@ -101,6 +100,12 @@ credential scrubbing still applies to them.
   `python3 -c "import os; [print(k + '=' + v) for k, v in os.environ.items()]"`
   and stdout matches the env-dump shape
 - **THEN** the stdout is content-matched and replaced with the count line
+
+#### Scenario: stderr-env-dump-is-redacted
+
+- **WHEN** the prove agent runs `sh -c "env 1>&2"` and stderr matches the env-dump shape
+- **THEN** the stderr artifact is content-matched and replaced with the count line
+  (symmetric with stdout redaction)
 
 #### Scenario: normal-command-output-passes-through
 
