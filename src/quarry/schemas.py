@@ -938,6 +938,12 @@ class GroundTruthFinding(BaseModel):
     route: str | None = None
     severity: Severity
     expected_fingerprint_hint: str | None = None
+    # Planted-regression manifests flag the vulns they seed so the benchmark can
+    # report recall drops on exactly those, and record the proof the harness is
+    # expected to produce (e.g. "command_output", "file_read"). Both default off
+    # so pre-existing fixtures stay valid.
+    planted: bool = False
+    expected_proof_type: str | None = None
 
 
 class ModelInvocation(BaseModel):
