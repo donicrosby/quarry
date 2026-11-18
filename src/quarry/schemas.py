@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -109,6 +110,11 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # CLI-side classes (tempfile-race-terminal-escape change): unsafe temporary
+    # file creation in shared directories, and attacker-controlled input echoed
+    # to a terminal without ANSI/escape-sequence sanitization.
+    TEMPFILE_RACE = "tempfile_race"
+    TERMINAL_ESCAPE = "terminal_escape"
 
 
 class TriageLabel(StrEnum):
@@ -428,6 +434,65 @@ class ArtifactRef(BaseModel):
     redaction_status: RedactionStatus = RedactionStatus.UNKNOWN
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class QuarantineEventType(StrEnum):
+    """Outcome of one proof-artifact quarantine policy decision."""
+
+    ARTIFACT_QUARANTINED = "artifact.quarantined"
+    ARTIFACT_REJECTED_OVERSIZE = "artifact.rejected_oversize"
+    ARTIFACT_REMOTE_WRITE_REFUSED = "artifact.remote_write_refused"
+    ARTIFACT_SCANNER_SKIPPED = "artifact.scanner_skipped"
+    ARTIFACT_SCANNER_DETECTED = "artifact.scanner_detected"
+
+
+class QuarantineEvent(BaseModel):
+    """A recorded proof-artifact quarantine decision.
+
+    Every policy decision in the quarantine pipeline (acceptance, over-size
+    rejection, refused remote write, scanner skipped, scanner detection) is
+    recorded as one of these: logged by the pipeline, embedded in the stored
+    ``ArtifactRef.metadata`` for accepted artifacts, and carried on the refusal
+    exception for rejected ones.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    event_type: QuarantineEventType
+    artifact_kind: ArtifactKind | None = None
+    scan_id: str = ""
+    artifact_key: str = ""
+    byte_count: int | None = None
+    limit_bytes: int | None = None
+    detail: str = ""
+    created_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        event_type: QuarantineEventType,
+        *,
+        artifact_kind: ArtifactKind | None = None,
+        scan_id: str = "",
+        artifact_key: str = "",
+        byte_count: int | None = None,
+        limit_bytes: int | None = None,
+        detail: str = "",
+        now: datetime | None = None,
+    ) -> QuarantineEvent:
+        """Build a quarantine event with a fresh id and timestamp."""
+        return cls(
+            id=str(uuid4()),
+            event_type=event_type,
+            artifact_kind=artifact_kind,
+            scan_id=scan_id,
+            artifact_key=artifact_key,
+            byte_count=byte_count,
+            limit_bytes=limit_bytes,
+            detail=detail,
+            created_at=now if now is not None else utc_now(),
+        )
 
 
 class FileManifestEntry(BaseModel):
@@ -883,6 +948,11 @@ class ProofArtifact(BaseModel):
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     safe_payload: str | None = None
     redaction_status: RedactionStatus
+    # Proof-artifact quarantine (D6 / proof-artifact-quarantine): proof output is
+    # attacker-controlled content and enters the store quarantined — fail-closed
+    # default True. Only an explicit operator release clears it; there is no
+    # automatic release path.
+    quarantine: bool = True
     created_at: datetime
 
 
@@ -1655,6 +1725,10 @@ class HttpResponseCapture(BaseModel):
     # legacy captures; the workflow persists ``findings`` through the existing
     # ``persist-scan-state`` path.
     session_token_analysis: SessionTokenAnalysisResult | None = None
+    # The stored ArtifactRefs (request, response body) as the quarantine pipeline
+    # returned them, so the pure workflow can attach the recorded sha256/size to
+    # the proof artifact's evidence refs. Empty for legacy captures.
+    artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
 
 
 class SessionTokenAnalysisResult(BaseModel):
@@ -1794,6 +1868,12 @@ class SandboxExecCapture(BaseModel):
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
     timed_out: bool = False
+    # The stored ArtifactRefs (stdout, stderr) as the quarantine pipeline
+    # returned them, so the pure workflow can attach the recorded sha256/size to
+    # the proof artifact's evidence refs. Empty for captures built before this
+    # field existed (legacy/replay payloads) — the workflow then reconstructs
+    # id-only refs.
+    artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
 
 
 class ProveCorpus(BaseModel):

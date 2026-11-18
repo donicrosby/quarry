@@ -243,6 +243,12 @@ _ALLOWLIST = [
 
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
     src.quarry.benchmark_inventory.inventory_as_dicts,
+    # Plugin-level match->CandidateFinding converters: the spec pins them on the
+    # scanner modules (analogous to secrets); production sweep wiring uses the
+    # workflow-side mirror in quarry_workflows.candidate_sources, so only unit
+    # tests reference these directly.
+    src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
+    src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
 
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
@@ -272,6 +278,7 @@ _ALLOWLIST = [
     src.quarry_models.validation.parse_and_validate_output,
     src.quarry_persistence.repositories.QuarryRepository.from_engine,
     src.quarry_plugins.context.kb_context.KB_CONTEXT_PLUGIN,
+    src.quarry_plugins.context.binary_analysis_context.BINARY_ANALYSIS_PLUGIN,
     src.quarry_plugins.context.multitenant_isolation.MULTITENANT_ISOLATION_PLUGIN,
     src.quarry_plugins.context.template_injection.TEMPLATE_INJECTION_PLUGIN,
     src.quarry_plugins.hooks.slack_notify.SLACK_NOTIFY_HOOK,
