@@ -93,3 +93,11 @@ def test_report_omits_proof_block_when_no_proof() -> None:
 
     assert "IDOR on /users/{user_id}" in report
     assert "#### Proof" not in report
+
+
+def test_report_renders_legacy_severity_disclosure_for_pre_contract_finding() -> None:
+    """finding-contract 6.1: a finding built without the contract renders the
+    pinned pre-contract disclosure rather than fabricated rationale."""
+    report = render_markdown_report(_scan(), [], None, [_idor_finding()], None, [_proof()])
+
+    assert "No structured severity rationale from pre-contract scan." in report
