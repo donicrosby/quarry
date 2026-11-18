@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -1652,6 +1653,20 @@ class ResolvedEgressPolicy(BaseModel):
         return not self.all_allowed_ips()
 
 
+class MultipartFieldSpec(BaseModel):
+    """One part of a multipart/form-data request body.
+
+    ``filename`` and ``content_type`` are optional: a part that carries neither
+    is a plain form field, one that carries either is sent as a file part (the
+    file-upload vulnerability class needs the latter).
+    """
+
+    name: str
+    value: str
+    filename: str | None = None
+    content_type: str | None = None
+
+
 class HttpRequestSpec(BaseModel):
     """The HTTP request a dynamic_validate or prove agent proposes.
 
@@ -1664,6 +1679,31 @@ class HttpRequestSpec(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
     auth_profile: str | None = None  # named cred only; never an inline token
+    # multipart/form-data parts. When non-empty the activity sends these and
+    # ignores ``body`` (file-upload probes).
+    multipart_fields: list[MultipartFieldSpec] | None = None
+    # Redirect-following is off by default; when on the activity follows up to
+    # ten hops, re-validating every hop's host against allowed_hosts.
+    follow_redirects: bool = False
+    # Per-request cookie injection; values are registered with the run scrubber
+    # and redacted from stored request artifacts.
+    cookies: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _warn_multipart_and_body(self) -> HttpRequestSpec:
+        """Warn (never fail) when both multipart parts and a raw body are set.
+
+        The activity sends the multipart payload and ignores ``body`` — the
+        warning makes that silent drop visible to the proposing agent.
+        """
+        if self.multipart_fields and self.body is not None:
+            warnings.warn(
+                "HttpRequestSpec carries both multipart_fields and body; "
+                "the multipart payload is sent and body is ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
 
     @field_validator("auth_profile")
     @classmethod
