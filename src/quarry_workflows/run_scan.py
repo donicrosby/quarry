@@ -125,6 +125,10 @@ from quarry_workflows.candidate_sources import (  # noqa: F401
 from quarry_workflows.candidate_sources import (  # noqa: F401
     ssrf_candidates_from_activity_payload as ssrf_candidates_from_activity_payload,
 )
+from quarry_workflows.candidate_sources import (
+    tempfile_race_candidates_from_activity_payload,
+    terminal_escape_candidates_from_activity_payload,
+)
 from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
     cell_key,
@@ -921,6 +925,77 @@ class RunScanWorkflow:
                     scan.id,
                     "finding.candidate_created",
                     {"finding_id": candidate.id, "source": "ssrf-sweep"},
+                )
+
+        # ── Deterministic tempfile-race + terminal-escape sweeps (C8/C9) ─────
+        # CLI-side presence-shaped classes: predictable temp paths / deprecated
+        # name-then-open tempfile APIs, and attacker-controlled input echoed to
+        # a terminal without ANSI sanitization. Same answer as secrets/SSRF —
+        # the deterministic sweep owns detection and feeds ordinary candidates
+        # through the same validate/dedup/promotion pipeline; exploitability
+        # adjudication stays with the agentic ensemble + the per-class hunt
+        # template. Runs once before the coverage loop; resume-safe via the
+        # existing candidate-id dedup.
+        if VulnerabilityClass.TEMPFILE_RACE in scan.profile.vuln_classes:
+            tempfile_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-tempfile-races",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            tempfile_candidates = tempfile_race_candidates_from_activity_payload(
+                tempfile_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in tempfile_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "tempfile-race-sweep"},
+                )
+
+        if VulnerabilityClass.TERMINAL_ESCAPE in scan.profile.vuln_classes:
+            terminal_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-terminal-escapes",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            terminal_candidates = terminal_escape_candidates_from_activity_payload(
+                terminal_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in terminal_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "terminal-escape-sweep"},
                 )
 
         # ── Live-exploitation track (Shannon pillar; design D1) ──────────────

@@ -71,6 +71,8 @@ class TestRegistryContents:
         names = _registered_names()
         assert "scan-repo-for-secrets" in names
         assert "scan-repo-for-ssrf-sinks" in names
+        assert "scan-repo-for-tempfile-races" in names
+        assert "scan-repo-for-terminal-escapes" in names
 
     def test_activity_names_are_unique_and_kebab_cased(self) -> None:
         names = sorted(_registered_names())

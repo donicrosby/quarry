@@ -109,6 +109,11 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # CLI-side classes (tempfile-race-terminal-escape change): unsafe temporary
+    # file creation in shared directories, and attacker-controlled input echoed
+    # to a terminal without ANSI/escape-sequence sanitization.
+    TEMPFILE_RACE = "tempfile_race"
+    TERMINAL_ESCAPE = "terminal_escape"
 
 
 class TriageLabel(StrEnum):
