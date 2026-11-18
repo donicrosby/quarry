@@ -23,7 +23,7 @@ import importlib
 import json
 import pickle
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from types import TracebackType
@@ -72,7 +72,7 @@ PLANTED_FIXTURES: dict[str, tuple[str, str, str, str]] = {
 
 
 @contextmanager
-def _planted_app() -> Iterator[dict[str, Any]]:
+def _planted_app() -> Generator[dict[str, Any], None, None]:
     """Import the target's modules with its directory on ``sys.path``.
 
     ``app.py`` imports its helpers as top-level modules (``from admin import ...``),

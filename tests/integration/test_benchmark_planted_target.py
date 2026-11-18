@@ -36,8 +36,8 @@ def _get_json(base: str, path: str) -> dict[str, Any]:
         return cast("dict[str, Any]", json.loads(response.read().decode("utf-8")))
 
 
-def _post_json(base: str, path: str, body: str) -> dict[str, Any]:
-    request = Request(f"{base}{path}", data=body.encode("utf-8"), method="POST")
+def _post_json(base: str, path: str) -> dict[str, Any]:
+    request = Request(f"{base}{path}", data=b"", method="POST")
     with urlopen(request, timeout=5) as response:  # noqa: S310 — loopback only
         return cast("dict[str, Any]", json.loads(response.read().decode("utf-8")))
 
@@ -70,11 +70,12 @@ def test_planted_target_launches_and_serves_every_sink(monkeypatch: pytest.Monke
         leaked = _get_json(base, "/admin/status?user=anon")
         assert leaked["users"] == "42"
 
-        # /profile unpickles an attacker blob; a benign payload round-trips.
+        # /profile unpickles an attacker blob (payload is a query param on the
+        # route); a benign payload round-trips.
         import pickle
 
         payload = pickle.dumps({"role": "admin"}).hex()
-        profile = _post_json(base, "/profile", payload)
+        profile = _post_json(base, f"/profile?payload={payload}")
         assert "admin" in profile["profile"]
     finally:
         terminate_local_target(process)
