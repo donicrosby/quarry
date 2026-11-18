@@ -832,6 +832,49 @@ class RunScanWorkflow:
                     {"error": _describe_failure(exc)},
                 )
 
+            # ── Binary analysis (slice-3 C6) ────────────────────────────────
+            # Deterministic, read-only static inspection of the repo's binaries
+            # (file type, hardening, linked libraries, SUID/sgid, symlinks),
+            # run inside RECON BEFORE the hunt stage. The report is persisted to
+            # the artifact store under a well-known key; the hunt/gapfill stages
+            # consume it at execution time. Best-effort like kb-recon: a failure
+            # never blocks the scan — the injector returns None when the report
+            # is absent.
+            try:
+                binary_payload = await workflow.execute_activity(
+                    "binary-analysis",
+                    args=[repo_path, artifact_root],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                binary_key = _binary_analysis_key_from_activity(binary_payload)
+                if binary_key is not None:
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "update_scan_metadata",
+                        {
+                            "scan_id": scan.id,
+                            "metadata": {
+                                "binary_analysis_artifact_key": binary_key,
+                                "binary_analysis_completed_at": workflow.now().isoformat(),
+                            },
+                        },
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "binary_analysis.completed",
+                        {"artifact_key": binary_key},
+                    )
+            except Exception as exc:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "binary_analysis.failed",
+                    {"error": _describe_failure(exc)},
+                )
+
             # Emit one AgentTask per (vuln_class, scope)
             emit_payload = await workflow.execute_activity(
                 "emit-agent-tasks",
@@ -4301,6 +4344,20 @@ def _kb_root_index_key_from_activity(payload: object) -> str | None:
     except Exception:
         return None
     return "kb/index.json" if index.entity_keys or index.dependency_graph_key else None
+
+
+def _binary_analysis_key_from_activity(payload: object) -> str | None:
+    """Extract the binary-analysis artifact key from the activity payload.
+
+    Returns None when the payload carries no key, so the workflow records
+    nothing on the scan metadata (the report is still readable at its
+    well-known artifact-root key by the consumption-time injector).
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = cast(dict[str, Any], payload)
+    key = data.get("artifact_key")
+    return key if isinstance(key, str) and key else None
 
 
 def _scan_kb_root_index_key(scan: Scan) -> str | None:

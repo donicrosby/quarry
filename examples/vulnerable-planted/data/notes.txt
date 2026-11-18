@@ -1,0 +1,3 @@
+release=planted-regression
+status=public
+note=second legitimate data file so the /files route has more than one seed
