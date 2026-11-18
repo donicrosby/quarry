@@ -165,6 +165,24 @@ uv run pre-commit install
 uv run pre-commit install --hook-type commit-msg
 ```
 
+### Browser login (opt-in)
+
+Browser-based login (ADR-023) needs the optional `quarry[browser]` extra plus a
+headless Chromium, and is exercised end-to-end against a local target by a gated
+manual test. CI (no browser) skips it cleanly:
+
+```bash
+uv sync --extra browser
+uv run playwright install chromium
+QUARRY_BROWSER_TESTS=1 uv run pytest tests/integration/test_browser_login_e2e.py
+```
+
+The browser-capable worker image is the `quarry-dynamic` Dockerfile stage:
+
+```bash
+docker build --target quarry-dynamic -t quarry:dynamic .
+```
+
 ## Deferred
 
 - Kubernetes deployment (see `docs/kubernetes-scale-plan.md`).
