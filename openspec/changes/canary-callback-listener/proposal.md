@@ -1,0 +1,28 @@
+# Change: canary-callback-listener
+
+## Why
+
+SSRF and XXE are proven not by inspecting a target's HTTP response but by observing an out-of-band callback — the target fetches a canary URL (SSRF) or parses an XML external entity pointing at it (XXE). Without an OOB listener, these vulnerability classes cannot be proved against a live target, and the prove stage falls back to `inconclusive` for every SSRF/XXE candidate.
+
+The D1 egress-policy change (`egress-policy-destination-sets`) built the containment primitive the canary needs — a per-policy `--internal` Docker network the sandbox shares with trusted infrastructure — plus the `CANARY_LISTENER` destination-set name, the `needs_canary` flag on `build_prove_sandbox_policy`, and the `canary_destinations` parameter on `build_egress_policy`. The listener itself and its proof integration were deferred to this change (the `needs_canary` flag has no caller and `canary_destinations` is always empty).
+
+## What Changes
+
+- **Canary listener lifecycle**: A new canary listener runs as infrastructure co-located with the sandbox — a sidecar container attached to the same `quarry-egress-*` internal network (Tier 2) or a `127.0.0.1`-only background thread in the worker process (Tier 1). The listener is started and stopped inside the `sandbox-exec` activity, not as separate Temporal activities; the activity input gains `canary_token: str | None`.
+- **Proof prompt injection**: The workflow generates a unique canary token per finding, constructs the canary URL, and injects it into the prove agent's prompt as a `canary_url` template variable. The agent is instructed to craft SSRF/XXE payloads that cause the target to reach the canary URL.
+- **Canary evidence collection**: After the sandbox executes, the activity collects the listener's request log and returns it as `CanaryCallback` entries on the `SandboxExecCapture`.
+- **Verdict integration**: A new `canary_evaluator` (registered for `SSRF` and `XXE` vulnerability classes) inspects the callback log: any callback whose path contains the probe token flips the verdict to `corroborated`. The workflow's `prove_outcome_from_captures` function is extended to consult canary evidence.
+
+## Impact
+
+- **Specs**: `proof-and-sandbox-execution` (ADDED: canary callback proof, canary URL injection, canary verdict evaluator), `sandbox-backends` (ADDED: canary listener lifecycle, bind-safety requirement).
+- **Code**: `src/quarry_activities/sandbox_exec.py` (canary sidecar lifecycle), `src/quarry_activities/inputs.py` (new `canary_token` field on `SandboxExecActivityInput`), `src/quarry/schemas.py` (new `CanaryCallback` model on `SandboxExecCapture`), `src/quarry_activities/verdict_evaluators.py` (new `canary_evaluator`), `src/quarry_workflows/run_scan.py` (token generation, prompt injection, `prove_outcome_from_captures` extension, wire `needs_canary=True` from finding class), `src/quarry_activities/sandbox.py` (canary sidecar container start/stop in Tier 2 backend), `prompts/prove/prove.1.0.0.j2` (new `canary_url` template variable and instructions).
+- **Threat model**: The canary listener is a new listening socket inside the sandbox containment boundary. It SHALL bind only to addresses the sandbox can already reach (`127.0.0.1` Tier 1, internal-network IP Tier 2) — a non-loopback bind on Tier 1 would expose the listener to the host network and is a fail-closed abort. The listener SHALL respond with a fixed JSON body only; it SHALL NOT forward, proxy, or reflect any request content. The listener SHALL stop when the sandbox terminates (or on a TTL), so no dangling socket survives the proof attempt.
+- **Non-goals**: No per-request path filtering (that is the authorization ceiling — the token in the path is the only correlation); no egress logging/tracing product; no change to the D1 Tier-2 network enforcement (must not widen `quarry-egress-*` — the canary is a sidecar on the existing internal network, not a new network or a widened policy); no browser-based OOB.
+
+## Ambiguities resolved
+
+1. **Bind vs reachability**: The canary listener SHALL attach to the same `quarry-egress-*` internal network as the sandbox container (Tier 2) — Docker's internal bridge permits intra-network communication, so the sandbox reaches the canary without the canary being in any destination set. Tier 1 uses a `127.0.0.1`-only background thread. A non-loopback bind on Tier 1 is a fail-closed abort.
+2. **Activity shape**: The canary lifecycle is internal to `sandbox-exec`, not separate activities. The activity input gains `canary_token: str | None`. The activity starts the listener before the sandbox runs and stops it after (or on a TTL), returning collected callbacks in the capture.
+3. **Proof consumption**: The workflow generates the token, constructs the URL, and passes it to the prove agent as `{{ canary_url }}` in the prompt. A new `canary_evaluator` (registered for SSRF and XXE) inspects `SandboxExecCapture.canary_callbacks` for a callback matching the token and returns `corroborated` when found.
+4. **Egress wiring / timing**: The canary listener is infrastructure, not an egress-policy destination — it shares the internal network with the sandbox. The `needs_canary` flag on `build_prove_sandbox_policy` signals sandbox-exec to start the sidecar rather than expanding the destination sets. The workflow resolves `needs_canary` from the finding's `vuln_class` at prove time (SSRF or XXE → `needs_canary=True`), which is known before any activity runs.
