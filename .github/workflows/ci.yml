@@ -21,11 +21,11 @@ env:
 jobs:
   # Fast static checks share a single dependency install (no N× syncs).
   static:
-    name: lint / format / types / lockfile / prompts
+    name: lint / format / types / lockfile / pins / prompts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
@@ -34,6 +34,11 @@ jobs:
       - run: uv sync --group dev --frozen
       - name: uv lockfile is in sync
         run: uv lock --check
+      # Supply-chain gate (spec: supply-chain-hardening): every action ref and
+      # every remote pre-commit hook rev must be a full commit SHA. A floating
+      # tag lets upstream mutate what CI executes with no Quarry-side diff.
+      - name: pinned action + pre-commit refs (supply-chain)
+        run: uv run python scripts/check_pinned_refs.py
       - name: ruff lint
         run: uv run ruff check .
       - name: ruff format
@@ -50,14 +55,46 @@ jobs:
     name: vulture dead-code (src/)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
       - name: vulture
         run: uvx --from 'vulture==2.16' vulture src ci/vulture_allowlist.py --min-confidence 60
+
+  # Benchmark gate: the benchmark suite must be runnable in CI. Tests only —
+  # no absolute-score thresholds (spec non-goal: metrics first, thresholds
+  # later). A score shift is reported by `quarry benchmark diff` for a human to
+  # judge; it must never fail the build on its own.
+  benchmark-gate:
+    name: benchmark gate (suite runnable, no score thresholds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+      - run: uv sync --group dev --frozen
+      - name: fixture inventory (huntable vs benchmarkable)
+        run: uv run quarry benchmark inventory
+      - name: pytest (benchmark suite)
+        run: >
+          uv run pytest tests/unit/test_benchmark.py
+          tests/unit/test_benchmark_artifacts.py
+          tests/unit/test_benchmark_cli.py
+          tests/unit/test_benchmark_inventory.py
+          tests/unit/test_benchmark_no_context_injection.py
+          tests/unit/test_benchmark_no_integrations.py
+          tests/unit/test_benchmark_web_fixtures.py
+          tests/unit/test_benchmark_planted_fixtures.py
+          -q --dist loadfile
+      - name: pytest (planted-target launch + scoring, bench 2.3)
+        run: uv run pytest tests/integration/test_benchmark_planted_target.py -q -n 0
 
   # Unit + golden suite, split across 4 free 4-core runners by pytest-shard
   # (deterministic hash split, no stored durations state to rot). Same
@@ -73,12 +110,12 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # ripgrep backs the `grep` tool; installing it lets the grep tool tests run
       # for real instead of skipping (the only binary any test is gated on).
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
@@ -113,10 +150,10 @@ jobs:
       matrix:
         shard: [0, 1]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
@@ -132,8 +169,8 @@ jobs:
     name: tests (browser extra)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
@@ -152,8 +189,8 @@ jobs:
     name: hadolint (Dockerfile)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hadolint/hadolint-action@v3.1.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
           dockerfile: Dockerfile
           config: .hadolint.yaml
@@ -165,8 +202,8 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Compute image refs
         id: meta
         run: |
@@ -182,7 +219,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -190,7 +227,7 @@ jobs:
       # One build, tagged as both server and worker (identical image, different
       # run command). PRs build-only (proves it compiles + warms the cache);
       # pushes to main publish to GHCR.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
@@ -206,6 +243,6 @@ jobs:
     permissions:
       pull-requests: read
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@e32d7e603df1aa1ba07e981f2a23455dee596825 # v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

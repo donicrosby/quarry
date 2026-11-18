@@ -90,3 +90,74 @@ def fetch_local(url: str) -> dict[str, str]:
         status = resp.status
         body = resp.read(512).decode("utf-8", "replace")
     return {"requested_url": url, "status": str(status), "body": body}
+
+
+# --- benchmark web-class sinks (bench 2.2) ---------------------------------
+# One deliberately vulnerable route per web VulnerabilityClass so the benchmark
+# can score each class end-to-end: sql_injection, xss, ssti, open_redirect and
+# file_upload. Each route is paired with a ground-truth entry in
+# tests/golden/ground_truth/vulnerable-fastapi.json; the entry never exists
+# without a reachable sink here (see tests/unit/test_benchmark_web_fixtures.py).
+# Imports stay inside the handlers on purpose: this file is an intentional
+# fixture and a top-level import would shift the golden line numbers that
+# tests/fixtures/vulnerable-fastapi pins.
+
+
+@app.get("/search")
+def search(q: str = "") -> dict[str, list[dict[str, str]]]:
+    """SQL injection: ``q`` is concatenated straight into the query text."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+        conn.executemany("INSERT INTO items (name) VALUES (?)", [("alpha",), ("beta",), ("gamma",)])
+        conn.commit()
+        query = "SELECT id, name FROM items WHERE name = '" + q + "'"
+        rows = conn.execute(query).fetchall()
+    finally:
+        conn.close()
+    return {"results": [{"id": str(row[0]), "name": str(row[1])} for row in rows]}
+
+
+@app.get("/greet")
+def greet(name: str = "world"):
+    """XSS: ``name`` is interpolated into HTML with no context encoding."""
+    from fastapi.responses import HTMLResponse
+
+    body = "<html><body><h1>Hello " + name + "</h1></body></html>"
+    return HTMLResponse(content=body)
+
+
+@app.get("/render")
+def render(template: str = "Hello guest") -> dict[str, str]:
+    """SSTI: the request value is compiled and rendered as a Jinja2 template."""
+    from jinja2 import Template
+
+    rendered = Template(template).render(name="guest")
+    return {"rendered": rendered}
+
+
+@app.get("/go")
+def go(url: str = "/health"):
+    """Open redirect: the Location comes straight from the request parameter."""
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(url=url)
+
+
+@app.post("/upload")
+def upload(filename: str, content: str) -> dict[str, str]:
+    """Unrestricted upload: the filename's extension is never validated.
+
+    Files land under the system temp dir (never inside the scanned repo) so the
+    fixture stays side-effect free for the repo snapshot golden test.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    upload_dir = _Path(tempfile.gettempdir()) / "quarry-vulnerable-uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored = upload_dir / filename
+    stored.write_text(content, encoding="utf-8")
+    return {"stored": str(stored), "extension": stored.suffix}

@@ -1,0 +1,7 @@
+Welcome to the Quarry planted-regression target.
+
+This file is the legitimate seed the `/files` route reads from. The route joins
+an attacker-controlled `name` onto this directory with no normalization, so a
+`../` payload escapes into the rest of the example target — the planted path
+traversal (see app.py:45-50 and the `path_traversal` entry in
+tests/golden/ground_truth/vulnerable-planted.json).

@@ -22,12 +22,15 @@ from pathlib import Path
 
 from temporalio import activity
 
+from quarry.config import QuarrySettings
+from quarry.egress import resolve_egress_policy
 from quarry.schemas import (
     ArtifactKind,
+    EgressPolicy,
     RedactionStatus,
+    ResolvedEgressPolicy,
     SandboxExecCapture,
     SandboxExecSpec,
-    TargetEndpoint,
 )
 from quarry_activities.inputs import SandboxExecActivityInput
 from quarry_activities.sandbox import (
@@ -37,7 +40,8 @@ from quarry_activities.sandbox import (
     SandboxBackend,
     SandboxResult,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.quarantine import put_quarantined_artifact
+from quarry_artifacts.store import build_artifact_store
 from quarry_models.redaction import Scrubber
 
 # Maximum bytes for stdout/stderr before truncation (mirrors http_utils).
@@ -134,8 +138,6 @@ def _build_sandbox_backend() -> SandboxBackend:
 
     QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
     """
-    from quarry.config import QuarrySettings
-
     settings = QuarrySettings()
     backend = (settings.sandbox_backend or "").lower().strip()
     if backend in ("", "local"):
@@ -152,20 +154,35 @@ def _build_sandbox_backend() -> SandboxBackend:
     raise ValueError(msg)
 
 
+def _resolve_policy_json(policy_json: str | None) -> ResolvedEgressPolicy | None:
+    """Reconstruct and resolve an ``EgressPolicy`` from its serialized form.
+
+    Domains are resolved to IPs exactly once here (the enforcement boundary),
+    so every tier receives a frozen :class:`ResolvedEgressPolicy`.  Returns
+    None when there is no policy or it declares no destinations (no egress).
+    """
+    if not policy_json:
+        return None
+    policy = EgressPolicy.model_validate_json(policy_json)
+    if policy.is_empty():
+        return None
+    return resolve_egress_policy(policy)
+
+
 def _run_sandbox(
     spec: SandboxExecSpec,
     *,
     sandbox: SandboxBackend,
     work_dir: Path,
     resolved_env: dict[str, str],
-    target_endpoint: TargetEndpoint | None,
+    egress_policy: ResolvedEgressPolicy | None,
 ) -> SandboxResult:
     """Thin shim — lets tests patch at a single point without mocking subprocess."""
     return sandbox.run(
         spec,
         work_dir=work_dir,
         resolved_env=resolved_env,
-        target_endpoint=target_endpoint,
+        egress_policy=egress_policy,
     )
 
 
@@ -183,13 +200,9 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     resolved_env = _resolve_credentials(inp.auth_profile_set_json)
     run_scrubber = build_scrubber_with_creds(resolved_env)
 
-    target_endpoint = None
-    if inp.target_endpoint_json:
-        from quarry.schemas import TargetEndpoint
+    egress_policy = _resolve_policy_json(inp.egress_policy_json)
 
-        target_endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
-
-    store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
+    store = build_artifact_store(inp.artifact_store_path)
     sandbox = _build_sandbox_backend()
 
     with tempfile.TemporaryDirectory(prefix="quarry-sandbox-") as _work_dir:
@@ -200,7 +213,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
             sandbox=sandbox,
             work_dir=work_dir,
             resolved_env=resolved_env,
-            target_endpoint=target_endpoint,
+            egress_policy=egress_policy,
         )
 
     # Cap then scrub then wrap each stream.
@@ -218,20 +231,26 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     wrapped_stdout = f"<target_content>{stdout_scrub.text}</target_content>"
     wrapped_stderr = f"<target_content>{stderr_scrub.text}</target_content>"
 
-    stdout_ref = store.put_bytes(
-        f"{inp.candidate_finding_id}/stdout",
+    stdout_outcome = put_quarantined_artifact(
+        store,
+        f"{inp.scan_id}/{inp.candidate_finding_id}/stdout",
         wrapped_stdout.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDOUT,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
-    stderr_ref = store.put_bytes(
-        f"{inp.candidate_finding_id}/stderr",
+    stderr_outcome = put_quarantined_artifact(
+        store,
+        f"{inp.scan_id}/{inp.candidate_finding_id}/stderr",
         wrapped_stderr.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDERR,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
+    stdout_ref = stdout_outcome.artifact_ref
+    stderr_ref = stderr_outcome.artifact_ref
 
     return SandboxExecCapture(
         exit_code=result.exit_code,
@@ -241,6 +260,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
         timed_out=result.timed_out,
+        artifact_refs=[stdout_ref, stderr_ref],
     )
 
 

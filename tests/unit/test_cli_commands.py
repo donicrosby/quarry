@@ -50,6 +50,7 @@ class FakeQuarryClient:
         dynamic_validation_enabled: bool = False,
         live_prove_enabled: bool = False,
         auth_profiles_json: str | None = None,
+        plugins_active: list[str] | None = None,
     ) -> dict[str, str]:
         if self.connect_error_on == "start":
             raise httpx.ConnectError("server unavailable")
@@ -57,11 +58,13 @@ class FakeQuarryClient:
         type(self).last_vuln_classes = vuln_classes
         type(self).last_repo_url = repo_url
         type(self).last_auth_profiles_json = auth_profiles_json
+        type(self).last_plugins_active = plugins_active
         return self.start_response
 
     last_vuln_classes: ClassVar[list[VulnerabilityClass] | None] = None
     last_repo_url: ClassVar[str | None] = None
     last_auth_profiles_json: ClassVar[str | None] = None
+    last_plugins_active: ClassVar[list[str] | None] = None
 
     async def start_diff_scan(
         self,
@@ -107,6 +110,7 @@ def setup_fake_client(monkeypatch: Any) -> None:
     FakeQuarryClient.cancel_response = {"scan_id": "scan-1", "status": "CANCELLING"}
     FakeQuarryClient.connect_error_on = None
     FakeQuarryClient.last_auth_profiles_json = None
+    FakeQuarryClient.last_plugins_active = None
     monkeypatch.setenv("QUARRY_SERVER_URL", "http://quarry.test")
     monkeypatch.setattr(main, "QuarryClient", FakeQuarryClient)
     monkeypatch.setattr(main, "POLL_INTERVAL_SECONDS", 0.0, raising=False)

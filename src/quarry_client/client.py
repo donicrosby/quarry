@@ -56,20 +56,23 @@ class QuarryClient:
         live_prove_enabled: bool = False,
         auth_profiles_json: str | None = None,
         benchmark: bool = False,
+        plugins_active: list[str] | None = None,
     ) -> dict[str, str]:
-        response = await self._client.post(
-            "/scans",
-            json={
-                "repo_path": repo_path,
-                "repo_url": repo_url,
-                "target_url": target_url,
-                "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
-                "dynamic_validation_enabled": dynamic_validation_enabled,
-                "live_prove_enabled": live_prove_enabled,
-                "auth_profiles_json": auth_profiles_json,
-                "benchmark": benchmark,
-            },
-        )
+        body: dict[str, Any] = {
+            "repo_path": repo_path,
+            "repo_url": repo_url,
+            "target_url": target_url,
+            "vuln_classes": [vc.value for vc in vuln_classes] if vuln_classes else [],
+            "dynamic_validation_enabled": dynamic_validation_enabled,
+            "live_prove_enabled": live_prove_enabled,
+            "auth_profiles_json": auth_profiles_json,
+            "benchmark": benchmark,
+        }
+        # Only send the field when set: an omitted field keeps the server's
+        # quarry.toml fallback (backward-compatible with older servers).
+        if plugins_active is not None:
+            body["plugins_active"] = list(plugins_active)
+        response = await self._client.post("/scans", json=body)
         response.raise_for_status()
         payload = _json_object(response)
         return {"scan_id": str(payload["scan_id"]), "status": str(payload["status"])}

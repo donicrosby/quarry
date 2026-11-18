@@ -9,9 +9,12 @@ budget cap, and keeps this module dependency-free.
 from __future__ import annotations
 
 from quarry.schemas import AgentTask, VulnerabilityClass
+from quarry_models.types import CHARS_PER_TOKEN
 from quarry_plugins.base import ContextInjectorPlugin
 
-_CHARS_PER_TOKEN = 4
+# Reuse the shared heuristic (one constant, no drift between the budget plugin and
+# the agent loop's context-window accounting).
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 _TRUNCATION_NOTE = "\n[... truncated to fit context budget ...]"
 
 

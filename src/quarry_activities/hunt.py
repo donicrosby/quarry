@@ -40,6 +40,7 @@ from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.binary_analysis_context import merge_binary_analysis_context
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -177,12 +178,19 @@ def hunt_impl(
     limiter: Any | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    context_window_tokens: int | None = None,
+    context_window_threshold: float = 0.8,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
     Returns ``(findings, coverage_gaps)``. Each ``HunterGap`` carries the area the
     hunter did not fully cover, its reason, and this hunter's ``vuln_class`` — so
     gapfill can turn it straight into a targeted re-hunt task.
+
+    ``context_window_tokens`` / ``context_window_threshold`` are the hunt role's
+    ``RoleConfig`` values, handed straight to ``run_agent_loop`` so a long-running
+    hunter's history is compressed instead of growing without bound. ``None``
+    (the default here) leaves the history unbounded.
 
     KB consumption by reference (cpc slice 3): when *kb_root_index_key* is
     supplied (the reference the kb-recon stage recorded on the scan metadata),
@@ -200,6 +208,13 @@ def hunt_impl(
     # Resolve KB references at execution time (activity-side I/O; the workflow
     # passes only the reference). The injector returns None when nothing
     # resolves, so domain_context keeps its existing assembled content.
+    #
+    # Binary analysis report consumption (slice-3 C6): the persisted hardening
+    # report rides alongside the KB context for security_misconfiguration tasks.
+    # Idempotent — a task already enriched by the activity-level merge (which
+    # also records provenance) is left unchanged.
+    task = merge_binary_analysis_context(task, artifact_root)
+
     effective_kb_key = (
         kb_root_index_key if kb_root_index_key is not None else task.kb_root_index_key
     )
@@ -279,6 +294,8 @@ def hunt_impl(
         turn_timeout_seconds=turn_timeout_seconds,
         tool_call_cap=tool_call_cap,
         limiter=limiter,
+        context_window_tokens=context_window_tokens,
+        context_window_threshold=context_window_threshold,
     )
 
     if artifact_root is not None:
@@ -439,6 +456,12 @@ def _hunt_activity_impl(
     )
     _, kb_resolved, kb_record_keys = kb_injector.last_resolution
 
+    # Binary analysis report consumption (slice-3 C6): merge the persisted
+    # hardening report into the task's domain_context and record its provenance
+    # before rendering. Absent artifact or a non-matching class leaves the task
+    # unchanged (portability invariant).
+    task = merge_binary_analysis_context(task, artifact_root)
+
     findings, coverage_gaps = hunt_impl(
         task=task,
         repo_path=repo_path,
@@ -452,6 +475,8 @@ def _hunt_activity_impl(
         limiter=limiter,
         artifact_root=artifact_root,
         kb_root_index_key=effective_kb_key,
+        context_window_tokens=role_cfg.context_window_tokens,
+        context_window_threshold=role_cfg.context_window_threshold,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

@@ -69,6 +69,8 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             rate_limit_rpm=cfg.rpm,
             turn_timeout_seconds=cfg.turn_timeout_seconds,
             tiers=[t.model_dump(mode="json") for t in cfg.tiers],
+            context_window_tokens=cfg.context_window_tokens,
+            context_window_threshold=cfg.context_window_threshold,
         )
         for role, cfg in resolved.items()
     ]
@@ -127,7 +129,13 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             auth_profiles_json=body.auth_profiles_json,
             integration_configs=resolve_integration_configs(quarry_config),
             benchmark=body.benchmark,
-            plugins_active=quarry_config.scan_defaults.plugins_active,
+            # A client-provided list overrides the quarry.toml default; an
+            # absent field (None) keeps the toml value (backward-compatible).
+            plugins_active=(
+                list(body.plugins_active)
+                if body.plugins_active is not None
+                else quarry_config.scan_defaults.plugins_active
+            ),
         ),
         id=scan_id,
         task_queue=settings.task_queue,

@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
+from quarry_artifacts.quarantine import clear_execute_bits, enforce_artifact_size
 
 
 class JsonArtifact(Protocol):
@@ -27,9 +28,14 @@ class LocalArtifactStore:
         metadata: dict[str, Any] | None = None,
         redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
     ) -> ArtifactRef:
+        # Proof-artifact quarantine (D6): the per-kind size limit is enforced
+        # before any write (over-size -> ArtifactOverSizeError with a recorded
+        # event), and the stored file never carries execute bits.
+        enforce_artifact_size(kind, len(data), artifact_key=key)
         path = self._safe_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        clear_execute_bits(path)
         digest = sha256(data).hexdigest()
         return ArtifactRef(
             id=str(uuid4()),
@@ -90,3 +96,6 @@ class LocalArtifactStore:
             msg = f"Artifact key escapes store root: {key}"
             raise ValueError(msg)
         return path
+
+    def close(self) -> None:
+        """No-op: the file backend holds no connection pool to release."""

@@ -163,6 +163,35 @@ def test_panel_json_for_role_preserves_debater_tier() -> None:
     assert debater.prompt_regime == "refute"
 
 
+def test_panel_json_for_role_preserves_context_window() -> None:
+    """The per-role context-window limit must survive the snapshot round-trip.
+
+    Regression: ``ModelPanelEntry`` did not carry
+    ``RoleConfig.context_window_tokens``, so a scan's configured per-role limit
+    (including DEFAULT_PANEL's hunt default) never reached the worker's agent loop
+    and every hunter quietly ran with unbounded history.
+    """
+    from quarry.panel_config import RoleConfig
+
+    entry = ModelPanelEntry(
+        id=str(uuid4()),
+        scan_id="s-ctx",
+        role="hunt",
+        provider="litellm",
+        model="chutes/moonshotai/Kimi-K2.6-TEE",
+        rate_limit_rpm=20,
+        context_window_tokens=64000,
+        context_window_threshold=0.5,
+    )
+    scan = _make_scan([entry])
+    result = panel_json_for_role(scan, "hunt")
+    assert result is not None
+
+    role_cfg = RoleConfig.model_validate_json(result)
+    assert role_cfg.context_window_tokens == 64000
+    assert role_cfg.context_window_threshold == 0.5
+
+
 def test_panel_json_for_role_invalid_provider_returns_none() -> None:
     bad_entry = ModelPanelEntry(
         id=str(uuid4()),

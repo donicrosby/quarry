@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from quarry.benchmark import compare, load_ground_truth
+import pytest
+
+from quarry.benchmark import compare, diff_run_results, load_ground_truth
+from quarry.benchmark_artifacts import BenchmarkMetrics, BenchmarkRunResult, RunProvenance
 from quarry.schemas import (
     FinalFinding,
     GroundTruthFinding,
@@ -154,3 +157,43 @@ def test_ground_truth_inside_repo_is_detected() -> None:
         )
         is False
     )
+
+
+def _run_result(run_id: str, *, wall_clock_seconds: float) -> BenchmarkRunResult:
+    return BenchmarkRunResult(
+        run_id=run_id,
+        benchmark="local",
+        metrics=BenchmarkMetrics(
+            recall_per_class={"secrets": 1.0},
+            fp_rate=0.0,
+            proof_rate=1.0,
+            wall_clock_seconds=wall_clock_seconds,
+        ),
+        provenance=RunProvenance(
+            models={"reasoner": "stub/model"},
+            prompt_hashes={"hunt.secrets": "abc123abc123"},
+            config={},
+            harness_sha="deadbeef",
+        ),
+    )
+
+
+def test_diff_run_results_flags_wall_clock_regression() -> None:
+    """A run that takes 6s longer is a regression (the A/B artifact repro)."""
+    before = _run_result("run-a", wall_clock_seconds=10.0)
+    after = _run_result("run-b", wall_clock_seconds=16.0)
+
+    diff = diff_run_results(before, after)
+
+    assert diff.metric_deltas["wall_clock_seconds"] == pytest.approx(6.0)
+    assert "wall_clock_seconds" in diff.regressions
+
+
+def test_diff_run_results_does_not_flag_faster_wall_clock() -> None:
+    faster = _run_result("run-b", wall_clock_seconds=4.0)
+    before = _run_result("run-a", wall_clock_seconds=10.0)
+
+    diff = diff_run_results(before, faster)
+
+    assert diff.metric_deltas["wall_clock_seconds"] == pytest.approx(-6.0)
+    assert "wall_clock_seconds" not in diff.regressions

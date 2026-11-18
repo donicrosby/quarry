@@ -27,6 +27,9 @@ _ALLOWLIST = [
     src.quarry.config.config_file,
     src.quarry.config.redis_url,
     src.quarry.config.s3_bucket,
+    src.quarry.config.redis_max_artifact_bytes,
+    src.quarry.config.artifact_retry_max_attempts,
+    src.quarry.config.artifact_retry_backoff_seconds,
     src.quarry.panel_config.max_tokens_per_scan,
     src.quarry.panel_config.reasoning_lexicon,
     src.quarry.schemas.snippet_hash,
@@ -74,6 +77,8 @@ _ALLOWLIST = [
     src.quarry.schemas.severity_hint,
     src.quarry.schemas.route,
     src.quarry.schemas.expected_fingerprint_hint,
+    src.quarry.schemas.planted,
+    src.quarry.schemas.expected_proof_type,
     src.quarry.schemas.response_ref,
     src.quarry.schemas.integration_config_id,
     src.quarry.schemas.links,
@@ -111,6 +116,7 @@ _ALLOWLIST = [
     src.quarry.schemas.model_invocation_id,
     src.quarry.schemas.rejected_reasoning_refs,
     src.quarry.schemas.reasoning_summary,
+    src.quarry.schemas.context_reset,
     src.quarry.schemas.attack_surface_item_id,
     src.quarry.schemas.request_artifact_id,
     src.quarry.schemas.response_artifact_id,
@@ -172,6 +178,10 @@ _ALLOWLIST = [
     src.quarry_workflows.run_scan.final_finding_count,
 
     # --- Protocol signature params, dunder params, instance attrs ---
+    src.quarry_artifacts.s3_store.Body,
+    src.quarry_artifacts.s3_store.Bucket,
+    src.quarry_artifacts.s3_store.ContentType,
+    src.quarry_artifacts.s3_store.Key,
     src.quarry.panel_config.COUNTERPOINT,
     src.quarry.schemas.QUEUED,
     src.quarry.schemas.PREPARING,
@@ -232,6 +242,13 @@ _ALLOWLIST = [
     src.quarry_workflows.tracer_stage.trace_id,
 
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
+    src.quarry.benchmark_inventory.inventory_as_dicts,
+    # Plugin-level match->CandidateFinding converters: the spec pins them on the
+    # scanner modules (analogous to secrets); production sweep wiring uses the
+    # workflow-side mirror in quarry_workflows.candidate_sources, so only unit
+    # tests reference these directly.
+    src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
+    src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
 
     # --- browser-worker-playwright: helpers referenced only from tests/ ---
     src.quarry_activities.playwright_driver.store_screenshot,
@@ -264,6 +281,7 @@ _ALLOWLIST = [
     src.quarry_models.validation.parse_and_validate_output,
     src.quarry_persistence.repositories.QuarryRepository.from_engine,
     src.quarry_plugins.context.kb_context.KB_CONTEXT_PLUGIN,
+    src.quarry_plugins.context.binary_analysis_context.BINARY_ANALYSIS_PLUGIN,
     src.quarry_plugins.context.multitenant_isolation.MULTITENANT_ISOLATION_PLUGIN,
     src.quarry_plugins.context.template_injection.TEMPLATE_INJECTION_PLUGIN,
     src.quarry_plugins.hooks.slack_notify.SLACK_NOTIFY_HOOK,
