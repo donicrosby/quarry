@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import UTC, datetime
 
 import httpx
 from temporalio import activity
@@ -29,6 +30,7 @@ from quarry.schemas import (
 )
 from quarry_activities.credentials import CredentialCache, resolve_credentials
 from quarry_activities.inputs import HttpRequestActivityInput
+from quarry_activities.session_analysis import analyze_session_tokens
 from quarry_artifacts.http_utils import (
     capture_request_artifact,
     capture_response_artifact,
@@ -150,7 +152,7 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
 
     resp_artifact = capture_response_artifact(store, response, key_prefix=f"{inp.scan_id}/")
 
-    return HttpResponseCapture(
+    capture = HttpResponseCapture(
         status_code=response.status_code,
         headers=dict(response.headers),
         body_artifact_ref=resp_artifact.id,
@@ -160,3 +162,18 @@ async def http_request_activity(inp: HttpRequestActivityInput) -> HttpResponseCa
         request_artifact_ref=req_artifact.id,
         body_artifact_key=response_artifact_key(response),
     )
+
+    # Deterministic session-token/JWT/cookie analysis (session-jwt-cookie-analysis,
+    # task 7.1).  Runs synchronously, in-activity, only for auth-bearing requests.
+    # It reads the raw httpx.Response (multi-value Set-Cookie via get_list, before
+    # the dict collapse above) and the freshly-built capture (body_artifact_ref).
+    if spec.auth_profile is not None:
+        capture.session_token_analysis = analyze_session_tokens(
+            response,
+            capture,
+            scan_id=inp.scan_id,
+            target_scheme=endpoint.scheme,
+            capture_time=datetime.now(UTC),
+        )
+
+    return capture

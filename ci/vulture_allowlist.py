@@ -77,6 +77,8 @@ _ALLOWLIST = [
     src.quarry.schemas.severity_hint,
     src.quarry.schemas.route,
     src.quarry.schemas.expected_fingerprint_hint,
+    src.quarry.schemas.planted,
+    src.quarry.schemas.expected_proof_type,
     src.quarry.schemas.response_ref,
     src.quarry.schemas.integration_config_id,
     src.quarry.schemas.links,
@@ -240,6 +242,7 @@ _ALLOWLIST = [
     src.quarry_workflows.tracer_stage.trace_id,
 
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
+    src.quarry.benchmark_inventory.inventory_as_dicts,
 
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,

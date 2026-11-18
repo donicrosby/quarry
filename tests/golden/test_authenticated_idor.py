@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from quarry.schemas import (
@@ -107,9 +108,9 @@ async def _execute_authenticated_probe(
     )
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    resp_headers: dict[str, str] = {}
-    resp_headers["content-type"] = "application/json"
-    mock_resp.headers = resp_headers
+    # A real httpx.Headers so the session-token analyzer can read multi-value
+    # Set-Cookie via ``get_list`` (a plain dict has no ``get_list``).
+    mock_resp.headers = httpx.Headers({"content-type": "application/json"})
     mock_resp.text = response_body
     mock_resp.content = response_body.encode()
     mock_resp.url = f"http://{endpoint.host}:{endpoint.port}{spec.path}"
