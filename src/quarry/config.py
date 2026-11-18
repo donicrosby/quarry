@@ -59,3 +59,9 @@ class QuarrySettings(BaseSettings):
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)

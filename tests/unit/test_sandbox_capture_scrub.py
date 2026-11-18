@@ -187,6 +187,7 @@ class TestSandboxCredentialInjection:
             work_dir: Path,
             resolved_env: dict[str, str],
             egress_policy: object,
+            canary_active: bool = False,
         ) -> SandboxResult:
             captured_envs.append(dict(resolved_env))
             return SandboxResult(exit_code=0, stdout="ok", stderr="", elapsed_ms=5)
