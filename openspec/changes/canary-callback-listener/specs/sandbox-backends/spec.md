@@ -2,17 +2,17 @@
 
 ### Requirement: Canary listener lifecycle in sandbox execution
 
-The `sandbox-exec` activity SHALL manage a canary listener lifecycle when `canary_token` is set on its input. Tier 1: the listener binds `127.0.0.1` (ephemeral port) in the worker process. Tier 2: the listener runs as a sidecar container on a host-reachable address so the external target can reach it. The activity SHALL set `QUARRY_CANARY_URL` in the sandbox environment before command execution. The listener SHALL stop with log collection after sandbox termination or TTL expiry.
+The `sandbox-exec` activity SHALL manage a canary listener lifecycle when `canary_token` is set on its input. Tier 1 SHALL bind `127.0.0.1` on an ephemeral port in the worker process (logging-only). Tier 2 SHALL run a sidecar container on a host-reachable address attached to the target's network. The activity SHALL set `QUARRY_CANARY_URL` before command execution and stop the listener with log collection after sandbox termination or TTL expiry.
 
 #### Scenario: Canary listener starts before sandbox, stops after
 
 - **WHEN** `SandboxExecActivityInput.canary_token` is set to a non-empty string
-- **THEN** the activity starts a canary listener, sets `QUARRY_CANARY_URL` in the sandbox environment, runs the sandbox command, stops the listener, collects its request log, and returns the log in `SandboxExecCapture.canary_callbacks`
+- **THEN** the activity starts a canary listener, sets `QUARRY_CANARY_URL`, runs the sandbox command, stops the listener, collects its request log, and returns it in `SandboxExecCapture.canary_callbacks`
 
 #### Scenario: Listener URL is set before sandbox command
 
 - **WHEN** a canary listener starts and its bound address is known
-- **THEN** the activity sets `QUARRY_CANARY_URL` to the tier-specific URL (`http://127.0.0.1:<port>/<token>` for Tier 1, `http://<host>:<port>/<token>` for Tier 2) in the subprocess or container environment before the sandbox command executes
+- **THEN** the activity sets `QUARRY_CANARY_URL` to the tier-specific URL (`http://127.0.0.1:<port>/<token>` for Tier 1, `http://<host>:<port>/<token>` for Tier 2) in the sandbox environment before the command executes
 
 #### Scenario: Listener stops on sandbox timeout
 
@@ -21,8 +21,8 @@ The `sandbox-exec` activity SHALL manage a canary listener lifecycle when `canar
 
 #### Scenario: Listener TTL prevents orphaned sidecar
 
-- **WHEN** a canary listener has run for longer than its TTL without a stop signal
-- **THEN** the listener SHALL self-terminate and the activity's `_collect_canary_logs` SHALL return only callbacks logged before the TTL expiry
+- **WHEN** a canary listener has run longer than its TTL without a stop signal
+- **THEN** the listener SHALL self-terminate and `_collect_canary_logs` SHALL return only callbacks logged before TTL expiry
 
 #### Scenario: No canary when token is absent
 
@@ -31,27 +31,37 @@ The `sandbox-exec` activity SHALL manage a canary listener lifecycle when `canar
 
 ### Requirement: Canary listener bind safety and data capture
 
-The canary listener SHALL bind only within the sandbox containment boundary: `127.0.0.1` only for Tier 1, or a host-reachable address for Tier 2. A non-loopback bind on Tier 1 SHALL fail closed. The listener SHALL capture only `method`, `path`, `source_ip`, and `timestamp` per callback — SHALL NOT log request headers or body. The listener SHALL respond with a fixed JSON body `{"token":"<token>"}` and SHALL NOT forward, proxy, or reflect request content.
+Tier 1 SHALL bind `127.0.0.1` only; a non-loopback Tier-1 bind SHALL fail closed. Tier 2 SHALL bind a single pinned host interface on a race-free ephemeral port and drop `NET_RAW` from the sandbox container. The listener SHALL capture only `method`, `path` (length-capped), `source_ip`, and `timestamp`, and respond with a fixed JSON body without echoing request content.
 
 #### Scenario: Tier 1 loopback-only bind
 
-- **WHEN** Tier 1 sandbox runs with a canary token and the listener starts on the host
-- **THEN** the listener binds `127.0.0.1` only; the sandbox subprocess shares the host network and can reach it, but the evaluator disregards callbacks from `127.0.0.1`
+- **WHEN** Tier 1 runs with a canary token and the listener starts
+- **THEN** the listener binds `127.0.0.1` only; callbacks are logged but never corroborate (loopback presents source `127.0.0.1`)
 
 #### Scenario: Tier 1 non-loopback bind fails closed
 
 - **WHEN** the Tier 1 listener attempts to bind an address other than `127.0.0.1`
 - **THEN** `sandbox-exec` raises `EgressPolicyError` before the sandbox command starts and no canary listener is left running
 
-#### Scenario: Tier 2 host-reachable listener
+#### Scenario: Tier 2 sidecar on pinned host interface, race-free port
 
-- **WHEN** Tier 2 sandbox runs with a canary token
-- **THEN** the activity starts a sidecar container on a host-reachable address (host network mode or published port), the external target can reach the listener, and the listener is stopped with log collection after the sandbox exits
+- **WHEN** Tier 2 runs with a canary token
+- **THEN** the activity starts a sidecar container bound to a single pinned host address (not `0.0.0.0`) on an ephemeral port allocated without a race, and the external target reaches it at `http://<host>:<port>/<token>`
+
+#### Scenario: Tier 2 sandbox drops NET_RAW while canary is active
+
+- **WHEN** Tier 2 runs with a canary token
+- **THEN** the sandbox container is started with `--cap-drop NET_RAW` so it cannot raw-craft a spoofed target source IP toward the canary
 
 #### Scenario: Listener captures only safe fields
 
 - **WHEN** any HTTP request reaches the canary listener
-- **THEN** the listener logs `method`, `path`, `source_ip`, and `timestamp` only — no request headers, body, or query string beyond the path — and responds with `{"token":"<token>"}` (200 OK)
+- **THEN** the listener logs `method`, `path`, `source_ip`, and `timestamp` only — no request headers or body — and responds with `{"token":"<token>"}` (200 OK)
+
+#### Scenario: Listener caps request-controlled path length
+
+- **WHEN** a request reaches the canary listener with a path longer than the pinned maximum
+- **THEN** the listener truncates or rejects the path and never stores an unbounded request-controlled string
 
 #### Scenario: Listener does not echo or proxy request content
 
