@@ -114,6 +114,7 @@ _ALLOWLIST = [
     src.quarry.schemas.model_invocation_id,
     src.quarry.schemas.rejected_reasoning_refs,
     src.quarry.schemas.reasoning_summary,
+    src.quarry.schemas.context_reset,
     src.quarry.schemas.attack_surface_item_id,
     src.quarry.schemas.request_artifact_id,
     src.quarry.schemas.response_artifact_id,

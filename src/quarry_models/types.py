@@ -88,6 +88,12 @@ class ModelMessage(BaseModel):
     content: str
 
 
+# Deterministic char→token heuristic shared by every token-accounting path
+# (``quarry_plugins.budget`` and the agent loop's context-window reset). One
+# constant so the two cannot drift apart.
+CHARS_PER_TOKEN = 4
+
+
 class BudgetSpec(BaseModel):
     max_cost_usd: float | None = None
     max_tokens: int | None = None

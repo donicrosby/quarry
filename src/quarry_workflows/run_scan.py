@@ -3644,6 +3644,8 @@ def panel_json_for_role(scan: Scan, role: str) -> str | None:
         rpm=entry.rate_limit_rpm,
         turn_timeout_seconds=entry.turn_timeout_seconds,
         tiers=tiers,
+        context_window_tokens=entry.context_window_tokens,
+        context_window_threshold=entry.context_window_threshold,
     ).model_dump_json()
 
 
