@@ -8,13 +8,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from quarry.plugin_types import ToolRegistry
 from quarry.schemas import AuthProfileSet, ScopeExclusion
 from quarry_tools.errors import ToolSecurityError, UnauthorizedToolError
 
 # Tools that dispatch live I/O; the scope-exclusion guard (Layer 4) applies to them.
-_DYNAMIC_TOOLS = frozenset({"http_request", "run_in_sandbox"})
+_DYNAMIC_TOOLS = frozenset({"http_request", "run_in_sandbox", "browser_session"})
+
+# Network tools whose destination host is checked against ``allowed_hosts``
+# (Layer 5.5). ``http_request`` carries an explicit ``host`` field; the browser
+# tool carries the destination inside ``url``.
+_ALLOWED_HOSTS_TOOLS = frozenset({"http_request", "browser_session"})
 
 
 @dataclass
@@ -104,6 +110,21 @@ def check_exclusion(
     return None
 
 
+def _request_path(inputs: dict[str, Any]) -> str:
+    """Return the request path an exclusion should match against.
+
+    ``http_request`` carries an explicit ``path``; the browser tool carries the
+    destination inside ``url`` (open_url), so the URL path is derived from it.
+    """
+    path = inputs.get("path")
+    if path:
+        return str(path)
+    url = inputs.get("url")
+    if url:
+        return urlsplit(str(url)).path
+    return ""
+
+
 def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) -> bool:
     """Return True if *inputs* triggers the given scope exclusion."""
     if not exclusion.block_dynamic:
@@ -111,7 +132,7 @@ def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) 
 
     kind = exclusion.kind
     value = exclusion.value
-    path = str(inputs.get("path", ""))
+    path = _request_path(inputs)
     method = str(inputs.get("method", "")).upper()
 
     if kind == "route":
@@ -191,7 +212,8 @@ class ToolRunner:
         """Return a denial reason string if a scope exclusion blocks this request.
 
         Returns None when the request may proceed.  Only checks dynamic tools
-        (http_request); static analysis tools are never blocked this way.
+        (http_request, run_in_sandbox, browser_session); static analysis tools are
+        never blocked this way.
         """
         if tool_name not in _DYNAMIC_TOOLS:
             return None
@@ -203,13 +225,15 @@ class ToolRunner:
         return None
 
     def _check_allowed_hosts(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
-        """Return a denial reason if *host* in inputs is outside allowed_hosts.
+        """Return a denial reason if the destination host is outside allowed_hosts.
 
-        Fail-closed: an empty allowed_hosts tuple blocks all http_request calls.
-        Returns None when unconfigured (allowed_hosts is None) or when the request
-        may proceed.  Only applies to http_request.
+        Fail-closed: an empty allowed_hosts tuple blocks every network-tool call
+        (http_request and browser_session).  Returns None when unconfigured
+        (allowed_hosts is None) or when the request may proceed.  ``http_request``
+        carries an explicit ``host``; ``browser_session`` carries the destination
+        inside ``url``.
         """
-        if tool_name != "http_request":
+        if tool_name not in _ALLOWED_HOSTS_TOOLS:
             return None
 
         if self._allowed_hosts is None:
@@ -219,6 +243,10 @@ class ToolRunner:
             return "allowed_hosts:empty"
 
         host = inputs.get("host")
+        if host is None and tool_name == "browser_session":
+            url = inputs.get("url")
+            if url is not None:
+                host = urlsplit(str(url)).hostname
         if host is not None and str(host) not in self._allowed_hosts:
             return f"host:{host}:not_in_allowed_hosts"
 

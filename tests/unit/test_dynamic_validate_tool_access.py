@@ -119,9 +119,11 @@ class TestDynamicValidateReadOnlyAccess:
             runner.run(tool_name, {"command": "echo hi"})
 
     def test_registry_tools_covering_dynamic_validate_are_read_only(self) -> None:
-        """Every tool granting dynamic_validate must be read-only or http_request."""
+        """Every tool granting dynamic_validate must be read-only, http, or the browser tool."""
         registry = load_registry()
-        allowed = {"http_request", *READ_ONLY_TOOLS}
+        # browser_session is the one non-read-only addition: the dynamic_validate
+        # seat may drive a real browser (browser-session-tool spec, Role gate).
+        allowed = {"http_request", "browser_session", *READ_ONLY_TOOLS}
         for name, tool in registry.items():
             if "dynamic_validate" in tool.roles:
                 assert name in allowed, (

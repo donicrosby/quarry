@@ -36,7 +36,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 | `quarry_plugins` | Vulnerability scanners (secrets, IDOR, command-injection) + context-injector plugins (`context/kb_context.py` resolves KB references into prompt context) |
 | `quarry_benchmark` | External benchmark harness (CyberGym): manifest/subset, HF materialization, PoC agent loop (`role=prove`), docker dual-run verifier (upstream exit-code semantics: crash on `-vul`, 0 on `-fix`, 137→300 timeout), runner → `BenchmarkRunResult` artifacts with full provenance; CLI `quarry benchmark cybergym [--verify-only]` |
 | `quarry_models` | Model layer: redaction scrubber, safe prompt construction, `run_agent_loop`, guards, `ModelClient` (Mock + LiteLLM), `checklist.py` (adversarial checklist verdict) |
-| `quarry_tools` | Guarded tool registry — `ToolSpec`, `ToolRunner`, `BUILTIN_REGISTRY` (`read_file`, `list_dir`, `grep`, `search_code`) |
+| `quarry_tools` | Guarded tool registry — `ToolSpec`, `ToolRunner`, `BUILTIN_REGISTRY` (static: `read_file`, `list_dir`, `grep`, `search_code`; dynamic/dispatch-only: `http_request`, `run_in_sandbox`, `browser_session`) |
 | `quarry_artifacts` | Artifact storage — `LocalArtifactStore` (filesystem-backed) |
 | `quarry_integrations` | Finding sinks — dry-run Jira/Slack delivery, idempotent per scan |
 
@@ -55,6 +55,7 @@ Quarry is a local-first vulnerability research harness. All packages live under 
 - **Iteration and budget caps.** `max_iterations` and `BudgetSpec.max_cost_usd` are hard limits; `run_agent_loop` returns `stop_reason="max_iterations"` or `"budget_exceeded"` when either fires.
 - **Repo-root path restriction.** `ToolRunner` resolves all `path` inputs via `Path.resolve()` + `is_relative_to()` and raises `ToolSecurityError` on escape. No tool may read files outside the repo root.
 - **Role allowlist.** Each `ToolSpec` declares the roles allowed to call it. `ToolRunner.run()` raises `UnauthorizedToolError` if the current role is not in that list.
+- **Dynamic (dispatch-only) tools.** `http_request`, `run_in_sandbox`, and `browser_session` perform NO I/O in agent context — their `run()` returns a JSON dispatch payload for a Temporal activity on the `quarry-control` / `quarry-dynamic` worker. They are members of `ToolRunner._DYNAMIC_TOOLS`, so the Layer-4 scope-exclusion guard applies; `http_request` and `browser_session` are also host-guarded by `_check_allowed_hosts` (Layer 5.5, fail-closed). `browser_session` (roles `live_recon`, `exploit`, `dynamic_validate`) wraps `PlaywrightBrowserSession`; the agent sees only session-scoped results — never the browser, storage state, or cookie values. See `docs/browser-session-tool.md`.
 - **Guard taxonomy.** After every model turn `check_leaked_secret`, `check_schema_mismatch`, and `check_unauthorized_action` are checked; a hit returns `stop_reason="guard_triggered"`.
 
 ### Temporal rules

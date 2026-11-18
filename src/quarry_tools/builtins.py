@@ -192,6 +192,7 @@ class _SearchCode:
         return result.stdout.strip()
 
 
+from quarry_tools.browser_session_tool import BROWSER_SESSION_TOOL  # noqa: E402
 from quarry_tools.http_tool import HTTP_REQUEST_TOOL  # noqa: E402
 from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL  # noqa: E402
 
@@ -202,4 +203,5 @@ BUILTIN_REGISTRY: ToolRegistry = {
     "search_code": _SearchCode(),  # type: ignore[dict-item]
     "http_request": HTTP_REQUEST_TOOL,  # type: ignore[dict-item]
     "run_in_sandbox": RUN_IN_SANDBOX_TOOL,  # type: ignore[dict-item]
+    "browser_session": BROWSER_SESSION_TOOL,  # type: ignore[dict-item]
 }

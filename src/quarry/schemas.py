@@ -204,6 +204,9 @@ class ArtifactKind(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
+    # browser-session-tool (W1): scrubbed HTTP Archive (HAR) capture of browser
+    # session traffic — opt-in, metadata-only headers/URLs, never raw bytes to the agent.
+    HAR = "har"
 
 
 class RedactionStatus(StrEnum):

@@ -120,10 +120,15 @@ def test_builtin_registry_contains_expected_tools() -> None:
 def test_all_builtins_have_recon_role() -> None:
     # Dynamic/prove-only tools are intentionally restricted and must NOT have
     # the recon role; skip them here and assert their roles explicitly below.
+    from quarry_tools.browser_session_tool import BROWSER_SESSION_TOOL
     from quarry_tools.http_tool import HTTP_REQUEST_TOOL
     from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL
 
-    dynamic_tools = {HTTP_REQUEST_TOOL.name, RUN_IN_SANDBOX_TOOL.name}
+    dynamic_tools = {
+        HTTP_REQUEST_TOOL.name,
+        RUN_IN_SANDBOX_TOOL.name,
+        BROWSER_SESSION_TOOL.name,
+    }
     for name, tool in BUILTIN_REGISTRY.items():
         if name in dynamic_tools:
             continue

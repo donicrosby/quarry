@@ -12,6 +12,12 @@ Security posture (defense-in-depth, never the primary gate):
   hostile target pages; this driver adds URL-host validation
   (:func:`_validate_host`) so a navigation outside ``allowed_hosts`` is refused
   before the browser moves.
+- Request-level host enforcement (:meth:`PlaywrightBrowserSession._route_guard`,
+  installed on the context) aborts *every* request whose host is outside
+  ``allowed_hosts`` — covering redirects, JS-driven navigation, subresource
+  loads, and ``fetch``/XHR exfiltration beacons that ``_validate_host`` cannot
+  see — and :meth:`PlaywrightBrowserSession.navigate` re-asserts the final URL's
+  host after a redirect chain settles.
 - Every page operation carries a per-action timeout
   (:class:`BrowserActionTimeoutError` on expiry) and ``close`` is idempotent so it
   is safe from a ``finally`` block during sandbox-deadline handling.
@@ -32,7 +38,8 @@ from __future__ import annotations
 
 import contextlib
 import importlib
-from typing import TYPE_CHECKING, Any
+import json
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
@@ -45,6 +52,18 @@ if TYPE_CHECKING:
 # Per-action ceiling applied to every Playwright page operation (spec Requirement
 # 5 — driver actions are time-bounded).
 DEFAULT_ACTION_TIMEOUT_MS = 30_000
+
+#: Cookie fields the agent-callable ``get_cookies`` action may return. ``value``
+#: is deliberately absent — cookie values are session credentials and must never
+#: cross the agent boundary (spec: get_cookies returns metadata only).
+_COOKIE_METADATA_FIELDS: tuple[str, ...] = (
+    "name",
+    "domain",
+    "path",
+    "httpOnly",
+    "secure",
+    "sameSite",
+)
 
 
 class BrowserActionTimeoutError(RuntimeError):
@@ -88,6 +107,55 @@ def _validate_host(url: str, allowed_hosts: tuple[str, ...]) -> None:
 CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = ("--disable-dev-shm-usage",)
 
 
+class HarRecorder:
+    """In-memory HTTP Archive (HAR 1.2) recorder fed by the route guard.
+
+    Records request/response *metadata* only — method, URL, headers, status,
+    content type. Response bodies are deliberately never captured: they are
+    attacker-controlled, potentially huge, and unnecessary for route discovery,
+    which is what the browser tool exists to support. The recorded structure is
+    plain JSON so the worker can scrub it through the ``Scrubber`` (which
+    redacts credential headers/URLs) before it becomes an artifact.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+
+    def record(self, request: Any, response: Any | None) -> None:
+        """Append one HAR entry for *request* (and *response* when available)."""
+        request_headers = cast("dict[str, Any]", request.headers or {})
+        request_entry: dict[str, Any] = {
+            "method": str(request.method),
+            "url": str(request.url),
+            "headers": [
+                {"name": str(name), "value": str(value)} for name, value in request_headers.items()
+            ],
+        }
+        entry: dict[str, Any] = {"request": request_entry}
+        if response is not None:
+            response_headers = cast("dict[str, Any]", response.headers or {})
+            entry["response"] = {
+                "status": int(getattr(response, "status", 0) or 0),
+                "headers": [
+                    {"name": str(name), "value": str(value)}
+                    for name, value in response_headers.items()
+                ],
+                "content": {"mimeType": str(response_headers.get("content-type", ""))},
+            }
+        self.entries.append(entry)
+
+    def to_json_bytes(self) -> bytes:
+        """Serialize the recorded entries as a HAR 1.2 document."""
+        document = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "quarry", "version": "0.1.0"},
+                "entries": self.entries,
+            }
+        }
+        return json.dumps(document).encode("utf-8")
+
+
 class PlaywrightBrowserSession:
     """A real headless-Chromium session implementing the ``BrowserSession`` protocol.
 
@@ -116,6 +184,11 @@ class PlaywrightBrowserSession:
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+        self._har_recorder: HarRecorder | None = None
+        # URLs refused by the request-level host guard (Layer 6 defense-in-depth:
+        # redirects, JS beacons, and subresource loads all pass through routing).
+        # Surfaced to the activity so a caller can see the guard actually fired.
+        self.blocked_requests: list[str] = []
         try:
             self._playwright = self._sync_api.sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
@@ -123,6 +196,12 @@ class PlaywrightBrowserSession:
             )
             self._context = self._browser.new_context()
             self._page = self._context.new_page()
+            # Request-level host enforcement: every request (document, redirect,
+            # subresource, fetch/XHR beacon) is host-checked before it leaves the
+            # browser. ``_validate_host`` alone only guards the string argument to
+            # ``navigate``; a 302 to a disallowed host, JS navigation, and exfil
+            # beacons would otherwise be invisible to it.
+            self._context.route("**/*", self._route_guard)
         except Exception as exc:  # noqa: BLE001 - any launch failure is actionable
             self._shutdown()
             msg = (
@@ -141,6 +220,10 @@ class PlaywrightBrowserSession:
             resolved = f"http://{self._target_host}:{self._target_port}{url}"
         _validate_host(resolved, self._allowed_hosts)
         self._page_op(self._page.goto, resolved)
+        # Post-navigation assertion: a redirect chain can land on a host that was
+        # never in the allowed set. The route guard aborts such requests, but the
+        # document itself may already have been fetched; assert the final URL too.
+        _validate_host(str(self._page.url), self._allowed_hosts)
 
     def fill(self, selector: str, value: str) -> None:
         self._page_op(self._page.fill, selector, value)
@@ -160,6 +243,41 @@ class PlaywrightBrowserSession:
     def has_text(self, text: str) -> bool:
         return text in str(self._page.content())
 
+    def get_dom(self, text_cap: int = 100_000) -> str:
+        """Return the page's visible text (``document.body.innerText``), capped."""
+        text = self._page_op(
+            self._page.evaluate, "() => (document.body ? document.body.innerText : '')"
+        )
+        return str(text)[:text_cap]
+
+    def get_cookies(self) -> list[dict[str, Any]]:
+        """Return cookie *metadata* only — the ``value`` field is never returned."""
+        return [
+            {field: cookie.get(field) for field in _COOKIE_METADATA_FIELDS}
+            for cookie in self._context.cookies()
+        ]
+
+    def execute_js(self, script: str, timeout_ms: int = 5_000) -> Any:
+        """Evaluate agent-supplied JS under a hard timeout, returning its value."""
+        try:
+            return self._page.evaluate(script, timeout=timeout_ms)
+        except self._sync_api.TimeoutError as exc:
+            msg = f"execute_js timed out after {timeout_ms} ms."
+            raise BrowserActionTimeoutError(msg) from exc
+
+    def start_har(self) -> None:
+        """Begin recording HTTP Archive entries for subsequent requests."""
+        if self._har_recorder is None:
+            self._har_recorder = HarRecorder()
+
+    def stop_har(self) -> bytes:
+        """Stop recording and return the captured HAR JSON (empty when not recording)."""
+        recorder = self._har_recorder
+        self._har_recorder = None
+        if recorder is None:
+            return b""
+        return recorder.to_json_bytes()
+
     def storage_state(self) -> dict[str, Any]:
         return self._context.storage_state()
 
@@ -173,6 +291,32 @@ class PlaywrightBrowserSession:
         self._shutdown()
 
     # -- internals ---------------------------------------------------------------
+
+    def _route_guard(self, route: Any) -> None:
+        """Host-check every browser request; abort disallowed hosts (Layer 6).
+
+        Covers everything ``_validate_host`` cannot see — redirects, JS-driven
+        navigation, subresource loads, and ``fetch``/XHR exfiltration beacons.
+        When HAR recording is active, allowed requests are recorded (metadata
+        only) via ``route.fetch`` and replayed with ``route.fulfill``.
+        """
+        url = str(route.request.url)
+        host = urlsplit(url).hostname
+        if host is None or host not in self._allowed_hosts:
+            self.blocked_requests.append(url)
+            route.abort()
+            return
+        recorder = self._har_recorder
+        if recorder is None:
+            route.continue_()
+            return
+        try:
+            response = route.fetch()
+        except Exception:  # noqa: BLE001 - recording must never break navigation
+            route.continue_()
+            return
+        recorder.record(route.request, response)
+        route.fulfill(response=response)
 
     def _page_op(self, op: Any, *args: Any) -> Any:
         """Run a Playwright page operation under the per-action timeout."""
@@ -240,5 +384,47 @@ def store_screenshot(
         scrubbed,
         kind=ArtifactKind.SCREENSHOT,
         content_type="image/png",
+        redaction_status=status,
+    )
+
+
+# ---------------------------------------------------------------------------
+# HAR artifact capture (browser-session-tool spec: HAR requirement)
+# ---------------------------------------------------------------------------
+
+
+def scrub_har(data: bytes, scrubber: Scrubber) -> tuple[bytes, RedactionStatus]:
+    """Scrub a HAR JSON byte stream through *scrubber* before storage.
+
+    HAR is plain UTF-8 JSON, so — unlike a compressed PNG — the scrub pass is
+    exact: credential values in recorded URLs/headers become
+    ``[REDACTED_SECRET_N]`` placeholders. Returns ``(scrubbed_bytes, status)``
+    where *status* is ``REDACTED`` when the scrub removed anything and
+    ``NOT_REQUIRED`` otherwise.
+    """
+    result = scrubber.scrub(data.decode("utf-8", errors="replace"))
+    if result.hits == 0:
+        return data, RedactionStatus.NOT_REQUIRED
+    return result.text.encode("utf-8"), RedactionStatus.REDACTED
+
+
+def store_har(
+    store: LocalArtifactStore,
+    key: str,
+    data: bytes,
+    scrubber: Scrubber,
+) -> ArtifactRef:
+    """Scrub *data* and store it as a stable ``har`` ``ArtifactRef``.
+
+    The reference carries a ``file://`` URI and a SHA-256 over the stored
+    (scrubbed) bytes, so it survives sandbox teardown and is attachable to a
+    finding's ``evidence_refs`` without any schema change.
+    """
+    scrubbed, status = scrub_har(data, scrubber)
+    return store.put_bytes(
+        key,
+        scrubbed,
+        kind=ArtifactKind.HAR,
+        content_type="application/json",
         redaction_status=status,
     )

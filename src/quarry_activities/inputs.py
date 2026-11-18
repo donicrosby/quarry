@@ -237,3 +237,32 @@ class SandboxExecActivityInput(BaseModel):
     candidate_finding_id: str
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
     prove_corpus_json: str | None = None  # ProveCorpus serialized; None = HTTP prove
+
+
+class BrowserSessionActivityInput(BaseModel):
+    """Input payload for browser_session_activity (browser-session-tool, W1).
+
+    Mirrors HttpRequestActivityInput: all values are JSON-serializable primitives
+    at the Temporal boundary.  A single ``action`` dispatches one browser
+    operation; ``session_id`` references the session returned by ``open_url``.
+    The real headless-Chromium session is created worker-side and never crosses
+    the agent boundary.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    action: str
+    session_id: str | None = None
+    url: str | None = None
+    selector: str | None = None
+    value: str | None = None
+    script: str | None = None
+    text_cap: int = 100_000
+    timeout_ms: int | None = None
+    capture_har: bool = False
+    ttl_seconds: int = 300
+    allowed_hosts: tuple[str, ...] = ()  # independent Layer-6 enforcement
+    artifact_store_path: str = ""  # path for LocalArtifactStore
+    scan_id: str = ""
+    target_host: str = "localhost"
+    target_port: int = 80
