@@ -105,9 +105,9 @@ def test_repeated_delivery_is_skipped_no_duplicate(tmp_path: Path) -> None:
     assert not list((tmp_path / "integrations" / "jira").glob("*.json"))
 
 
-def test_default_sinks_are_the_cut_line_three() -> None:
+def test_default_sinks_are_the_cut_line_four() -> None:
     names = [sink.name for sink in default_sinks()]
-    assert names == ["file", "jira_dry_run", "slack_dry_run"]
+    assert names == ["file", "jira_dry_run", "sarif", "slack_dry_run"]
 
 
 @pytest.mark.parametrize("sink", default_sinks())
