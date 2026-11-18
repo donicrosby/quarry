@@ -132,17 +132,25 @@ MODEL_TIER_MAP: dict[str, ModelReliabilityTier] = {
 }
 
 
-def _normalize_model_id(model_id: str) -> str:
-    """Lowercase a model id and strip its vendor prefix / deployment suffix.
+def _candidate_model_ids(model_id: str) -> list[str]:
+    """Ordered normalised spellings to try for *model_id*.
 
     LiteLLM ids arrive as ``<vendor>/<model>`` and Bedrock ids as
-    ``<vendor>.<model>-<version>``; both spellings must resolve to the same tier.
+    ``<vendor>.<model>-<version>``; both must resolve to the same tier. The
+    vendor prefix is only stripped when it carries no digits, so a version dot
+    inside a model name (``deepseek-v3.2-tee``) is never mistaken for one.
     """
-    normalized = model_id.strip().lower()
-    for separator in ("/", "."):
-        if separator in normalized:
-            normalized = normalized.rsplit(separator, 1)[-1]
-    return normalized
+    base = model_id.strip().lower()
+    candidates = [base]
+    if "/" in base:
+        candidates.append(base.rsplit("/", 1)[-1])
+    for candidate in list(candidates):
+        if "." not in candidate:
+            continue
+        head, tail = candidate.split(".", 1)
+        if head and not any(ch.isdigit() for ch in head):
+            candidates.append(tail)
+    return candidates
 
 
 def resolve_model_tier(model_id: str | None) -> ModelReliabilityTier:
@@ -155,12 +163,12 @@ def resolve_model_tier(model_id: str | None) -> ModelReliabilityTier:
     """
     if not model_id:
         return ModelReliabilityTier.MID
-    normalized = _normalize_model_id(model_id)
-    if normalized in MODEL_TIER_MAP:
-        return MODEL_TIER_MAP[normalized]
-    matches = [key for key in MODEL_TIER_MAP if normalized.startswith(key)]
-    if matches:
-        return MODEL_TIER_MAP[max(matches, key=len)]
+    for candidate in _candidate_model_ids(model_id):
+        if candidate in MODEL_TIER_MAP:
+            return MODEL_TIER_MAP[candidate]
+        matches = [key for key in MODEL_TIER_MAP if candidate.startswith(key)]
+        if matches:
+            return MODEL_TIER_MAP[max(matches, key=len)]
     return ModelReliabilityTier.MID
 
 

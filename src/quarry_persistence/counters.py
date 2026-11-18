@@ -75,6 +75,7 @@ class SqliteBudgetCounter:
         persisted value: the seed never overwrites an existing row, so the hard
         ceiling is not re-granted on resume.
         """
+        Base.metadata.create_all(self.engine)
         with session_scope(self.engine) as session:
             session.execute(
                 text(
