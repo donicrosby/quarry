@@ -254,9 +254,13 @@ class TestPlaywrightBrowserSession:
         from quarry_activities.playwright_driver import BrowserActionTimeoutError
 
         host, port = login_server
-        session = _new_session(host, port, action_timeout_ms=250)
+        session = _new_session(host, port)
         try:
+            # Navigate under the default budget: a 250 ms session-wide timeout races
+            # the page load on a loaded runner and fires in navigate() instead of in
+            # the wait_for() under test.
             session.navigate(f"http://{host}:{port}/login")
+            session._timeout_ms = 250
             # A selector that never appears forces the per-action timeout to fire.
             with pytest.raises(BrowserActionTimeoutError):
                 session.wait_for("#never-appears")
