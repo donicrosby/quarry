@@ -192,6 +192,7 @@ class _SearchCode:
         return result.stdout.strip()
 
 
+from quarry_tools.binary_analysis import BINARY_ANALYSIS_TOOLS  # noqa: E402
 from quarry_tools.http_tool import HTTP_REQUEST_TOOL  # noqa: E402
 from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL  # noqa: E402
 
@@ -202,4 +203,7 @@ BUILTIN_REGISTRY: ToolRegistry = {
     "search_code": _SearchCode(),  # type: ignore[dict-item]
     "http_request": HTTP_REQUEST_TOOL,  # type: ignore[dict-item]
     "run_in_sandbox": RUN_IN_SANDBOX_TOOL,  # type: ignore[dict-item]
+    # Static binary inspection (slice-3 C6): file_type, extract_strings,
+    # checksec, linked_libraries, suid_sgid_detect, symlink_analysis.
+    **BINARY_ANALYSIS_TOOLS,
 }
