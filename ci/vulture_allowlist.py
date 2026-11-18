@@ -250,6 +250,9 @@ _ALLOWLIST = [
     src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
     src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
 
+    # --- browser-worker-playwright: helpers referenced only from tests/ ---
+    src.quarry_activities.playwright_driver.store_screenshot,
+
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
     src.quarry.schemas.VerdictDefaults,
