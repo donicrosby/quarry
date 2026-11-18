@@ -75,3 +75,9 @@ class QuarrySettings(BaseSettings):
     # env: QUARRY_QUARANTINE_MAX_ARTIFACT_BYTES
     quarantine_remote_backend: str = ""  # env: QUARRY_QUARANTINE_REMOTE_BACKEND
     malware_scanner: str = ""  # env: QUARRY_MALWARE_SCANNER ("" = no scanner configured)
+
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)

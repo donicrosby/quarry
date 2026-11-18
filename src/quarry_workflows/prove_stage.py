@@ -15,9 +15,11 @@ Stage order: PROVE = 6, wired into RunScanWorkflow after AGENTIC_VALIDATE (5).
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from quarry.schemas import (
+    CanaryCallback,
     CandidateFinding,
     FindingStatus,
     HttpResponseCapture,
@@ -68,9 +70,44 @@ def prioritize_by_live_verdict(
     return sorted(findings, key=_rank)
 
 
+def canary_token_for(finding_id: str, attempt_index: int) -> str:
+    """Deterministic, replay-safe canary token for one (finding, attempt).
+
+    SHA-256 of ``"<finding_id>:<attempt_index>"`` truncated to 32 hex chars — no
+    OS entropy, so a Temporal replay reproduces the identical token (a random
+    token would diverge on replay and break workflow determinism).
+    """
+    return hashlib.sha256(f"{finding_id}:{attempt_index}".encode()).hexdigest()[:32]
+
+
+def _evaluate_canary_callbacks(
+    callbacks: list[CanaryCallback],
+    token: str | None,
+    resolved_target_ips: list[str],
+) -> str | None:
+    """Return ``"corroborated"`` when an authorized target callback carries the token.
+
+    A callback corroborates only when BOTH hold: its ``source_ip`` is one of the
+    resolved target IPs AND its ``path`` contains ``token``.  ``resolved_target_ips``
+    is non-empty only for a Tier-2 dispatch (the activity leaves it empty when no
+    egress policy is enforced), so a Tier-1 loopback callback — which always
+    presents ``127.0.0.1`` — can never corroborate.  Returns ``None`` otherwise.
+    """
+    if not token or not resolved_target_ips:
+        return None
+    authorized = set(resolved_target_ips)
+    for callback in callbacks:
+        if token in callback.path and callback.source_ip in authorized:
+            return "corroborated"
+    return None
+
+
 def prove_outcome_from_captures(
     exec_captures: list[SandboxExecCapture],
     http_captures: list[HttpResponseCapture],
+    canary_callbacks: list[CanaryCallback] | None = None,
+    canary_token: str | None = None,
+    resolved_target_ips: list[str] | None = None,
 ) -> str:
     """Derive a prove outcome for ONE attempt from its dispatch captures.
 
@@ -79,18 +116,30 @@ def prove_outcome_from_captures(
 
     Decision order (first match wins):
       1. Any sandbox capture with timed_out=True  → "needs_manual_review"
-      2. Any sandbox capture with exit_code == 0  → "proved"
-      3. Any HTTP capture with 200 <= status < 300 → "proved"
-      4. Otherwise                                 → "not_proved"
+      2. A corroborated canary callback (Tier 2)  → "corroborated"
+      3. Any sandbox capture with exit_code == 0  → "proved"
+      4. Any HTTP capture with 200 <= status < 300 → "proved"
+      5. Otherwise                                 → "not_proved"
 
     Timeout outranks proof because a timed-out PoC cannot be auto-decided —
-    a human must judge it.  The HTTP predicate is intentionally conservative:
-    4xx/5xx and transport failures do not count as proof (a 4xx generally
-    means the exploit did not land).
+    a human must judge it.  Canary corroboration is consulted before the
+    exit-code / HTTP checks (a target-originated callback with the probe token
+    is stronger evidence than a zero exit code), but only when the callback is
+    Tier-2-authorized (see :func:`_evaluate_canary_callbacks`).  The HTTP
+    predicate is intentionally conservative: 4xx/5xx and transport failures do
+    not count as proof (a 4xx generally means the exploit did not land).
     """
     for cap in exec_captures:
         if cap.timed_out:
             return "needs_manual_review"
+
+    canary_verdict = _evaluate_canary_callbacks(
+        canary_callbacks or [],
+        canary_token,
+        resolved_target_ips or [],
+    )
+    if canary_verdict is not None:
+        return canary_verdict
 
     for cap in exec_captures:
         if cap.exit_code == 0:

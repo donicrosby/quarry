@@ -248,6 +248,10 @@ def _empty_strings() -> list[str]:
     return []
 
 
+def _empty_canary_callbacks() -> list[CanaryCallback]:
+    return []
+
+
 def _empty_panel_entries() -> list[ModelPanelEntry]:
     return []
 
@@ -1893,12 +1897,43 @@ class SandboxExecSpec(BaseModel):
         return v
 
 
+#: Maximum characters retained from a request-controlled canary path.
+CANARY_PATH_MAX_CHARS: int = 2048
+
+
+class CanaryCallback(BaseModel):
+    """One HTTP request observed by the canary listener during a sandbox run.
+
+    Only safe fields are captured: ``method``, ``path``, ``source_ip`` and
+    ``timestamp``.  Request headers and bodies are never stored — the listener
+    must not retain attacker-controlled content beyond the length-capped path.
+    """
+
+    timestamp: str
+    method: str
+    path: str
+    source_ip: str
+
+    @field_validator("path")
+    @classmethod
+    def _cap_path(cls, value: str) -> str:
+        """Clamp the request-controlled path to a fixed maximum length."""
+        return value[:CANARY_PATH_MAX_CHARS]
+
+
 class SandboxExecCapture(BaseModel):
     """Captured result of a sandbox execution.  Parallels HttpResponseCapture.
 
     stdout/stderr stored as artifacts (TOOL_STDOUT/TOOL_STDERR), never inline.
     Both streams pass through Scrubber.scrub() + <target_content> wrap before
     any prompt re-entry (same policy as HTTP response bodies).
+
+    ``canary_callbacks`` carries the requests the canary listener observed while
+    the command ran (empty when no canary token was set).  ``resolved_target_ips``
+    carries the pinned ``target-host`` IPs the activity enforced, so the pure
+    workflow-side evaluator can corroborate callbacks without doing DNS — it is
+    empty for a Tier-1 (no-egress) dispatch, which structurally keeps canary
+    corroboration Tier-2-only.
     """
 
     exit_code: int
@@ -1914,6 +1949,8 @@ class SandboxExecCapture(BaseModel):
     # field existed (legacy/replay payloads) — the workflow then reconstructs
     # id-only refs.
     artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
+    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
 
 
 class ProveCorpus(BaseModel):

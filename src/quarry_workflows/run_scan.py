@@ -191,6 +191,7 @@ from quarry_workflows.promotion_stage import (  # noqa: F401
 )
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
+    canary_token_for,
     filter_needs_proof,
     prioritize_by_live_verdict,
     prove_outcome_from_captures,
@@ -2690,16 +2691,15 @@ class RunScanWorkflow:
                     else None
                 )
                 _target_endpoint_json = _target_ep.model_dump_json() if _target_ep else None
-                # Destination-set egress policy for the prove sandbox, scoped to
-                # the sets the scenario needs.  Pure construction (no DNS) — the
-                # sandbox activity resolves domains to pinned IPs at enforcement.
-                _prove_egress_policy_json = build_prove_sandbox_policy(
-                    build_egress_policy(
-                        allowed_hosts=scan_input.allowed_hosts
-                        or ((_target_ep.host, "127.0.0.1") if _target_ep else ())
-                    ),
-                    needs_live_target=_target_ep is not None,
-                ).model_dump_json()
+                # Base destination-set egress policy for the prove sandbox.  Pure
+                # construction (no DNS) — the sandbox activity resolves domains to
+                # pinned IPs at enforcement.  Per-finding scoping (including the
+                # inert needs_canary marker) happens inside the finding loop.
+                _prove_scan_policy = build_egress_policy(
+                    allowed_hosts=scan_input.allowed_hosts
+                    or ((_target_ep.host, "127.0.0.1") if _target_ep else ())
+                )
+                _prove_needs_live_target = _target_ep is not None
                 # Prove live-corroborated leads first (dynamic_validate verdict).
                 # Per-finding fan-out (cruft-purge §3.2, mirroring
                 # scan-stage-fanout): each finding's attempt loop dispatches
@@ -2734,6 +2734,23 @@ class RunScanWorkflow:
                         prior_attempts: list[dict[str, Any]] = []
                         for attempt in range(PROVE_MAX_ATTEMPTS):
                             try:
+                                # SSRF/XXE canary: a deterministic, replay-safe
+                                # token per (finding, attempt) — no OS entropy in
+                                # workflow code.  It is the sole activation signal
+                                # (passed to the prompt gate and to sandbox-exec).
+                                _needs_canary = finding.vuln_class in (
+                                    VulnerabilityClass.SSRF,
+                                    VulnerabilityClass.XXE,
+                                )
+                                _canary_token = (
+                                    canary_token_for(finding.id, attempt) if _needs_canary else None
+                                )
+                                _prove_egress_policy_json = build_prove_sandbox_policy(
+                                    _prove_scan_policy,
+                                    needs_live_target=_prove_needs_live_target,
+                                    # inert signal — real activation is _canary_token
+                                    needs_canary=_needs_canary,
+                                ).model_dump_json()
                                 prove_raw = await workflow.execute_activity(
                                     "prove-finding",
                                     args=[
@@ -2747,6 +2764,7 @@ class RunScanWorkflow:
                                         scan_input.scan_seed,
                                         prior_attempts or None,
                                         artifact_root,
+                                        _canary_token,
                                     ],
                                     start_to_close_timeout=timedelta(hours=2),
                                     heartbeat_timeout=timedelta(minutes=3),
@@ -2762,6 +2780,7 @@ class RunScanWorkflow:
                                     target_endpoint_json=_target_endpoint_json,
                                     egress_policy_json=_prove_egress_policy_json,
                                     allowed_hosts=scan_input.allowed_hosts,
+                                    canary_token=_canary_token,
                                 )
                                 exec_caps: list[SandboxExecCapture] = []
                                 http_caps: list[HttpResponseCapture] = []
@@ -2815,9 +2834,25 @@ class RunScanWorkflow:
                                         )
                                     except Exception:
                                         pass
-                                outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
-                                if outcome_verdict == "proved":
-                                    final_verdict = "proved"
+                                # Canary evidence rides on the sandbox captures:
+                                # callbacks observed by the listener, plus the
+                                # target IPs the activity enforced (empty for a
+                                # Tier-1 dispatch, keeping corroboration Tier-2-only).
+                                canary_callbacks = [
+                                    cb for cap in exec_caps for cb in cap.canary_callbacks
+                                ]
+                                resolved_target_ips = [
+                                    ip for cap in exec_caps for ip in cap.resolved_target_ips
+                                ]
+                                outcome_verdict = prove_outcome_from_captures(
+                                    exec_caps,
+                                    http_caps,
+                                    canary_callbacks=canary_callbacks,
+                                    canary_token=_canary_token,
+                                    resolved_target_ips=resolved_target_ips,
+                                )
+                                if outcome_verdict in ("proved", "corroborated"):
+                                    final_verdict = outcome_verdict
                                     break
                                 if outcome_verdict == "needs_manual_review":
                                     final_verdict = "needs_manual_review"
@@ -4297,6 +4332,7 @@ def build_prove_dispatch_inputs(
     target_endpoint_json: str | None,
     allowed_hosts: tuple[str, ...],
     egress_policy_json: str | None = None,
+    canary_token: str | None = None,
 ) -> "tuple[list[Any], list[Any]]":
     """Convert a ProveResponse's proposed specs into activity input objects.
 
@@ -4307,8 +4343,9 @@ def build_prove_dispatch_inputs(
 
     Sandbox exec specs carry *egress_policy_json* (the scenario-scoped
     destination-set policy); ``None``/empty means the sandbox runs with no
-    egress.  HTTP specs are silently dropped when *target_endpoint_json* is None
-    — live HTTP probes require a target endpoint.
+    egress.  *canary_token*, when set, activates the SSRF/XXE canary listener
+    inside the sandbox-exec activity.  HTTP specs are silently dropped when
+    *target_endpoint_json* is None — live HTTP probes require a target endpoint.
 
     Pure function — no I/O, safe to call from within workflow code.
     """
@@ -4322,6 +4359,7 @@ def build_prove_dispatch_inputs(
                 artifact_store_path=artifact_root,
                 scan_id=scan_id,
                 candidate_finding_id=finding_id,
+                canary_token=canary_token,
             )
         )
 

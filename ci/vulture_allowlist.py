@@ -241,6 +241,16 @@ _ALLOWLIST = [
     src.quarry_tools.treesitter.signum,
     src.quarry_workflows.tracer_stage.trace_id,
 
+    # --- BaseHTTPRequestHandler dynamic dispatch (do_* methods + silenced log) ---
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_GET,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_POST,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PUT,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_DELETE,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_HEAD,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PATCH,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message.format,
+
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
     src.quarry.benchmark_inventory.inventory_as_dicts,
     # Plugin-level match->CandidateFinding converters: the spec pins them on the
