@@ -176,6 +176,8 @@ def build_sandbox_backend() -> SandboxBackend:
       "k8s_job"         — K8sJobSandbox Tier 3 (deferred; raises NotImplementedError)
 
     QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
+    QUARRY_SANDBOX_MEMORY overrides the container memory cap (Docker ``--memory``
+    value, e.g. "2g"); empty => the ``ContainerSandbox`` default.
     """
     settings = QuarrySettings()
     backend = (settings.sandbox_backend or "").lower().strip()
@@ -183,7 +185,8 @@ def build_sandbox_backend() -> SandboxBackend:
         return LocalSubprocessSandbox()
     if backend == "container":
         image = settings.sandbox_image or ContainerSandbox.DEFAULT_IMAGE
-        return ContainerSandbox(image=image)
+        memory_limit = settings.sandbox_memory or None
+        return ContainerSandbox(image=image, memory_limit=memory_limit)
     if backend == "k8s_job":
         return K8sJobSandbox()
     msg = (
