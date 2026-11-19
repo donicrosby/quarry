@@ -40,6 +40,7 @@ EXPECTED_CLASSES = {
     VulnerabilityClass.SECURITY_MISCONFIGURATION,
     VulnerabilityClass.INSECURE_DESIGN,
     VulnerabilityClass.WEAK_CRYPTO,
+    VulnerabilityClass.SUPPLY_CHAIN,
     VulnerabilityClass.TEMPFILE_RACE,
     VulnerabilityClass.TERMINAL_ESCAPE,
 }

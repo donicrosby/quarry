@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
@@ -26,6 +28,7 @@ from quarry.schemas import (
     TriageLabel,
     VulnerabilityClass,
 )
+from quarry_tools.errors import ToolSecurityError
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 
@@ -242,7 +245,9 @@ def test_run_scan_oos_triage_labels_use_triage_label_enum() -> None:
 def test_sandbox_tool_env_profile_wired_to_env_profile_enum() -> None:
     """sandbox_tool.py must take the 'none'/'repo_readonly' wire strings from
     EnvProfile (quarry/schemas.py:1479) — the JSON wire format pinned
-    byte-identical (tool-schema enum + dispatch payload default)."""
+    byte-identical (tool-schema enum + dispatch payload default) — and must
+    refuse any env_profile other than 'none' until a resolution implementation
+    is registered (attacker-env-injection REQ-2)."""
     from quarry_tools.sandbox_tool import RUN_IN_SANDBOX_TOOL
 
     tree = _module_tree("quarry_tools/sandbox_tool.py")
@@ -274,11 +279,12 @@ def test_sandbox_tool_env_profile_wired_to_env_profile_enum() -> None:
     default_out = RUN_IN_SANDBOX_TOOL.run({"command": "nmap"}, Path("."))
     assert json.loads(default_out)["env_profile"] == "none"
     assert '"env_profile": "none"' in default_out
-    readonly_out = RUN_IN_SANDBOX_TOOL.run(
-        {"command": "nmap", "env_profile": "repo_readonly"}, Path(".")
-    )
-    assert json.loads(readonly_out)["env_profile"] == "repo_readonly"
-    assert '"env_profile": "repo_readonly"' in readonly_out
+
+    # Resolution is fail-safe (attacker-env-injection REQ-2): until a fixed
+    # resolution implementation is registered, any env_profile other than
+    # "none" is refused at the tool-call boundary rather than dispatched.
+    with pytest.raises(ToolSecurityError, match="env_profile"):
+        RUN_IN_SANDBOX_TOOL.run({"command": "nmap", "env_profile": "repo_readonly"}, Path("."))
 
 
 # ---------------------------------------------------------------------------

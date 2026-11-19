@@ -133,6 +133,14 @@ _ALLOWLIST = [
     src.quarry_activities.exploit.proposed_http_spec,
     src.quarry_activities.exploit.done,
     src.quarry_activities.inputs.prove_corpus_json,
+    # fuzzing-harness: FuzzSpec/FuzzCrash/FuzzResult fields whose only reader is
+    # a dict lookup over the serialised Temporal payload (invisible to vulture).
+    src.quarry_activities.inputs.entry_point_function,
+    src.quarry_activities.inputs.stderr_sha256,
+    src.quarry_activities.inputs.runs_executed,
+    src.quarry_activities.inputs.budget_exhausted,
+    src.quarry_activities.inputs.boundary_outcomes,
+    src.quarry_activities.inputs.non_crash_exits,
     src.quarry_activities.live_recon.code_file,
     src.quarry_activities.live_recon.code_function,
     src.quarry_activities.live_recon.auth_required,
