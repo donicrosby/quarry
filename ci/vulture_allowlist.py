@@ -55,6 +55,8 @@ _ALLOWLIST = [
     src.quarry.schemas.trigger_input,
     src.quarry.schemas.triage_notes,
     src.quarry.schemas.triaged_at,
+    src.quarry.schemas.legacy,
+    src.quarry.schemas.model_omitted,
     src.quarry.schemas.duplicate_of,
     src.quarry.schemas.severity_adjusted,
     src.quarry.schemas.attack_surface_item_id,
@@ -139,6 +141,7 @@ _ALLOWLIST = [
     src.quarry_activities.reporting.calls,
     src.quarry_activities.reporting.total_input_tokens,
     src.quarry_activities.reporting.total_output_tokens,
+    src.quarry_activities.reporting.evidence_links,
     src.quarry_artifacts.http_utils.original_size,
     src.quarry_benchmark.agent.poc_format,
     src.quarry_benchmark.agent.rationale,
@@ -253,6 +256,9 @@ _ALLOWLIST = [
     # tests reference these directly.
     src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
     src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
+
+    # --- browser-worker-playwright: helpers referenced only from tests/ ---
+    src.quarry_activities.playwright_driver.store_screenshot,
 
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
