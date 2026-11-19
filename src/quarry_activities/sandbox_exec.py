@@ -22,6 +22,7 @@ from pathlib import Path
 
 from temporalio import activity
 
+from quarry.config import QuarrySettings
 from quarry.egress import resolve_egress_policy
 from quarry.schemas import (
     ArtifactKind,
@@ -39,6 +40,7 @@ from quarry_activities.sandbox import (
     SandboxBackend,
     SandboxResult,
 )
+from quarry_artifacts.quarantine import put_quarantined_artifact
 from quarry_artifacts.store import build_artifact_store
 from quarry_models.redaction import Scrubber
 
@@ -136,8 +138,6 @@ def build_sandbox_backend() -> SandboxBackend:
 
     QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
     """
-    from quarry.config import QuarrySettings
-
     settings = QuarrySettings()
     backend = (settings.sandbox_backend or "").lower().strip()
     if backend in ("", "local"):
@@ -231,20 +231,26 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     wrapped_stdout = f"<target_content>{stdout_scrub.text}</target_content>"
     wrapped_stderr = f"<target_content>{stderr_scrub.text}</target_content>"
 
-    stdout_ref = store.put_bytes(
+    stdout_outcome = put_quarantined_artifact(
+        store,
         f"{inp.scan_id}/{inp.candidate_finding_id}/stdout",
         wrapped_stdout.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDOUT,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
-    stderr_ref = store.put_bytes(
+    stderr_outcome = put_quarantined_artifact(
+        store,
         f"{inp.scan_id}/{inp.candidate_finding_id}/stderr",
         wrapped_stderr.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDERR,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
+    stdout_ref = stdout_outcome.artifact_ref
+    stderr_ref = stderr_outcome.artifact_ref
 
     return SandboxExecCapture(
         exit_code=result.exit_code,
@@ -254,6 +260,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
         timed_out=result.timed_out,
+        artifact_refs=[stdout_ref, stderr_ref],
     )
 
 

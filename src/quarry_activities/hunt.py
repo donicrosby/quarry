@@ -22,6 +22,7 @@ from temporalio import activity
 from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
+    MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
     AgentTask,
     CandidateFinding,
     Confidence,
@@ -29,8 +30,10 @@ from quarry.schemas import (
     HunterGap,
     Provider,
     Severity,
+    SeverityRationale,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
@@ -40,6 +43,7 @@ from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.binary_analysis_context import merge_binary_analysis_context
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -88,6 +92,44 @@ def _parse_evidence_path(
     if start_line >= 1 and file_path:
         return [EvidencePathElement(path=file_path, line=start_line)]
     return []
+
+
+def _parse_severity_rationale(raw: dict[str, Any]) -> SeverityRationale:
+    """Map the model's ``severity_rationale`` sub-object into the contract.
+
+    Schema-enforced, not prompt-enforced: a model that omits one or more slots
+    still yields a valid finding. Missing slots are filled with the pinned
+    disclosure text and the rationale is flagged ``model_omitted=True`` — the
+    parser never fabricates a justification for the model.
+    """
+    value = raw.get("severity_rationale")
+    if not isinstance(value, dict):
+        return model_omitted_severity_rationale()
+    fields = cast("dict[str, Any]", value)
+    slots: dict[str, str] = {}
+    omitted = False
+    for slot in ("impact", "exploitability", "reachability"):
+        text = fields.get(slot)
+        if isinstance(text, str) and text.strip():
+            slots[slot] = text
+        else:
+            slots[slot] = MODEL_OMITTED_SEVERITY_RATIONALE_TEXT
+            omitted = True
+    evidence_refs: list[int] = []
+    raw_refs = fields.get("evidence_refs")
+    if isinstance(raw_refs, list):
+        for item in cast("list[object]", raw_refs):
+            if isinstance(item, bool):
+                continue
+            if isinstance(item, int) and item >= 0:
+                evidence_refs.append(item)
+    return SeverityRationale(
+        impact=slots["impact"],
+        exploitability=slots["exploitability"],
+        reachability=slots["reachability"],
+        evidence_refs=evidence_refs,
+        model_omitted=omitted,
+    )
 
 
 def _parse_finding(
@@ -153,6 +195,7 @@ def _parse_finding(
             severity=severity,
             source_refs=source_refs,
             evidence_path=_parse_evidence_path(raw, file_path, start_line),
+            severity_rationale=_parse_severity_rationale(raw),
             root_cause_key=root_cause_key,
             created_by="hunt-agent",
             created_at=datetime.now(UTC),
@@ -207,6 +250,13 @@ def hunt_impl(
     # Resolve KB references at execution time (activity-side I/O; the workflow
     # passes only the reference). The injector returns None when nothing
     # resolves, so domain_context keeps its existing assembled content.
+    #
+    # Binary analysis report consumption (slice-3 C6): the persisted hardening
+    # report rides alongside the KB context for security_misconfiguration tasks.
+    # Idempotent — a task already enriched by the activity-level merge (which
+    # also records provenance) is left unchanged.
+    task = merge_binary_analysis_context(task, artifact_root)
+
     effective_kb_key = (
         kb_root_index_key if kb_root_index_key is not None else task.kb_root_index_key
     )
@@ -447,6 +497,12 @@ def _hunt_activity_impl(
         "",
     )
     _, kb_resolved, kb_record_keys = kb_injector.last_resolution
+
+    # Binary analysis report consumption (slice-3 C6): merge the persisted
+    # hardening report into the task's domain_context and record its provenance
+    # before rendering. Absent artifact or a non-matching class leaves the task
+    # unchanged (portability invariant).
+    task = merge_binary_analysis_context(task, artifact_root)
 
     findings, coverage_gaps = hunt_impl(
         task=task,

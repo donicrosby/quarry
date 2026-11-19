@@ -44,3 +44,22 @@ Quarry's design draws on the following public reference designs and
 benchmarks (named per `openspec/config.yaml`): Cloudflare Glasswing,
 Microsoft MDASH, Keygraph Shannon, and the CyberGym benchmark. This file's
 attribution requirements are governed by `openspec/config.yaml`.
+
+## Pentest-Swarm AI (AGPL-3.0) — oracle mechanism attribution
+
+Quarry's timing and differential oracle evaluators (`verify-oracle-upgrade`
+change) derive their statistical and set-operation logic from Pentest-Swarm AI,
+licensed under the GNU Affero General Public License v3.0:
+https://www.gnu.org/licenses/agpl-3.0.html
+
+Source files consulted (read for mechanism description; no code imported):
+
+- `internal/swarm/verify/oracle/timing.go:106-182` — MAD-robust statistical
+  timing oracle with delay-ladder linearity confirmation.
+- `internal/swarm/verify/oracle/differential.go:98-196` — payload-echo
+  normalization, token-Jaccard similarity threshold, and indicator-based
+  verdict override.
+
+Quarry re-derives these mechanisms as pure statistics and set operations in
+Python with no source-code import; this attribution records the provenance
+of the algorithmic design.

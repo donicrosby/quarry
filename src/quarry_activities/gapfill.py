@@ -40,6 +40,7 @@ from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.binary_analysis_context import merge_binary_analysis_context
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -438,6 +439,12 @@ def gapfill_impl(
             fraction=exploratory_injection_fraction,
             now=datetime.now(UTC),
         )
+
+    # Binary analysis report consumption (slice-3 C6): enrich
+    # security_misconfiguration re-hunt tasks with the persisted hardening report,
+    # on the same consumption path as hunt tasks. Idempotent — a task already
+    # carrying the report is left unchanged.
+    extra_tasks = [merge_binary_analysis_context(task, artifact_root) for task in extra_tasks]
 
     return extra_tasks
 
