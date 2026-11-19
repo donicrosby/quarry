@@ -12,6 +12,25 @@ Three tiers are defined here; only Tier 1 runs in-process today:
 it reaches a tier, so no tier ever re-resolves a destination (DNS-rebinding guard,
 see :mod:`quarry.egress`).
 
+**Tiered confinement model:**
+
+  Tier 1  ``LocalSubprocessSandbox`` provides *resource* containment (RLIMIT_CPU /
+          RLIMIT_AS / RLIMIT_NPROC) plus defense-in-depth via the command
+          allowlist (``_COMMAND_ALLOWLIST``) and the workdir restriction
+          (``_resolve_sandbox_cwd`` / ``_stage_input_files``).  It does NOT
+          provide a kernel-enforced network namespace on macOS/Colima: the
+          sandbox shares the host kernel, filesystem, and network stack.  Use it
+          for wiring/correctness tests only.
+  Tier 2+ ``ContainerSandbox`` (``--network none`` when no egress policy is set) and
+          ``K8sJobSandbox`` (Job + NetworkPolicy) provide kernel-enforced
+          isolation: host processes, filesystem, and network interfaces are not
+          reachable targets from inside the sandbox.  Production network
+          containment is one of these tiers.
+
+**The host is never in scope.**  The machine running the sandbox is NEVER a
+testing target.  Privilege-escalation checks execute *inside* the sandbox only —
+never against the host kernel or host processes — regardless of tier.
+
 **Isolation caveat (Tier 1):** LocalSubprocessSandbox provides *resource*
 containment (RLIMIT_CPU / RLIMIT_AS / RLIMIT_NPROC) and no-network-by-convention,
 but it does NOT provide a kernel-enforced network namespace on macOS/Colima

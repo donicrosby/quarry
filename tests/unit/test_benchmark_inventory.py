@@ -26,7 +26,7 @@ def test_inventory_enumerates_every_vuln_class() -> None:
     rows = build_inventory(prompts_dir=PROMPTS_DIR, ground_truth_dir=GROUND_TRUTH_DIR)
 
     assert [row.vuln_class for row in rows] == [member.value for member in VulnerabilityClass]
-    assert len(rows) == len(VulnerabilityClass) == 19
+    assert len(rows) == len(VulnerabilityClass) == 21
 
 
 def test_huntable_matches_hunt_templates_on_disk() -> None:

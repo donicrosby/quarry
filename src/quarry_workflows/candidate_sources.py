@@ -2,8 +2,8 @@
 
 Extracted from ``run_scan.py`` (cruft-purge §5.1) — pure move, no logic
 edits. These converters turn activity payloads from the deterministic
-secret/SSRF sweeps into ``CandidateFinding`` objects for the full-scan HUNT
-stage.
+secret/SSRF/tempfile-race/terminal-escape sweeps into ``CandidateFinding``
+objects for the full-scan HUNT stage.
 
 These functions run directly inside sandboxed Temporal workflow code (see
 ``RunScanWorkflow._run`` in ``run_scan.py``), so they must be pure and
@@ -11,7 +11,7 @@ deterministic: payloads cross the workflow/activity boundary as plain dicts
 and no activity-side classes are imported (Temporal sandbox determinism).
 Callers pass in ``created_at`` from ``workflow.now()`` at the call site.
 
-Back-compat: ``run_scan.py`` re-exports both public converters from this
+Back-compat: ``run_scan.py`` re-exports the public converters from this
 module so existing importers (tests, integration callers) keep working
 unmigrated.
 """
@@ -27,6 +27,7 @@ from quarry.schemas import (
     EvidencePathElement,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
 )
 
 
@@ -116,6 +117,7 @@ def _secret_candidate_from_match_record(
         ],
         evidence_path=[],
         confidence=Confidence.MEDIUM,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by="secrets-scanner",
         created_at=created_at,
         metadata={
@@ -195,6 +197,7 @@ def ssrf_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
                 created_by="ssrf-sweep",
                 created_at=created_at,
                 metadata={
@@ -202,6 +205,175 @@ def ssrf_candidates_from_activity_payload(
                     "evidence_kind": "outbound_request_sink",
                     "sink_name": sink_name,
                     "url_source": url_source,
+                },
+            )
+        )
+    return candidates
+
+
+def tempfile_race_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-tempfile-races`` activity payload to candidates.
+
+    Deterministic-sweep parity with the secrets/SSRF sweeps: predictable temp
+    paths and deprecated name-then-open tempfile APIs open a TOCTOU window, so
+    detection must not ride on one hunt roll.  ``metadata.source ==
+    "tempfile-race-sweep"`` keeps sweep provenance visible to the coverage
+    ledger and accumulator.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected tempfile-race match payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
+        if record is None:
+            continue
+        sink_name = str(record.get("sink_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(str(record.get("line_number", 0) or 0))
+        temp_path = str(record.get("temp_path", ""))
+        evidence_kind = str(record.get("evidence_kind", "predictable_temp_path"))
+        if not sink_name or not file_path or line_number <= 0:
+            continue
+        fingerprint = _compute_fingerprint(
+            vuln_class=VulnerabilityClass.TEMPFILE_RACE,
+            file_path=file_path,
+            start_line=line_number,
+            key_name=sink_name,
+            evidence_kind=evidence_kind,
+        )
+        root_cause_key = _compute_root_cause_key(
+            vuln_class=VulnerabilityClass.TEMPFILE_RACE,
+            file_path=file_path,
+            sink=sink_name,
+        )
+        target = f" at {temp_path}" if temp_path else ""
+        candidates.append(
+            CandidateFinding(
+                id=fingerprint[:32],
+                scan_id=scan_id,
+                workspace_id="local",
+                vuln_class=VulnerabilityClass.TEMPFILE_RACE,
+                title=f"Unsafe temporary file: {sink_name}",
+                hypothesis=f"'{sink_name}' in {file_path}:{line_number} creates or "
+                f"uses a temporary file with a predictable name or deprecated "
+                f"name-then-open API{target}; an attacker who pre-plants that path "
+                f"wins the TOCTOU window.",
+                root_cause_key=root_cause_key,
+                affected_component=file_path,
+                source_refs=[
+                    SourceRef(
+                        file_path=file_path,
+                        start_line=line_number,
+                        end_line=line_number,
+                        symbol=sink_name,
+                    )
+                ],
+                evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
+                confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
+                created_by="tempfile-race-sweep",
+                created_at=created_at,
+                metadata={
+                    "source": "tempfile-race-sweep",
+                    "evidence_kind": evidence_kind,
+                    "sink_name": sink_name,
+                    "temp_path": temp_path,
+                },
+            )
+        )
+    return candidates
+
+
+def terminal_escape_candidates_from_activity_payload(
+    payload: object,
+    *,
+    scan_id: str,
+    created_at: datetime,
+) -> list[CandidateFinding]:
+    """Convert a ``scan-repo-for-terminal-escapes`` activity payload to candidates.
+
+    Deterministic-sweep parity with the secrets/SSRF sweeps: attacker-controlled
+    input echoed to a terminal without ANSI sanitization is presence-shaped, so
+    detection must not ride on one hunt roll.  ``metadata.source ==
+    "terminal-escape-sweep"`` keeps sweep provenance visible to the coverage
+    ledger and accumulator.
+
+    The payload crosses the workflow/activity boundary as plain dicts; no
+    activity-side classes are imported here (Temporal sandbox determinism).
+    *created_at* comes from ``workflow.now()`` at the call site.
+    """
+    if not isinstance(payload, list):
+        msg = f"Unexpected terminal-escape match payload: {type(payload).__name__}"
+        raise TypeError(msg)
+    candidates: list[CandidateFinding] = []
+    for item in cast("list[object]", payload):
+        record: dict[str, object] | None = (
+            cast("dict[str, object]", item) if isinstance(item, dict) else None
+        )
+        if record is None:
+            continue
+        sink_name = str(record.get("sink_name", ""))
+        file_path = str(record.get("file_path", ""))
+        line_number = int(str(record.get("line_number", 0) or 0))
+        input_source = str(record.get("input_source", ""))
+        evidence_kind = str(record.get("evidence_kind", "unsanitized_terminal_output"))
+        if not sink_name or not file_path or line_number <= 0:
+            continue
+        fingerprint = _compute_fingerprint(
+            vuln_class=VulnerabilityClass.TERMINAL_ESCAPE,
+            file_path=file_path,
+            start_line=line_number,
+            key_name=sink_name,
+            evidence_kind=evidence_kind,
+        )
+        root_cause_key = _compute_root_cause_key(
+            vuln_class=VulnerabilityClass.TERMINAL_ESCAPE,
+            file_path=file_path,
+            sink=sink_name,
+        )
+        candidates.append(
+            CandidateFinding(
+                id=fingerprint[:32],
+                scan_id=scan_id,
+                workspace_id="local",
+                vuln_class=VulnerabilityClass.TERMINAL_ESCAPE,
+                title=f"Unsanitized terminal output: {sink_name}",
+                hypothesis=f"'{sink_name}' in {file_path}:{line_number} writes the "
+                f"user-controlled value '{input_source}' to a terminal without "
+                f"stripping ANSI/control sequences, letting injected escapes "
+                f"manipulate the operator display.",
+                root_cause_key=root_cause_key,
+                affected_component=file_path,
+                source_refs=[
+                    SourceRef(
+                        file_path=file_path,
+                        start_line=line_number,
+                        end_line=line_number,
+                        symbol=sink_name,
+                    )
+                ],
+                evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
+                confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
+                created_by="terminal-escape-sweep",
+                created_at=created_at,
+                metadata={
+                    "source": "terminal-escape-sweep",
+                    "evidence_kind": evidence_kind,
+                    "sink_name": sink_name,
+                    "input_source": input_source,
                 },
             )
         )

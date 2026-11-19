@@ -65,3 +65,18 @@ class QuarrySettings(BaseSettings):
     # patterns; the check is a no-op until at least one pattern is configured.
     # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')
     typosquat_patterns: list[str] = Field(default_factory=list)
+    # Proof-artifact quarantine (D6 / proof-artifact-quarantine). Per-kind size
+    # limits in bytes, enforced before any artifact byte is accepted; the default
+    # covers kinds without an explicit limit. A quarantined proof artifact is
+    # local-only unless quarantine_remote_backend names the one remote backend the
+    # operator has explicitly opted in as a quarantine destination.
+    quarantine_max_tool_output_bytes: int = 1_048_576
+    # env: QUARRY_QUARANTINE_MAX_TOOL_OUTPUT_BYTES
+    quarantine_max_http_response_bytes: int = 104_857_600
+    # env: QUARRY_QUARANTINE_MAX_HTTP_RESPONSE_BYTES
+    quarantine_max_code_snippet_bytes: int = 5_242_880
+    # env: QUARRY_QUARANTINE_MAX_CODE_SNIPPET_BYTES
+    quarantine_max_artifact_bytes: int = 104_857_600
+    # env: QUARRY_QUARANTINE_MAX_ARTIFACT_BYTES
+    quarantine_remote_backend: str = ""  # env: QUARRY_QUARANTINE_REMOTE_BACKEND
+    malware_scanner: str = ""  # env: QUARRY_MALWARE_SCANNER ("" = no scanner configured)
