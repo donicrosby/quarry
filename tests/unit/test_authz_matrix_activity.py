@@ -85,6 +85,7 @@ def _input(
     tmp_path: Path,
     endpoints: list[AuthzMatrixEndpoint],
     personas: list[AuthzMatrixPersona],
+    do_not_test: tuple[str, ...] = (),
 ) -> AuthzMatrixActivityInput:
     endpoint = TargetEndpoint(host="app.example.com", port=443, scheme="https")
     return AuthzMatrixActivityInput(
@@ -92,6 +93,7 @@ def _input(
         target_endpoint_json=endpoint.model_dump_json(),
         allowed_hosts=("app.example.com",),
         artifact_store_path=str(tmp_path),
+        do_not_test=do_not_test,
         endpoints=endpoints,
         personas=personas,
     )
@@ -248,6 +250,27 @@ async def test_missing_body_artifact_key_records_no_hash(
     cell = result.rows[0].cells[0]
     assert cell.status_code == 204
     assert cell.body_hash is None
+
+
+async def test_endpoint_matching_top_level_do_not_test_produces_no_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The top-level do_not_test ceiling blocks every persona for that path."""
+    fake = _patch(monkeypatch, lambda spec: (200, "ok"))
+    inp = _input(
+        tmp_path,
+        [_endpoint("GET", "/admin/users"), _endpoint("GET", "/public")],
+        [_persona("anon", None, "unauthenticated"), _persona("admin", "admin-token", "admin")],
+        do_not_test=("/admin/*",),
+    )
+
+    result = await authz_matrix_activity(inp)
+
+    by_path = {row.endpoint_path: row for row in result.rows}
+    assert by_path["/admin/users"].cells == []
+    # Only the non-blocked endpoint is probed, once per persona.
+    assert [cell.persona for cell in by_path["/public"].cells] == ["anon", "admin"]
+    assert len(fake.calls) == 2
 
 
 def test_activity_is_registered_under_temporal_name() -> None:

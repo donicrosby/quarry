@@ -487,6 +487,16 @@ def _default_persona_paths() -> list[str]:
     return ["/"]
 
 
+def path_matches_do_not_test(path: str, patterns: tuple[str, ...] | list[str]) -> bool:
+    """True when *path* matches any ``do_not_test`` pattern.
+
+    The top-level ``do_not_test`` list is a ceiling over every persona: the
+    authz-matrix activity uses this predicate to refuse probing an endpoint
+    before egress. Matching follows the ``_path_pattern_matches`` convention.
+    """
+    return any(_path_pattern_matches(path, pattern) for pattern in patterns)
+
+
 def _path_pattern_matches(path: str, pattern: str) -> bool:
     """Match *path* against a scope pattern (glob or exact/prefix).
 

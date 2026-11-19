@@ -264,6 +264,9 @@ class AuthzMatrixActivityInput(BaseModel):
     allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
     artifact_store_path: str  # path for LocalArtifactStore
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+    # Top-level do_not_test ceiling: endpoints matching any pattern are never
+    # probed (no cell), regardless of persona.
+    do_not_test: tuple[str, ...] = ()
     endpoints: list[AuthzMatrixEndpoint] = Field(default_factory=_empty_authz_endpoints)
     personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
     # Minimum spacing between requests to the same host (target-side rate-limit
