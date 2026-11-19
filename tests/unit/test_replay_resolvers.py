@@ -19,6 +19,7 @@ from tests.unit.replay_fixtures import (
     make_arch_doc,
     make_candidate,
     make_repository,
+    persist_hunt_tasks,
     write_kb_artifacts,
     write_ledger_artifact,
 )
@@ -169,6 +170,36 @@ class TestHuntResolver:
                 vuln_class="secrets",
                 mock=True,
             )
+
+    def test_overlays_persisted_task_id(self, tmp_path: Path) -> None:
+        """The re-derived task carries the PERSISTED original id (Req-3).
+
+        ``emit_agent_tasks`` mints a fresh uuid4 per call, so without the
+        overlay the replay would key a *different* per-agent log file than the
+        original run wrote.
+        """
+        from quarry_replay.resolvers import resolve_hunt_inputs
+
+        repo = build_repo(tmp_path)
+        arch_doc = make_arch_doc("scan-replay-1")
+        db_path = build_scan_db(
+            tmp_path / "quarry.db",
+            repo,
+            vuln_classes=[VulnerabilityClass.SECRETS],
+            arch_doc=arch_doc,
+        )
+        (original,) = persist_hunt_tasks(
+            db_path, "scan-replay-1", arch_doc, vuln_classes=[VulnerabilityClass.SECRETS]
+        )
+        resolved = resolve_hunt_inputs(
+            db_path=db_path,
+            scan_id="scan-replay-1",
+            repo_path=str(repo),
+            vuln_class="secrets",
+            mock=True,
+        )
+        assert resolved.task.id == original.id
+        assert resolved.task.task_name == original.task_name
 
 
 class TestGapfillResolver:

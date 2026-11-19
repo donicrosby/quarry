@@ -218,6 +218,8 @@ class ArtifactKind(StrEnum):
     # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
     ARCHITECTURE_DOC = "architecture_doc"
     HUNT_HANDOFF = "hunt_handoff"
+    # per-agent-durable-logs: append-only per-agent execution log (JSONL).
+    AGENT_LOG = "agent_log"
 
 
 class RedactionStatus(StrEnum):
