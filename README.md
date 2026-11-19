@@ -148,6 +148,84 @@ Re-render a report from stored state without re-running the scan or making model
 uv run quarry scan rerun <scan_id>
 ```
 
+## CI/CD integrations
+
+The SARIF sink is a built-in finding sink: every scan writes a SARIF 2.1.0 log to
+`sarif/<scan_id>.sarif.json` under the scan's artifact root (default
+`.quarry/artifacts/`). The log maps each finding's severity to a SARIF
+`result.level`, its fingerprint to `partialFingerprints.quarryFingerprint`, and its
+primary source location to `locations[0].physicalLocation`. The original, unmapped
+severity is carried in `properties.quarry.severity` because the level mapping
+collapses `low` and `info` onto `note`, and `properties.quarry.severity_rationale_state`
+(`model` / `legacy` / `model_omitted`) reports how the finding's severity rationale
+was produced. Gating always uses the severity enum — never the model-authored
+rationale prose, which is not exported. Source paths are URI-escaped in
+`artifactLocation.uri`, and location resolution mirrors the report's evidence links
+(`evidence_path` first, then `source_refs`).
+
+### GitHub Action
+
+`.github/workflows/quarry-scan.yml` is a reusable workflow (`workflow_call`). It
+checks out the calling repository, installs Quarry, runs a scan, filters the SARIF
+log to `severity_threshold`, uploads it to GitHub code scanning (category
+`quarry`), and fails the check when findings at or above the threshold remain.
+
+| Input | Required | Default | Meaning |
+|---|---|---|---|
+| `quarry_config` | yes | — | Path to the Quarry config file (`quarry.toml`) |
+| `target_repo` | no | `${{ github.workspace }}` | Repository path to scan |
+| `severity_threshold` | no | `low` | Minimum severity that fails the check |
+| `quarry_version` | no | `latest` | Quarry git ref to check out and install |
+
+Example caller:
+
+```yaml
+jobs:
+  quarry:
+    uses: donicrosby/quarry/.github/workflows/quarry-scan.yml@main
+    with:
+      quarry_config: quarry.toml
+      severity_threshold: high
+    secrets:
+      quarry_model_api_key: ${{ secrets.CHUTES_API_KEY }}
+```
+
+### GitLab CI/CD component
+
+`templates/quarry-sast.yml` is a GitLab CI/CD component. It scans
+`$CI_PROJECT_DIR`, filters the SARIF log to the threshold, and publishes it through
+the dedicated `artifacts:reports:sarif` type (the legacy `sast` type expects
+GitLab's own JSON schema, not SARIF). It accepts `quarry_config`,
+`severity_threshold` (default `low`), and `quarry_version` (default `latest`).
+
+```yaml
+include:
+  - component: $CI_SERVER_FQDN/donicrosby/quarry/quarry-sast@main
+    inputs:
+      quarry_config: quarry.toml
+      severity_threshold: high
+```
+
+GitLab ingests findings only from a **successful** job. Because the component's job
+fails when findings remain, a failing scan surfaces the SARIF artifact for
+inspection but does not populate the Security tab; teams that want both the native
+findings and a blocking gate can gate on the artifact with a merge-request approval
+policy.
+
+### Exit-code contract
+
+Both integrations share one contract, also usable from generic CI:
+
+| Code | Meaning |
+|---|---|
+| 0 | No proven findings at or above the threshold |
+| 1 | Findings at or above the threshold |
+| 2 | Scan error (Quarry did not complete) |
+
+The threshold filter itself lives in
+[`ci/sarif_severity_filter.jq`](ci/sarif_severity_filter.jq) and both CI
+definitions invoke that same file, so the two contracts cannot drift apart.
+
 ## Development
 
 ```bash

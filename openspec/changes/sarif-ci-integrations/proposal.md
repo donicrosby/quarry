@@ -18,8 +18,8 @@ tab.
   source locations to SARIF `physicalLocation` entries. Respects the existing
   idempotency, dry-run, and redaction guardrails inherited from the FindingSink
   protocol.
-- **Reusable GitHub Action**: A composite or reusable workflow action
-  (`action.yml` / `.github/workflows/quarry-scan.yml`) that runs Quarry against a
+- **Reusable GitHub Action**: A reusable workflow (`.github/workflows/quarry-scan.yml`,
+  `workflow_call` trigger) that runs Quarry against a
   repository, collects the SARIF output, and uploads it via
   `github/codeql-action/upload-sarif`. Inputs: quarry config, target repo, optional
   severity threshold.

@@ -27,14 +27,14 @@ SHALL populate `result.partialFingerprints`.
 - **WHEN** a finding has a stable fingerprint
 - **THEN** the SARIF result carries `partialFingerprints.quarryFingerprint` set to that fingerprint value
 
-#### Scenario: dry-run-sarif-sink-writes-no-file
+#### Scenario: dry-run-sarif-sink-produces-dry-run-payload
 
 - **WHEN** the SARIF sink is invoked with dry-run enabled
-- **THEN** it produces a dry-run `IntegrationRun` record and writes no SARIF file to disk
+- **THEN** the `IntegrationRun` records `DRY_RUN` status and a dry-run SARIF payload artifact is written for inspection, with no external delivery attempted (JiraDryRunSink/SlackDryRunSink precedent: dry-run writes a payload artifact, never an external side effect)
 
-#### Scenario: empty-scan-produces-valid-empty-sarif
+#### Scenario: empty-findings-produce-valid-empty-sarif
 
-- **WHEN** a scan completes with zero findings
+- **WHEN** the SARIF log is built from zero findings
 - **THEN** the SARIF log is still valid (empty `results[]` array, `tool.driver` metadata present)
 
 ### Requirement: Reusable GitHub Action for Quarry SARIF scanning
@@ -62,14 +62,15 @@ reference and an optional severity threshold as inputs.
 ### Requirement: GitLab CI/CD component for Quarry SAST scanning
 
 Quarry SHALL ship a GitLab CI/CD component that runs a Quarry scan in a GitLab pipeline,
-produces a SARIF artifact, and publishes it as a GitLab SAST report artifact. The
+produces a SARIF artifact, and publishes it via `artifacts:reports:sarif` for GitLab
+security-findings ingestion (SAST report type by default). The
 component SHALL accept a Quarry configuration reference and an optional severity
 threshold as inputs, mirroring the GitHub Action contract.
 
 #### Scenario: gitlab-component-runs-quarry-and-publishes-sarif
 
 - **WHEN** the component is included in a GitLab pipeline with a valid quarry config
-- **THEN** Quarry runs a scan, produces a SARIF artifact, and publishes it as a GitLab SAST report
+- **THEN** Quarry runs a scan, produces a SARIF artifact, and publishes it as an `artifacts:reports:sarif` artifact
 
 #### Scenario: gitlab-component-respects-severity-threshold
 
@@ -79,4 +80,4 @@ threshold as inputs, mirroring the GitHub Action contract.
 #### Scenario: gitlab-component-surfaces-scan-failure
 
 - **WHEN** the Quarry scan fails (non-zero exit)
-- **THEN** the pipeline job fails and no SAST artifact is produced
+- **THEN** the pipeline job fails and no findings are ingested by GitLab (a `reports:sarif` artifact may still be uploaded, but GitLab ingests findings only from successful jobs)
