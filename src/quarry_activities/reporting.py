@@ -113,6 +113,29 @@ Full coverage: no items were skipped.
 - Class: `{{ finding.vuln_class.value }}`
 - Severity: `{{ finding.severity.value }}`
 - Component: `{{ finding.affected_component or "unknown" }}`
+{% set rationale = rationales_by_finding.get(finding.id) -%}
+{% if rationale -%}
+
+#### Impact
+
+{{ rationale.impact }}
+
+#### Exploitability
+
+{{ rationale.exploitability }}
+
+#### Reachability
+
+{{ rationale.reachability }}
+{% if rationale.evidence_links -%}
+
+Evidence:
+
+{% for link in rationale.evidence_links -%}
+- {{ link }}
+{% endfor -%}
+{% endif -%}
+{% endif -%}
 
 {{ finding.summary }}
 
@@ -203,6 +226,53 @@ No candidate findings recorded.
 {% endif -%}
 """
 )
+
+
+class RationaleView(TypedDict):
+    """Render-ready severity rationale for one final finding (finding-contract)."""
+
+    impact: str
+    exploitability: str
+    reachability: str
+    evidence_links: list[str]
+
+
+def _evidence_link(finding: FinalFinding, index: int) -> str | None:
+    """Render one rationale evidence index as a markdown link to its source.
+
+    Indices point into the finding's ordered ``evidence_path`` first (sink at
+    index 0) and fall back to ``source_refs`` — an out-of-range index returns
+    ``None`` so the report never emits a fabricated pointer.
+    """
+    if index < len(finding.evidence_path):
+        element = finding.evidence_path[index]
+        return f"[`{element.path}:{element.line}`]({element.path}#L{element.line})"
+    if index < len(finding.source_refs):
+        ref = finding.source_refs[index]
+        if ref.start_line is None:
+            return f"[`{ref.file_path}`]({ref.file_path})"
+        span = f"-L{ref.end_line}" if ref.end_line and ref.end_line != ref.start_line else ""
+        return f"[`{ref.file_path}:{ref.start_line}`]({ref.file_path}#L{ref.start_line}{span})"
+    return None
+
+
+def _rationale_views(final_findings: list[FinalFinding]) -> dict[str, RationaleView]:
+    """Build per-finding render views for the final-findings report section."""
+    views: dict[str, RationaleView] = {}
+    for finding in final_findings:
+        rationale = finding.severity_rationale
+        links: list[str] = []
+        for index in rationale.evidence_refs:
+            link = _evidence_link(finding, index)
+            if link is not None:
+                links.append(link)
+        views[finding.id] = RationaleView(
+            impact=rationale.impact,
+            exploitability=rationale.exploitability,
+            reachability=rationale.reachability,
+            evidence_links=links,
+        )
+    return views
 
 
 @activity.defn(name="render-markdown-report")
@@ -342,6 +412,7 @@ def _render_markdown_report_impl(
         summary=summary,
         snapshot=snapshot,
         final_findings=final_findings or [],
+        rationales_by_finding=_rationale_views(final_findings or []),
         needs_proof_findings=np_findings,
         coverage=coverage,
         proofs_by_finding=_proofs_by_finding(proof_artifacts or []),
