@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from fnmatch import fnmatch
 
-from quarry.schemas import TargetAuthorization
+from quarry.schemas import PersonaScope, TargetAuthorization
 
 
 def authorization_active(
@@ -56,3 +56,28 @@ def _path_matches(path: str, pattern: str) -> bool:
         return True
     prefix = pattern.rstrip("/")
     return path == prefix or path.startswith(prefix + "/")
+
+
+def persona_for_request(
+    authorization: TargetAuthorization, *, host: str, path: str
+) -> PersonaScope | None:
+    """The first persona whose scope covers (*host*, *path*), or ``None``.
+
+    Pure predicate beside :func:`request_in_scope` (D4 precedent). A persona
+    matches when the host is in its ``allowed_hosts``, the path falls under one
+    of its ``allowed_paths``, and the path is not blocked by its own
+    ``do_not_test``. The first match in declaration order wins.
+
+    Fail-closed: an empty ``allowed_hosts`` (or ``allowed_paths``) matches
+    nothing. Top-level ``do_not_test`` is enforced by :func:`request_in_scope`;
+    persona selection refines that ceiling and never widens it.
+    """
+    for persona in authorization.personas:
+        if host not in persona.allowed_hosts:
+            continue
+        if not any(_path_matches(path, allowed) for allowed in persona.allowed_paths):
+            continue
+        if any(_path_matches(path, blocked) for blocked in persona.do_not_test):
+            continue
+        return persona
+    return None

@@ -27,6 +27,9 @@ from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
+    AuthzMatrixEndpoint,
+    AuthzMatrixPersona,
+    AuthzMatrixResult,
     CallGraph,
     CandidateFinding,
     ExploitChain,
@@ -66,8 +69,14 @@ from quarry.schemas import (
 from quarry.schemas import (
     Provider as _Provider,
 )
+from quarry_activities.authz_matrix import (
+    build_authz_candidates,
+    build_authz_hunt_tasks,
+    detect_authz_violations,
+)
 from quarry_activities.coverage import build_coverage_ledger, write_coverage_artifact
 from quarry_activities.inputs import (
+    AuthzMatrixActivityInput,
     BuildScanManifestInput,
     CloneRepoInput,
     CloneRepoResult,
@@ -184,7 +193,7 @@ from quarry_workflows.prove_stage import (
     prioritize_by_live_verdict,
     prove_outcome_from_captures,
 )
-from quarry_workflows.roe import authorization_active, request_in_scope
+from quarry_workflows.roe import authorization_active, persona_for_request, request_in_scope
 from quarry_workflows.tracer_stage import (
     apply_trace_severity_reranking,
     sync_final_finding_trace,
@@ -892,12 +901,16 @@ class RunScanWorkflow:
         # they flow through the same DEDUP/PROVE/TRACER/report path as code-hunted
         # ones. Fail-closed and best-effort: it requires a fresh ArchitectureDoc (so
         # it is skipped on a post-RECON resume) and never blocks the code pipeline.
+        matrix_tasks: list[AgentTask] = []
         if arch_doc is not None:
-            await self._run_live_exploitation(
+            matrix_tasks = await self._run_live_exploitation(
                 scan_input, scan, repo_path, artifact_root, arch_doc, candidate_findings
             )
+            # Matrix-conditioned hunt tasks join the accumulated task set so the
+            # gapfill ledger and the coverage loop see them.
+            all_agent_tasks.extend(matrix_tasks)
 
-        round_tasks: list[AgentTask] = agent_tasks
+        round_tasks: list[AgentTask] = [*agent_tasks, *matrix_tasks]
         # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
         # "round_cap". Stays None only if the loop body never ran (no tasks).
         loop_stop_reason_final: str | None = None
@@ -1262,7 +1275,7 @@ class RunScanWorkflow:
         artifact_root: str,
         arch_doc: ArchitectureDoc,
         candidate_findings: list[CandidateFinding],
-    ) -> None:
+    ) -> list[AgentTask]:
         """Live-exploitation track (Shannon pillar; design D1/D3/D4).
 
         Fail-closed: runs only when ``live_exploit_enabled`` AND a target AND an active
@@ -1287,7 +1300,7 @@ class RunScanWorkflow:
             target_url=scan_input.target_url,
             authorization=authorization,
         ):
-            return
+            return []
         # The gate guarantees both are set; assert for the type-checker.
         assert authorization is not None
         assert scan_input.target_url is not None
@@ -1333,13 +1346,28 @@ class RunScanWorkflow:
                 "live_exploit.failed",
                 {"stage": "live_recon", "error": _describe_failure(exc)},
             )
-            return
+            return []
         attack_map: list[Any] = (
             cast("list[Any]", recon_raw.get("attack_map") or [])
             if isinstance(recon_raw, dict)
             else []
         )
         exploit_panel_json = panel_json_for_role(scan, "exploit")
+
+        # Step 1b: multi-persona authorization matrix (W14) — after live recon
+        # produces the attack map and BEFORE the propose→dispatch chain. Gated by
+        # the live track (enforced above) plus non-empty personas; never by
+        # ``dynamic_validation_enabled`` (that flag gates VALIDATION egress).
+        matrix_tasks = await self._run_authz_matrix(
+            scan_input,
+            scan,
+            artifact_root,
+            target_ep,
+            allowed_hosts,
+            authorization,
+            attack_map,
+            candidate_findings,
+        )
 
         # Step 2: per vuln class, drive a stateful propose→dispatch exploit chain.
         #
@@ -1422,6 +1450,146 @@ class RunScanWorkflow:
                 "finding.candidate_created",
                 {"finding_id": candidate.id, "source": "live-exploit"},
             )
+
+        return matrix_tasks
+
+    async def _run_authz_matrix(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        target_ep: TargetEndpoint,
+        allowed_hosts: tuple[str, ...],
+        authorization: TargetAuthorization,
+        attack_map: list[Any],
+        candidate_findings: list[CandidateFinding],
+    ) -> list[AgentTask]:
+        """Multi-persona authorization matrix (W14).
+
+        Runs only when the live track is active (the caller already enforced the
+        fail-closed gate) AND ``personas`` is non-empty — a zero-persona
+        authorization dispatches nothing and produces no artifact. Probes are
+        governed by the top-level ``request_in_scope`` only: persona scope
+        narrows agent-initiated dispatch, not matrix measurement. Best-effort —
+        a failed matrix is logged and never aborts the scan.
+        """
+        if not authorization.personas:
+            return []
+
+        endpoints = build_authz_matrix_endpoints(attack_map, authorization, host=target_ep.host)
+
+        personas = [
+            AuthzMatrixPersona(
+                name=persona.name,
+                profile_ref=persona.profile_ref,
+                privilege_level=persona.privilege_level,
+                expected_denied_paths=list(persona.expected_denied_paths),
+            )
+            for persona in authorization.personas
+        ]
+
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "authz_matrix.started",
+            {
+                "endpoint_count": str(len(endpoints)),
+                "persona_count": str(len(personas)),
+            },
+        )
+
+        try:
+            matrix_raw = await workflow.execute_activity(
+                "authz-matrix",
+                args=[
+                    AuthzMatrixActivityInput(
+                        scan_id=scan.id,
+                        target_endpoint_json=target_ep.model_dump_json(),
+                        allowed_hosts=allowed_hosts,
+                        artifact_store_path=artifact_root,
+                        auth_profile_set_json=scan_input.auth_profiles_json,
+                        endpoints=endpoints,
+                        personas=personas,
+                    )
+                ],
+                start_to_close_timeout=timedelta(minutes=30),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+        except Exception as exc:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "authz_matrix.failed",
+                {"error": _describe_failure(exc)},
+            )
+            return []
+
+        matrix = (
+            matrix_raw
+            if isinstance(matrix_raw, AuthzMatrixResult)
+            else AuthzMatrixResult.model_validate(matrix_raw)
+        )
+
+        violations = detect_authz_violations(matrix)
+        findings = build_authz_candidates(
+            violations,
+            matrix,
+            scan_id=scan.id,
+            workspace_id=scan.workspace_id,
+            created_at=workflow.now(),
+        )
+        existing_ids = {candidate.id for candidate in candidate_findings}
+        for finding in findings:
+            if finding.id in existing_ids:
+                continue  # resume: this matrix finding is already recorded
+            existing_ids.add(finding.id)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_candidate_finding",
+                {"finding": _model_json_dict(finding)},
+            )
+            candidate_findings.append(finding)
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "finding.candidate_created",
+                {"finding_id": finding.id, "source": "authz-matrix"},
+            )
+
+        # Matrix-conditioned hunt tasks (gapfill/feedback shape). At the matrix's
+        # pre-loop position the hunted-cell set is empty, so the dedup is a shape
+        # no-op; it is applied anyway for parity with the other edges. The tasks
+        # are merged into the next round's hunt queue by the caller.
+        hunted_cells: set[tuple[str | None, str | None, str]] = set()
+        matrix_tasks = dedup_new_tasks(
+            build_authz_hunt_tasks(
+                violations,
+                matrix,
+                scan_id=scan.id,
+                round_index=0,
+                created_at=workflow.now(),
+            ),
+            hunted_cells,
+        )
+        for task in matrix_tasks:
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_agent_task",
+                {"task": _model_json_dict(task)},
+            )
+
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "authz_matrix.completed",
+            {
+                "endpoint_count": str(len(endpoints)),
+                "persona_count": str(len(personas)),
+                "violation_count": str(len(violations)),
+            },
+        )
+        return matrix_tasks
 
     async def _exploit_class_chain(
         self,
@@ -1511,6 +1679,26 @@ class RunScanWorkflow:
                     )
                 )
                 continue
+
+            # Persona-scoped dispatch (W14) — workflow-side, immediately after the
+            # request_in_scope check (D4 precedent). An explicit auth_profile
+            # bypasses selection; with personas declared and no match, the request
+            # is refused before egress (fail-closed, same refusal shape).
+            if spec.auth_profile is None and authorization.personas:
+                persona = persona_for_request(authorization, host=target_ep.host, path=spec.path)
+                if persona is None:
+                    steps.append(
+                        ExploitStep(
+                            order=len(steps),
+                            intent=intent,
+                            request_spec=spec,
+                            dispatched=False,
+                            confirmed=False,
+                            notes="refused: no persona covers request",
+                        )
+                    )
+                    continue
+                spec = spec.model_copy(update={"auth_profile": persona.profile_ref})
 
             inp = HttpRequestActivityInput(
                 spec_json=spec.model_dump_json(),
@@ -3510,6 +3698,40 @@ def live_exploitation_active(
     never flip it on.
     """
     return bool(enabled and target_url and authorization_active(authorization))
+
+
+def build_authz_matrix_endpoints(
+    attack_map: list[Any],
+    authorization: TargetAuthorization,
+    *,
+    host: str,
+) -> list[AuthzMatrixEndpoint]:
+    """Filter the attack map down to matrix-probeable endpoints (pure).
+
+    Matrix probes are governed by the top-level ``request_in_scope`` check ONLY —
+    persona scope narrows agent-initiated dispatch, not matrix measurement. An
+    endpoint whose path matches a top-level ``do_not_test`` pattern (or whose host
+    is not allow-listed) yields no matrix cell under any persona. Duplicates are
+    collapsed; the activity imposes the final deterministic ordering (by path).
+    """
+    endpoints: list[AuthzMatrixEndpoint] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in attack_map:
+        if not isinstance(entry, dict):
+            continue
+        entry_dict = cast("dict[str, Any]", entry)
+        path = str(entry_dict.get("path") or "").strip()
+        if not path:
+            continue
+        if not request_in_scope(authorization, host=host, path=path):
+            continue  # out-of-scope / top-level do-not-test — never probed
+        method = str(entry_dict.get("method") or "GET")
+        cell = (method.upper(), path)
+        if cell in seen:
+            continue
+        seen.add(cell)
+        endpoints.append(AuthzMatrixEndpoint(method=method, path=path))
+    return endpoints
 
 
 def build_target_endpoint_from_url(target_url: str) -> TargetEndpoint:

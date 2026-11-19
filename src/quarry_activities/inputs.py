@@ -266,3 +266,6 @@ class AuthzMatrixActivityInput(BaseModel):
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
     endpoints: list[AuthzMatrixEndpoint] = Field(default_factory=_empty_authz_endpoints)
     personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
+    # Minimum spacing between requests to the same host (target-side rate-limit
+    # safety). Default 1.0s; unit tests pass 0.0 to keep the suite fast.
+    min_request_interval_seconds: float = 1.0
