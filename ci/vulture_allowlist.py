@@ -281,6 +281,9 @@ _ALLOWLIST = [
 
     # --- browser-worker-playwright: helpers referenced only from tests/ ---
     src.quarry_activities.playwright_driver.store_screenshot,
+    # live-crawl: merge helper is the code/crawl attribution seam W6 (GraphQL
+    # discovery) and W16 (DOM analysis) consume; exercised by tests today.
+    src.quarry_activities.live_recon.merge_attack_maps,
 
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,

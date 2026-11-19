@@ -158,5 +158,7 @@ ignore_names = [
     "get_scan_events",  # SSE handler; referenced from tests via closure
     # textual framework protocol (message handlers, actions, layout, CSS)
     "compose", "on_*", "action_*", "BINDINGS", "CSS", "TITLE",
+    # html.parser protocol callbacks (invoked by HTMLParser.feed, invisible to vulture)
+    "handle_*",
 ]
 
