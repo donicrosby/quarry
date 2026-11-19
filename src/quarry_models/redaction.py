@@ -45,9 +45,19 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"eyJ[A-Za-z0-9_-]{1,512}\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     # KEY/SECRET/TOKEN/PASSWORD = "value" assignments (value is the secret).
     # Accepts camelCase names (apiKey, authToken) and JSON-style quoted keys.
+    # The key must begin at a token boundary and the key-name run AFTER the
+    # keyword is bounded ({0,64}) and possessive.  Unbounded runs let a
+    # separator-less key-charset body (``SECRET`` repeated, a long ``A``-run)
+    # drive quadratic backtracking — the scrubber runs on attacker-reachable
+    # capture content with no body-size cap upstream (impl review F1,
+    # t_73697d4c).  The boundary guard drops no currently-redacted shape: every
+    # maximal key-charset run begins at a boundary, and the (still unbounded)
+    # leading run reaches the keyword from that start.  The value-side
+    # quantifier is left unbounded: it is already linear, and capping it would
+    # stop redacting long values.
     re.compile(
-        r"(?i)([\"']?[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|AUTH_?KEY)"
-        r"[A-Z0-9_]*[\"']?)"
+        r"(?i)(?<![A-Za-z0-9_])([\"']?[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|AUTH_?KEY)"
+        r"[A-Z0-9_]{0,64}+[\"']?)"
         r"(\s*[:=]\s*)([\"']?)([^\s\"']{4,})(\3)"
     ),
 )

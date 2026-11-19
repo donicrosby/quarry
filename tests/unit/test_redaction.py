@@ -247,3 +247,44 @@ def test_jwt_with_long_payload_segment_is_redacted(payload_len: int) -> None:
 
     assert token not in result.text
     assert result.hits >= 1
+
+def test_assignment_pattern_is_linear_on_separatorless_input() -> None:
+    """ReDoS regression (impl review F1, t_73697d4c): the assignment pattern's
+    UNBOUNDED key-name runs went quadratic on a separator-less key-charset body
+    (``SECRET`` repeated measured 7.4s @ 16k at the review, minutes at the sizes
+    a response body can reach).  The boundary-guarded, bounded-tail pattern must
+    stay fast at attack sizes while every currently-redacted assignment shape
+    still redacts."""
+    import time
+
+    hostiles = (
+        "A" * 16384,
+        "SECRET" * 2731,
+        "API_KEY" * 2341,
+    )
+    for hostile in hostiles:
+        assert len(hostile) >= 16384
+        start = time.monotonic()
+        scrub(hostile)
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0, (
+            f"scrub took {elapsed:.3f}s on {len(hostile)}-char separator-less input"
+        )
+
+    # Redaction semantics must be preserved for the shapes the pattern redacts.
+    for line in (
+        'ADMIN_API_KEY = "demo-admin-key-please-rotate"',
+        '{"apiKey": "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lm"}',
+        "GITHUB_TOKEN=ghp_aBcDeFgHiJkLmNoPqRsTuVwX",
+        "PRIVATE_KEY=abc123def456",
+    ):
+        result = scrub(line)
+        assert result.hits >= 1, line
+
+    # The separator-less prose pins the S1 change protects must stay untouched.
+    for line in (
+        "The risk-assessment-methodology-framework-standards were updated.",
+        "disk-read-throughput-benchmarks",
+        "Ask-about-the-new-onboarding-process-policy",
+    ):
+        assert scrub(line).text == line
