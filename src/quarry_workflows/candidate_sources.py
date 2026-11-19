@@ -27,6 +27,7 @@ from quarry.schemas import (
     EvidencePathElement,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
 )
 
 
@@ -116,6 +117,7 @@ def _secret_candidate_from_match_record(
         ],
         evidence_path=[],
         confidence=Confidence.MEDIUM,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by="secrets-scanner",
         created_at=created_at,
         metadata={
@@ -195,6 +197,7 @@ def ssrf_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
                 created_by="ssrf-sweep",
                 created_at=created_at,
                 metadata={
@@ -279,6 +282,7 @@ def tempfile_race_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
                 created_by="tempfile-race-sweep",
                 created_at=created_at,
                 metadata={
@@ -362,6 +366,7 @@ def terminal_escape_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                severity_rationale=model_omitted_severity_rationale(),
                 created_by="terminal-escape-sweep",
                 created_at=created_at,
                 metadata={
