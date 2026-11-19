@@ -94,7 +94,7 @@ def test_reusable_workflow_requests_security_events_write() -> None:
 def test_upload_step_uses_a_directory_and_a_category() -> None:
     step = _steps()[_step("Upload SARIF")]
 
-    assert step["uses"] == "github/codeql-action/upload-sarif@v3"
+    assert step["uses"] == "github/codeql-action/upload-sarif@9418214df1f2c4b8128c770156c409013b07d6b9"  # v3, pinned per supply-chain gate
     with_ = _as_dict(step["with"])
     # upload-sarif takes a file or directory, never a glob.
     assert with_["sarif_file"] == "sarif/"
