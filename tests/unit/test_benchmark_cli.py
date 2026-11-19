@@ -284,7 +284,7 @@ def test_inventory_subcommand_prints_builder_rows() -> None:
         build_inventory(prompts_dir=PROMPTS_DIR, ground_truth_dir=GROUND_TRUTH_DIR)
     )
     assert result.output.strip() == "\n".join(expected)
-    assert "total_classes=18" in result.output
+    assert "total_classes=20" in result.output
     for member in VulnerabilityClass:
         assert member.value in result.output
 

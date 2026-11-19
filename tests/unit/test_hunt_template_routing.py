@@ -38,6 +38,8 @@ PER_CLASS = [
     VulnerabilityClass.INSECURE_DESIGN,
     VulnerabilityClass.WEAK_CRYPTO,
     VulnerabilityClass.FILE_UPLOAD,
+    VulnerabilityClass.TEMPFILE_RACE,
+    VulnerabilityClass.TERMINAL_ESCAPE,
 ]
 
 

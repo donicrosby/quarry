@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from quarry.schemas import (
     AgentLoopResult,
@@ -44,6 +45,33 @@ def test_scope_exclusion_json_round_trip() -> None:
     exc = ScopeExclusion(kind="note", value="skip billing", reason="no auth", block_dynamic=False)
     restored = ScopeExclusion.model_validate_json(exc.model_dump_json())
     assert restored == exc
+
+
+def test_scope_exclusion_unknown_kind_rejected() -> None:
+    """Unknown kinds must fail at parse time with the valid kinds listed."""
+    with pytest.raises(ValidationError) as excinfo:
+        ScopeExclusion(kind="made_up", value="/x", reason="bogus", block_dynamic=True)
+    message = str(excinfo.value)
+    assert "made_up" in message
+    assert "Valid kinds" in message
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "route",
+        "path_glob",
+        "functional_area",
+        "vuln_class",
+        "command",
+        "binary",
+        "filesystem_path",
+        "note",
+    ],
+)
+def test_scope_exclusion_all_valid_kinds_parse(kind: str) -> None:
+    exc = ScopeExclusion(kind=kind, value="/x", reason="ok", block_dynamic=True)
+    assert exc.kind == kind
 
 
 # ---------------------------------------------------------------------------
