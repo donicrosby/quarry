@@ -179,6 +179,10 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.session_updates,
     src.quarry_workflows.run_scan.candidate_finding_count,
     src.quarry_workflows.run_scan.final_finding_count,
+    # VerdictReceipt field reached only through dataclasses.asdict() when the
+    # timing receipt is serialized onto finding.dynamic_validated (vulture's AST
+    # walk does not see the keyword-argument name in the receipt constructor).
+    src.quarry_activities.verdict_evaluators.VerdictReceipt.induced_delay_ms,
 
     # --- Protocol signature params, dunder params, instance attrs ---
     src.quarry_artifacts.s3_store.Body,
