@@ -123,3 +123,44 @@ class TestSensitiveEnvKeys:
     def test_common_api_key_names_present(self) -> None:
         assert "CHUTES_API_KEY" in SENSITIVE_ENV_KEYS
         assert "GITHUB_TOKEN" in SENSITIVE_ENV_KEYS
+
+
+# ---------------------------------------------------------------------------
+# Bare provider-key shapes and prose safety (S1 redaction-pattern gap)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_provider_key_shapes_are_redacted() -> None:
+    keys = (
+        "sk-live-abc123def456ghi789xyzABCDEF",  # OpenAI-style
+        "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",  # OpenAI project key
+        "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",  # Google API key
+        "glpat-abcdefghijklmnopqrstuvwxyz",  # GitLab personal access token
+        (
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+            "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"  # JWT
+        ),
+    )
+    for key in keys:
+        result = scrub(f'key="{key}"')
+        assert key not in result.text
+        assert result.hits >= 1
+
+
+def test_camel_case_assignment_key_value_is_redacted() -> None:
+    result = scrub('{"apiKey": "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lm"}')
+
+    assert "Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lm" not in result.text
+    assert "apiKey" in result.text  # key name preserved for context
+
+
+def test_bare_key_prefixes_do_not_mangle_ordinary_prose() -> None:
+    # The sk- shape must not fire on words that merely end in the prefix.
+    prose = (
+        "The risk-assessment-methodology-framework-standards were updated.",
+        "task-orchestration-framework-documentation",
+        "disk-read-throughput-benchmarks",
+        "Ask-about-the-new-onboarding-process-policy",
+    )
+    for line in prose:
+        assert scrub(line).text == line

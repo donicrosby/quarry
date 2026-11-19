@@ -26,9 +26,20 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"),  # auth headers
+    # Bare provider key shapes, valid with no assignment context. A leading
+    # non-alphanumeric boundary keeps prose compounds that merely end in the
+    # prefix (e.g. ``risk-management-…``) from being redacted.
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),  # OpenAI-style (sk-, sk-ant-, sk-proj-)
+    re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"),  # Google API key
+    re.compile(r"(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}"),  # GitLab personal access token
+    # JWT, anchored on the base64url ``eyJ`` header/payload prefix and matched
+    # through the signature so no fragment of the token survives.
+    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
     # KEY/SECRET/TOKEN/PASSWORD = "value" assignments (value is the secret).
+    # Accepts camelCase names (apiKey, authToken) and JSON-style quoted keys.
     re.compile(
-        r"(?i)([A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|AUTH_KEY)[A-Z0-9_]*)"
+        r"(?i)([\"']?[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PRIVATE_?KEY|AUTH_?KEY)"
+        r"[A-Z0-9_]*[\"']?)"
         r"(\s*[:=]\s*)([\"']?)([^\s\"']{4,})(\3)"
     ),
 )
