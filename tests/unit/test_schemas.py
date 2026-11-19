@@ -12,6 +12,7 @@ from quarry.schemas import (
     Scan,
     ScanStatus,
     Severity,
+    SeverityRationale,
     TriageLabel,
     ValidationResult,
     VulnerabilityClass,
@@ -200,3 +201,32 @@ def test_candidate_finding_keeps_artifact_refs() -> None:
 
     assert loaded.evidence_refs[0].kind is ArtifactKind.REPORT
     assert loaded.confidence is Confidence.LOW
+
+
+def test_candidate_finding_serializes_structured_severity_rationale() -> None:
+    """finding-contract 1.3/1.4: the rationale is a required, round-trippable field."""
+    created_at = datetime.now(UTC)
+    finding = CandidateFinding(
+        id="finding-contract-1",
+        scan_id="scan-1",
+        workspace_id="local",
+        vuln_class=VulnerabilityClass.IDOR,
+        title="IDOR candidate",
+        hypothesis="Unsanitized identifier read.",
+        severity=Severity.HIGH,
+        severity_rationale=SeverityRationale(
+            impact="full database read",
+            exploitability="single authenticated GET",
+            reachability="public /users/{id} route",
+            evidence_refs=[0],
+        ),
+        created_by="test",
+        created_at=created_at,
+    )
+
+    loaded = CandidateFinding.model_validate_json(finding.model_dump_json())
+
+    assert loaded.severity_rationale.impact == "full database read"
+    assert loaded.severity_rationale.evidence_refs == [0]
+    assert loaded.severity_rationale.legacy is False
+    assert loaded.severity_rationale.model_omitted is False

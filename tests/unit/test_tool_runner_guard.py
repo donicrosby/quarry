@@ -264,3 +264,62 @@ def test_scope_exclusion_does_not_affect_non_dynamic_tool(tmp_path: Path) -> Non
     test_file.write_text("hello")
     record = runner.run("read_file", {"path": "test.txt"})
     assert record.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Filesystem-path exclusion (kind="filesystem_path") — static-tool pre-check
+# ---------------------------------------------------------------------------
+
+
+def _static_runner(tmp_path: Path, exclusions: list[ScopeExclusion]) -> ToolRunner:
+    from quarry_tools.builtins import BUILTIN_REGISTRY
+
+    return ToolRunner(
+        repo_root=tmp_path,
+        role="hunt",
+        registry=BUILTIN_REGISTRY,
+        scope_exclusions=exclusions,
+    )
+
+
+def test_filesystem_path_exclusion_blocks_read_file(tmp_path: Path) -> None:
+    """.git/config is refused when a filesystem_path exclusion blocks .git/**."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]")
+    exclusions = [ScopeExclusion(kind="filesystem_path", value=".git/**", reason="git excluded")]
+    runner = _static_runner(tmp_path, exclusions)
+    record = runner.run("read_file", {"path": ".git/config"})
+    assert record.allowed is False
+    assert record.status == "refused"
+    assert record.denied_reason is not None
+
+
+def test_filesystem_path_exclusion_allows_unrelated_paths(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_text("print('hi')")
+    exclusions = [ScopeExclusion(kind="filesystem_path", value=".git/**", reason="git excluded")]
+    runner = _static_runner(tmp_path, exclusions)
+    record = runner.run("read_file", {"path": "src/main.py"})
+    assert record.allowed is True
+
+
+def test_filesystem_path_exclusion_absolute_path_blocked(tmp_path: Path) -> None:
+    """An absolute path into an excluded subtree is blocked regardless of cwd."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]")
+    exclusions = [ScopeExclusion(kind="filesystem_path", value=".git/**", reason="git excluded")]
+    runner = _static_runner(tmp_path, exclusions)
+    record = runner.run("read_file", {"path": str(tmp_path / ".git" / "config")})
+    assert record.allowed is False
+    assert record.status == "refused"
+
+
+def test_filesystem_path_exclusion_does_not_block_dynamic_only_kinds(tmp_path: Path) -> None:
+    """A filesystem_path exclusion must not block a tool whose path is unrelated."""
+    (tmp_path / "notes.txt").write_text("ok")
+    exclusions = [
+        ScopeExclusion(kind="filesystem_path", value="/etc/**", reason="system files excluded")
+    ]
+    runner = _static_runner(tmp_path, exclusions)
+    record = runner.run("read_file", {"path": "notes.txt"})
+    assert record.allowed is True

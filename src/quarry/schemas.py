@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
+import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -110,6 +111,11 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # CLI-side classes (tempfile-race-terminal-escape change): unsafe temporary
+    # file creation in shared directories, and attacker-controlled input echoed
+    # to a terminal without ANSI/escape-sequence sanitization.
+    TEMPFILE_RACE = "tempfile_race"
+    TERMINAL_ESCAPE = "terminal_escape"
 
 
 class TriageLabel(StrEnum):
@@ -581,15 +587,39 @@ class ModelPanelEntry(BaseModel):
     context_window_threshold: float = 0.8
 
 
+VALID_SCOPE_EXCLUSION_KINDS: frozenset[str] = frozenset(
+    {
+        "route",
+        "path_glob",
+        "functional_area",
+        "vuln_class",
+        "command",
+        "binary",
+        "filesystem_path",
+        "note",
+    }
+)
+
+
 class ScopeExclusion(BaseModel):
     """Identifies a scope element that must not be tested."""
 
     model_config = {"frozen": True}
 
-    kind: str  # e.g. "route", "vuln_class", "note"
+    kind: str  # one of VALID_SCOPE_EXCLUSION_KINDS
     value: str
     reason: str
     block_dynamic: bool = False
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, value: str) -> str:
+        """Reject unknown exclusion kinds at construction (fail-closed)."""
+        if value not in VALID_SCOPE_EXCLUSION_KINDS:
+            valid = ", ".join(sorted(VALID_SCOPE_EXCLUSION_KINDS))
+            msg = f"Unknown scope exclusion kind '{value}'. Valid kinds: {valid}"
+            raise ValueError(msg)
+        return value
 
 
 def _empty_scope_exclusions() -> list[ScopeExclusion]:
@@ -713,6 +743,77 @@ def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
     return []
 
 
+def _empty_ints() -> list[int]:
+    return []
+
+
+LEGACY_SEVERITY_RATIONALE_TEXT = "No structured severity rationale from pre-contract scan."
+
+MODEL_OMITTED_SEVERITY_RATIONALE_TEXT = "Model did not provide structured severity rationale"
+
+
+class SeverityRationale(BaseModel):
+    """Structured severity justification carried by every finding (finding-contract).
+
+    Decomposes a severity label into **impact** (what the attacker gains),
+    **exploitability** (how hard the bug is to trigger) and **reachability**
+    (whether an attacker can reach the vulnerable code), so a CRITICAL from one
+    hunter means the same thing as a CRITICAL from another (ADR-026 rule 4 —
+    findings are data, not prose).
+
+    ``evidence_refs`` are indices into the finding's ``evidence_path`` (or, when
+    there is no ordered path, ``source_refs``) — the same shape as the existing
+    evidence pointers, never free text.
+
+    Two fallback markers keep the report honest instead of fabricating prose:
+    ``legacy`` marks a finding persisted before the contract existed, and
+    ``model_omitted`` marks slots the model did not supply (or emitters that
+    have no model-supplied rationale at all).
+    """
+
+    impact: str
+    exploitability: str
+    reachability: str
+    evidence_refs: list[int] = Field(default_factory=_empty_ints)
+    legacy: bool = False
+    model_omitted: bool = False
+
+    @field_validator("impact", "exploitability", "reachability")
+    @classmethod
+    def _require_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("severity rationale slots must be non-empty")
+        return value
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def _require_valid_indices(cls, value: list[int]) -> list[int]:
+        for index in value:
+            if index < 0:
+                raise ValueError("evidence_refs entries must be non-negative indices")
+        return value
+
+
+def legacy_severity_rationale() -> SeverityRationale:
+    """Backfill rationale for findings persisted before the contract existed."""
+    return SeverityRationale(
+        impact=LEGACY_SEVERITY_RATIONALE_TEXT,
+        exploitability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        reachability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        legacy=True,
+    )
+
+
+def model_omitted_severity_rationale() -> SeverityRationale:
+    """Fallback rationale when no model-supplied slots exist for a finding."""
+    return SeverityRationale(
+        impact=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        exploitability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        reachability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        model_omitted=True,
+    )
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
@@ -731,6 +832,14 @@ class CandidateFinding(BaseModel):
     confidence: Confidence = Confidence.LOW
     severity: Severity = Severity.MEDIUM
     severity_adjusted: Severity | None = None
+    # Structured severity justification (finding-contract). Required — an
+    # explicit ``severity_rationale=None`` is rejected; a payload persisted
+    # before the contract existed backfills to a ``legacy`` rationale.
+    # ``default_factory`` carries the same legacy backfill for statically typed
+    # call sites (pyright strict treats a defaultless pydantic field as a
+    # required constructor argument); the before-validator below is the
+    # normative backfill for raw payloads.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     # Calibration fields (candidate-precision-and-calibration). ``raw_severity``
     # is the hunter's severity and is never overwritten by calibration;
     # ``calibrated_severity``/``calibrated_priority`` are None until the
@@ -758,6 +867,23 @@ class CandidateFinding(BaseModel):
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        # Pre-contract findings were persisted without the key entirely. An
+        # explicit ``severity_rationale=None`` is NOT backfilled — the field is
+        # non-optional and must fail validation at the schema boundary.
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
+
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> CandidateFinding:
         # Pre-calibration findings only set ``severity``; mirror it into
@@ -775,6 +901,9 @@ class FinalFinding(BaseModel):
     vuln_class: VulnerabilityClass
     severity: Severity
     severity_adjusted: Severity | None = None
+    # Structured severity justification copied verbatim from the candidate
+    # (finding-contract). Required; pre-contract payloads backfill to legacy.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     raw_severity: Severity | None = None
     calibrated_severity: Severity | None = None
     calibrated_priority: int | None = None
@@ -791,6 +920,20 @@ class FinalFinding(BaseModel):
     triage_label: TriageLabel | None = None
     remediation: str | None = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
 
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> FinalFinding:
@@ -1649,6 +1792,20 @@ class ResolvedEgressPolicy(BaseModel):
         return not self.all_allowed_ips()
 
 
+class MultipartFieldSpec(BaseModel):
+    """One part of a multipart/form-data request body.
+
+    ``filename`` and ``content_type`` are optional: a part that carries neither
+    is a plain form field, one that carries either is sent as a file part (the
+    file-upload vulnerability class needs the latter).
+    """
+
+    name: str
+    value: str
+    filename: str | None = None
+    content_type: str | None = None
+
+
 class HttpRequestSpec(BaseModel):
     """The HTTP request a dynamic_validate or prove agent proposes.
 
@@ -1661,6 +1818,44 @@ class HttpRequestSpec(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
     auth_profile: str | None = None  # named cred only; never an inline token
+    # multipart/form-data parts. When non-empty the activity sends these and
+    # ignores ``body`` (file-upload probes).
+    multipart_fields: list[MultipartFieldSpec] | None = None
+    # Redirect-following is off by default; when on the activity follows up to
+    # ten hops, re-validating every hop's host against allowed_hosts.
+    follow_redirects: bool = False
+    # Per-request cookie injection; values are registered with the run scrubber
+    # and redacted from stored request artifacts.
+    cookies: dict[str, str] = Field(default_factory=dict)
+    # Timing-oracle annotations (verify-oracle-upgrade), declared by the
+    # proposing agent alongside the delay payload. injected_delay_ms opts the
+    # probe into the statistical timing path; absent leaves the hardened
+    # differential path (the timing path never guesses a delay).
+    injected_delay_ms: int | None = None
+    # The exact payload substrings this probe injects, declared by the agent
+    # alongside the payload. Differential evaluators normalize these out of the
+    # response bodies (a reflected payload must not read as a difference).
+    injected_values: tuple[str, ...] | None = None
+    # Optional hunter-supplied success marker. When present, the differential
+    # evaluator tests for it in the raw response bodies before generic
+    # heuristics; present-in-attack-only decides the finding on its own.
+    indicator: str | None = None
+
+    @model_validator(mode="after")
+    def _warn_multipart_and_body(self) -> HttpRequestSpec:
+        """Warn (never fail) when both multipart parts and a raw body are set.
+
+        The activity sends the multipart payload and ignores ``body`` — the
+        warning makes that silent drop visible to the proposing agent.
+        """
+        if self.multipart_fields and self.body is not None:
+            warnings.warn(
+                "HttpRequestSpec carries both multipart_fields and body; "
+                "the multipart payload is sent and body is ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
 
     @field_validator("auth_profile")
     @classmethod
