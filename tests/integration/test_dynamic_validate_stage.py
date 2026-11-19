@@ -12,12 +12,14 @@ Contracts tested:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from quarry.schemas import (
     CandidateFinding,
     Confidence,
     DynamicEvidenceLink,
     FindingStatus,
+    HttpRequestSpec,
     HttpResponseCapture,
     RedactionStatus,
     Severity,
@@ -301,3 +303,95 @@ class TestBuildTargetEndpointFromUrl:
         endpoint = build_target_endpoint_from_url("http://127.0.0.1:8080")
         assert endpoint.host == "127.0.0.1"
         assert endpoint.port == 8080
+
+
+# ---------------------------------------------------------------------------
+# Timing-oracle dispatch helpers (verify-oracle-upgrade tasks 8/9)
+# ---------------------------------------------------------------------------
+
+
+class TestTimingDispatchHelpers:
+    """Pure helpers behind the timing-oracle dispatch (no Temporal needed)."""
+
+    def _attack_spec(self, delay: int = 1000) -> HttpRequestSpec:
+        return HttpRequestSpec(
+            method="GET",
+            path="/items?id=1%20AND%20SLEEP(1)",
+            injected_delay_ms=delay,
+            injected_values=("1 AND SLEEP(1)",),
+        )
+
+    def _clean_spec(self) -> HttpRequestSpec:
+        return HttpRequestSpec(method="GET", path="/items?id=1")
+
+    def test_timing_delay_recognized_for_delay_annotated_pair(self) -> None:
+        from quarry_workflows.run_scan import timing_delay_for_specs
+
+        assert (
+            timing_delay_for_specs(
+                VulnerabilityClass.SQL_INJECTION, [self._attack_spec(), self._clean_spec()]
+            )
+            == 1000
+        )
+
+    def test_timing_delay_requires_a_clean_baseline(self) -> None:
+        from quarry_workflows.run_scan import timing_delay_for_specs
+
+        # A delay-annotated spec is never accepted as its own baseline.
+        assert (
+            timing_delay_for_specs(
+                VulnerabilityClass.SQL_INJECTION,
+                [self._attack_spec(), self._attack_spec(2000)],
+            )
+            is None
+        )
+        assert (
+            timing_delay_for_specs(VulnerabilityClass.SQL_INJECTION, [self._attack_spec()]) is None
+        )
+
+    def test_timing_delay_none_for_class_without_timing_profile(self) -> None:
+        from quarry_workflows.run_scan import timing_delay_for_specs
+
+        # SSRF is a differential class (timing_profile False) — it never takes
+        # the timing path, even with a delay-annotated probe.
+        assert (
+            timing_delay_for_specs(
+                VulnerabilityClass.SSRF, [self._attack_spec(), self._clean_spec()]
+            )
+            is None
+        )
+
+    def test_assemble_timing_evidence_layout(self) -> None:
+        from quarry_activities.verdict_evaluators import LiveProbeEvidence
+        from quarry_workflows.run_scan import assemble_timing_evidence
+
+        attack = tuple(
+            LiveProbeEvidence(status_code=200, elapsed_ms=ms, injected_delay_ms=1000)
+            for ms in (700, 700, 700)
+        )
+        baseline = tuple(LiveProbeEvidence(status_code=200, elapsed_ms=100) for _ in range(5))
+        ladder = tuple(
+            LiveProbeEvidence(status_code=200, elapsed_ms=1300, injected_delay_ms=2000)
+            for _ in range(3)
+        )
+        evidence = assemble_timing_evidence(attack=attack, baseline=baseline, ladder=ladder)
+        # primary = first attack probe; additional = N baseline then M-1 attacks
+        # then the M ladder probes (the ladder reuses the initial baseline).
+        assert evidence.elapsed_ms == 700
+        assert evidence.injected_delay_ms == 1000
+        assert evidence.additional == baseline + attack[1:] + ladder
+
+    def test_timing_ladder_gate_requires_full_batch(self) -> None:
+        from quarry_workflows.run_scan import timing_ladder_permitted
+
+        assert timing_ladder_permitted(timing_probes_remaining=3)
+        assert not timing_ladder_permitted(timing_probes_remaining=2)
+
+    def test_timing_probes_ride_the_guarded_egress_funnel(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[2] / "src" / "quarry_workflows" / "run_scan.py"
+        ).read_text(encoding="utf-8")
+        # Every timing dispatch funnels through _dispatch_dynamic_probe, which
+        # owns allowed_hosts + scope-exclusion enforcement (R8).
+        assert "async def _dispatch_timing_probe(" in source
+        assert "await _dispatch_dynamic_probe(" in source

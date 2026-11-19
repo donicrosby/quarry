@@ -311,6 +311,21 @@ class TestEvaluatorSpecMetadata:
 
         assert resolve_evaluator_spec(VulnerabilityClass.SQL_INJECTION).min_probes == 2
 
+    def test_sqli_carries_the_timing_profile_flag(self) -> None:
+        """verify-oracle-upgrade task 10: SQLi is a timing-oracle class."""
+        from quarry_activities.verdict_evaluators import resolve_evaluator_spec
+
+        spec = resolve_evaluator_spec(VulnerabilityClass.SQL_INJECTION)
+        assert spec.timing_profile is True
+        assert spec.min_probes == 2
+
+    def test_non_timing_classes_have_no_timing_profile(self) -> None:
+        from quarry_activities.verdict_evaluators import resolve_evaluator_spec
+
+        assert resolve_evaluator_spec(VulnerabilityClass.SSTI).timing_profile is False
+        assert resolve_evaluator_spec(VulnerabilityClass.SSRF).timing_profile is False
+        assert resolve_evaluator_spec(VulnerabilityClass.WEAK_CRYPTO).timing_profile is False
+
     def test_unregistered_class_defaults_to_single_probe_default_fn(self) -> None:
         from quarry_activities.verdict_evaluators import (
             default_evaluator,
