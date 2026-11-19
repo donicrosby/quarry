@@ -60,6 +60,12 @@ class QuarrySettings(BaseSettings):
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+    # Container memory cap for the Tier-2 sandbox (Docker ``--memory`` value,
+    # e.g. "2g").  Empty => the backend default (DEFAULT_MEMORY_LIMIT).  A
+    # browser-capable worker executing untrusted page JS must be capped so a
+    # runaway Chromium is OOM-killed rather than starving the host.
+    # env: QUARRY_SANDBOX_MEMORY
+    sandbox_memory: str = ""
 
     # Dependency-manifest supply-chain scanner. Configurable typosquat name
     # patterns; the check is a no-op until at least one pattern is configured.

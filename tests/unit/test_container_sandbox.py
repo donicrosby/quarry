@@ -8,6 +8,7 @@ Test scope:
   - ``--network none`` when the egress policy is None/empty (no egress).
   - A non-empty policy attaches the container to a restricted internal network
     carrying only the policy's pinned IPs.
+  - A container memory cap (``--memory``/``--memory-swap``) is applied by default.
   - TimeoutExpired → timed_out=True in SandboxResult.
   - stdout/stderr capped to MAX_OUTPUT_BYTES.
   - Proxy env vars scrubbed from the env passed to docker run.
@@ -37,6 +38,7 @@ from quarry.schemas import (
 )
 from quarry_activities.sandbox import (
     BLOCKED_ENV_PREFIXES,
+    DEFAULT_MEMORY_LIMIT,
     EGRESS_ALLOWED_IPS_ENV,
     HARD_TIMEOUT_SECONDS,
     MAX_OUTPUT_BYTES,
@@ -191,6 +193,52 @@ class TestContainerSandboxNetworkIsolation:
             if a == "-e" and i + 1 < len(docker_args)
         ]
         assert any(v == f"{EGRESS_ALLOWED_IPS_ENV}=198.51.100.7,93.184.216.34" for v in env_values)
+
+
+# ---------------------------------------------------------------------------
+# Container memory cap (browser-worker-playwright tasks.md 5.2)
+# ---------------------------------------------------------------------------
+
+
+class TestContainerSandboxMemoryCap:
+    """5.2: the browser-capable container runs under a kernel-enforced memory cap."""
+
+    def test_default_memory_cap_in_run_args(self, tmp_path: Path) -> None:
+        """A default ContainerSandbox caps container memory (--memory/--memory-swap)."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert docker_args[docker_args.index("--memory") + 1] == DEFAULT_MEMORY_LIMIT
+        # --memory-swap pinned equal so the cap cannot be exceeded via swap.
+        assert docker_args[docker_args.index("--memory-swap") + 1] == DEFAULT_MEMORY_LIMIT
+
+    def test_custom_memory_limit_is_honoured(self, tmp_path: Path) -> None:
+        """An explicit memory_limit is passed through verbatim."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox(memory_limit="512m")
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert docker_args[docker_args.index("--memory") + 1] == "512m"
+        assert docker_args[docker_args.index("--memory-swap") + 1] == "512m"
+
+    def test_empty_memory_limit_opts_out(self, tmp_path: Path) -> None:
+        """An explicit empty limit omits the cap entirely (documented opt-out)."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox(memory_limit="")
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert "--memory" not in docker_args
+        assert "--memory-swap" not in docker_args
 
 
 # ---------------------------------------------------------------------------
