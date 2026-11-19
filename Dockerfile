@@ -88,3 +88,28 @@ USER quarry
 # Default to the API server with its embedded worker disabled; the dedicated
 # worker service owns the Temporal task queue (avoids a dual-worker race).
 CMD ["quarry", "server", "--no-worker"]
+
+# --------------------------------------------------------------------------
+# quarry-dynamic: browser-capable worker image (ADR-023 §5,
+# browser-worker-playwright). Extends `runtime` with the optional `browser`
+# extra and a headless Chromium, so it can be used as the `ContainerSandbox`
+# image for browser-capable execution. Non-browser scans keep the default
+# python:3.12-slim image and never need this stage. Build with
+# `docker build --target quarry-dynamic -t quarry:dynamic .`.
+# --------------------------------------------------------------------------
+FROM runtime AS quarry-dynamic
+ARG PLAYWRIGHT_VERSION=1.49.0
+# uv binary for installing the extra into the existing uv-managed venv.
+COPY --from=uvbin /uv /bin/uv
+USER root
+# Browsers land outside the venv in a world-readable path so they survive the
+# uv-managed venv and are reachable by the unprivileged `quarry` user.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    PLAYWRIGHT_SKIP_BROWSER_GC=1
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /app/.venv/bin/python "playwright==${PLAYWRIGHT_VERSION}" \
+    && /app/.venv/bin/python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/playwright
+USER quarry
+# This stage is the dedicated dynamic (browser) worker.
+CMD ["quarry", "worker"]

@@ -15,6 +15,7 @@ actionable ``BrowserLoginUnavailableError``. The concrete browser is injectable
 
 from __future__ import annotations
 
+import importlib
 import re
 from typing import Any, Protocol, runtime_checkable
 
@@ -44,17 +45,27 @@ class BrowserSession(Protocol):
     def has_selector(self, selector: str) -> bool: ...
     def has_text(self, text: str) -> bool: ...
     def storage_state(self) -> dict[str, Any]: ...
+    def screenshot(self) -> bytes: ...
     def close(self) -> None: ...
 
 
-def _playwright_browser_factory(**_: Any) -> BrowserSession:
+def _playwright_browser_factory(
+    *,
+    allowed_hosts: tuple[str, ...] = (),
+    target_host: str = "localhost",
+    target_port: int = 80,
+    **_: Any,
+) -> BrowserSession:
     """Default factory — builds a real Playwright session, or errors actionably.
 
     Playwright is imported lazily here so that importing this module (and running any
-    non-browser scan) never requires the heavy dependency.
+    non-browser scan) never requires the heavy dependency. When Playwright is
+    importable the real :class:`PlaywrightBrowserSession` is constructed; when it is
+    not, or when the Chromium binary is missing, an actionable
+    ``BrowserLoginUnavailableError`` naming the browser extra is raised.
     """
     try:
-        import playwright.sync_api  # noqa: F401  # type: ignore[import-not-found]
+        importlib.import_module("playwright.sync_api")
     except ImportError as exc:  # pragma: no cover - exercised via the missing-dep test
         msg = (
             "browser_login requires Playwright, which is not installed. Install the "
@@ -63,17 +74,26 @@ def _playwright_browser_factory(**_: Any) -> BrowserSession:
             "Non-browser scans do not need this."
         )
         raise BrowserLoginUnavailableError(msg) from exc
-    # A real Playwright-backed BrowserSession is provided by the sandbox worker image
-    # (ADR-023 §5). It is not constructed in-process here.
-    msg = (
-        "In-process Playwright browser driver is not available: Playwright is "
-        "installed but the browser session must be provided by the quarry-dynamic "
-        "worker image (ADR-023 §5). To drive a browser locally, install the "
-        "optional browser extra (`uv sync --extra browser` / `pip install "
-        "'quarry[browser]'`) and run `playwright install chromium`, then run the "
-        "scan through the dynamic worker."
+
+    from quarry_activities.playwright_driver import (
+        BrowserLaunchError,
+        PlaywrightBrowserSession,
     )
-    raise BrowserLoginUnavailableError(msg)  # pragma: no cover
+
+    try:
+        return PlaywrightBrowserSession(
+            allowed_hosts=tuple(allowed_hosts),
+            target_host=target_host,
+            target_port=target_port,
+        )
+    except BrowserLaunchError as exc:
+        msg = (
+            "browser_login requires a headless Chromium build. Playwright is "
+            "installed but Chromium could not be launched — install the optional "
+            "browser extra and run `playwright install chromium` (the quarry-dynamic "
+            "worker image does both at build time)."
+        )
+        raise BrowserLoginUnavailableError(msg) from exc
 
 
 class BrowserLoginResolver:
