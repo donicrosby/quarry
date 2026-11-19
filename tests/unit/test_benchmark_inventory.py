@@ -17,6 +17,34 @@ from quarry.benchmark_inventory import (
 )
 from quarry.schemas import VulnerabilityClass
 
+# Explicit roster of every VulnerabilityClass member. Kept as a named set rather
+# than a bare count so that adding or removing a member fails here naming the
+# drifted class, and so the review diff shows a class name instead of a
+# magic-number change.
+EXPECTED_CLASSES = {
+    VulnerabilityClass.SECRETS,
+    VulnerabilityClass.IDOR,
+    VulnerabilityClass.COMMAND_INJECTION,
+    VulnerabilityClass.SSRF,
+    VulnerabilityClass.SQL_INJECTION,
+    VulnerabilityClass.XSS,
+    VulnerabilityClass.FILE_UPLOAD,
+    VulnerabilityClass.PATH_TRAVERSAL,
+    VulnerabilityClass.OPEN_REDIRECT,
+    VulnerabilityClass.SSTI,
+    VulnerabilityClass.INSECURE_DESERIALIZATION,
+    VulnerabilityClass.XXE,
+    VulnerabilityClass.LDAP_INJECTION,
+    VulnerabilityClass.MASS_ASSIGNMENT,
+    VulnerabilityClass.AUTH,
+    VulnerabilityClass.SECURITY_MISCONFIGURATION,
+    VulnerabilityClass.INSECURE_DESIGN,
+    VulnerabilityClass.WEAK_CRYPTO,
+    VulnerabilityClass.SUPPLY_CHAIN,
+    VulnerabilityClass.TEMPFILE_RACE,
+    VulnerabilityClass.TERMINAL_ESCAPE,
+}
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = REPO_ROOT / "prompts"
 GROUND_TRUTH_DIR = REPO_ROOT / "tests/golden/ground_truth"
@@ -26,7 +54,7 @@ def test_inventory_enumerates_every_vuln_class() -> None:
     rows = build_inventory(prompts_dir=PROMPTS_DIR, ground_truth_dir=GROUND_TRUTH_DIR)
 
     assert [row.vuln_class for row in rows] == [member.value for member in VulnerabilityClass]
-    assert len(rows) == len(VulnerabilityClass) == 21
+    assert set(VulnerabilityClass) == EXPECTED_CLASSES
 
 
 def test_huntable_matches_hunt_templates_on_disk() -> None:

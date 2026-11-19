@@ -144,6 +144,67 @@ class S3ArtifactStore:
             redaction_status=redaction_status,
         )
 
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the object at *key*, creating it if absent.
+
+        S3 has no append primitive, so this reads the current object and
+        rewrites it with *data* appended (read-modify-write).  A missing object
+        starts from empty; every other read failure propagates — silently
+        restarting the object on a credential or availability error would
+        violate the append-only guarantee the per-agent execution log depends
+        on.  Single-writer per key is assumed (one agent instance owns its log
+        key), so no concurrency control is applied.  The returned ``ArtifactRef``
+        describes the appended chunk (its ``sha256`` and ``size_bytes`` are of
+        *data*), keeping each append O(len(data)).
+        """
+        self._ensure_open()
+        object_key = self._prefix + key
+        try:
+            obj = retry_transient(
+                lambda: self._client.get_object(Bucket=self._bucket, Key=object_key),
+                max_attempts=self._retry_max_attempts,
+                backoff_seconds=self._retry_backoff_seconds,
+            )
+            existing = cast(bytes, obj["Body"].read())
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            code = ""
+            if isinstance(response, dict):
+                error = cast(dict[str, Any], response.get("Error", {}))
+                code = str(error.get("Code", ""))
+            if code not in ("NoSuchKey", "404", "NotFound"):
+                raise
+            existing = b""
+        combined = existing + data
+        self._call(
+            lambda: self._client.put_object(
+                Bucket=self._bucket,
+                Key=object_key,
+                Body=combined,
+                ContentType=content_type,
+            )
+        )
+        return ArtifactRef(
+            id=str(uuid4()),
+            uri=f"s3://{self._bucket}/{key}",
+            kind=kind,
+            content_type=content_type,
+            sha256=sha256(data).hexdigest(),
+            size_bytes=len(data),
+            redaction_status=redaction_status,
+            created_at=datetime.now(UTC),
+            metadata=metadata or {},
+        )
+
     def get_bytes(self, artifact_ref: ArtifactRef) -> bytes:
         self._ensure_open()
         bucket, key = self._parse_uri(artifact_ref.uri)

@@ -15,6 +15,7 @@ from tests.unit.replay_fixtures import (
     make_arch_doc,
     make_candidate,
     make_repository,
+    persist_hunt_tasks,
     write_kb_artifacts,
     write_ledger_artifact,
 )
@@ -305,3 +306,73 @@ class TestReplayRunnerAllStages:
         )
         encoded = json.dumps(result, default=str)
         assert "mode=mock" in encoded
+
+
+class TestHuntReplayLogProvenance:
+    """Spec Req-3 scenario 1 for hunt, end-to-end through the replay runner.
+
+    A replay must APPEND to the ORIGINAL per-agent log file — the one keyed by
+    the persisted task id — never open a fresh, uncorrelated file. Red by
+    construction: this fails if the resolver mints a fresh uuid (a second,
+    differently-named hunt log appears and the original stays untouched) or if
+    the append target is truncated (the original line is lost).
+    """
+
+    def test_replay_appends_to_the_original_persisted_hunt_log(self, tmp_path: Path) -> None:
+        from quarry.schemas import ArtifactKind
+        from quarry_artifacts.local import LocalArtifactStore
+        from quarry_models.agent_log import agent_log_key, compute_agent_instance_id
+        from quarry_replay.runner import run_replay
+
+        repo = build_repo(tmp_path)
+        arch_doc = make_arch_doc("scan-replay-1")
+        db_path = build_scan_db(
+            tmp_path / "quarry.db",
+            repo,
+            vuln_classes=[VulnerabilityClass.SECRETS],
+            arch_doc=arch_doc,
+            metadata={"repo_path": str(repo)},
+        )
+        # The original run persisted its recon-derived hunt task; that id keys
+        # the log file the replay must land on.
+        (original,) = persist_hunt_tasks(
+            db_path, "scan-replay-1", arch_doc, vuln_classes=[VulnerabilityClass.SECRETS]
+        )
+        instance_id = compute_agent_instance_id("hunt", original.id)
+        log_key = agent_log_key("scan-replay-1", "hunt", instance_id)
+
+        # The original run's log, already on disk before the replay.
+        artifacts = tmp_path / "artifacts"
+        LocalArtifactStore(artifacts).append_bytes(
+            log_key,
+            json.dumps({"instance_id": instance_id, "event": "stop"}).encode() + b"\n",
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+
+        run_replay(
+            stage="hunt",
+            db_path=db_path,
+            scan_id="scan-replay-1",
+            repo_path=str(repo),
+            artifact_root=str(artifacts),
+            mock=True,
+        )
+
+        lines = [
+            json.loads(line)
+            for line in (artifacts / log_key).read_text().splitlines()
+            if line.strip()
+        ]
+        # Original line intact and first — append never truncates.
+        assert lines[0]["instance_id"] == instance_id
+        assert lines[0]["event"] == "stop"
+        # Replay appended its own lines after it, flagged as replay.
+        replay_lines = lines[1:]
+        assert replay_lines, "replay must append lines to the original hunt log"
+        assert all(line["replay"] is True for line in replay_lines)
+        assert all(line["instance_id"] == instance_id for line in replay_lines)
+        # Exactly ONE hunt log exists — the original. A fresh-uuid derivation
+        # would leave a second, uncorrelated file here.
+        hunt_dir = artifacts / "agents" / "scan-replay-1" / "hunt"
+        assert [p.name for p in hunt_dir.iterdir()] == [f"{instance_id}.jsonl"]

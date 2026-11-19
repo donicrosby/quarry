@@ -37,7 +37,9 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
@@ -222,6 +224,7 @@ def hunt_impl(
     kb_root_index_key: str | None = None,
     context_window_tokens: int | None = None,
     context_window_threshold: float = 0.8,
+    replay_mode: bool = False,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
@@ -338,6 +341,9 @@ def hunt_impl(
         limiter=limiter,
         context_window_tokens=context_window_tokens,
         context_window_threshold=context_window_threshold,
+        agent_instance_id=compute_agent_instance_id("hunt", task.id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -406,6 +412,7 @@ def hunt_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
@@ -447,6 +454,7 @@ def hunt_activity(
             scan_seed,
             artifact_root,
             kb_root_index_key,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -463,6 +471,7 @@ def _hunt_activity_impl(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -519,6 +528,7 @@ def _hunt_activity_impl(
         kb_root_index_key=effective_kb_key,
         context_window_tokens=role_cfg.context_window_tokens,
         context_window_threshold=role_cfg.context_window_threshold,
+        replay_mode=replay_mode,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

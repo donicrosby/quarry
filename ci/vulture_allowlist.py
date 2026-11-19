@@ -16,6 +16,9 @@ symbol, remove its line here in the same PR so the gate keeps tracking zero.
 
 _ALLOWLIST = [
     # --- Pydantic/dataclass fields (set by BaseModel/dataclass __init__ — invisible to vulture) ---
+    # AgentLogEvent is constructed with **fields in the loop, so vulture cannot see
+    # this field's keyword usage; it is set on every per-agent log line.
+    src.quarry_models.agent_log.replay,
     src.quarry.benchmark_artifacts.recall_per_class,
     src.quarry.benchmark_artifacts.fp_rate,
     src.quarry.benchmark_artifacts.models,

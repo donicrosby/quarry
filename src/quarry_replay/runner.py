@@ -141,6 +141,7 @@ def run_replay(
             vuln_class=vuln_class or "secrets",
             panel_name=panel_name,
             mock=mock,
+            artifact_root=artifact_root,
         )
     elif stage == "gapfill":
         inputs = resolve_gapfill_inputs(
@@ -228,6 +229,7 @@ def _invoke(
                 panel_json=inputs.panel.role_config.model_dump_json(),
                 budget_cap_usd=budget,
                 max_iterations=iterations,
+                replay_mode=True,
             )
         return result, captured
 
@@ -246,6 +248,7 @@ def _invoke(
                 panel_json=inputs.panel.role_config.model_dump_json(),
                 artifact_root=artifact_root_of(inputs),
                 kb_root_index_key=inputs.kb_root_index_key,
+                replay_mode=True,
             )
         return result, captured
 
@@ -270,6 +273,7 @@ def _invoke(
                 None,
                 inputs.kb_root_index_key and artifact_root_of(inputs),
                 inputs.kb_root_index_key,
+                replay_mode=True,
             )
         return result, captured
 
@@ -286,6 +290,7 @@ def _invoke(
                 panel_json=inputs.panel.role_config.model_dump_json(),
                 budget_cap_usd=budget,
                 max_iterations=iterations,
+                replay_mode=True,
             )
         return result, captured
 
@@ -303,6 +308,7 @@ def _invoke(
                 panel_json=inputs.panel.role_config.model_dump_json(),
                 budget_cap_usd=budget,
                 max_iterations=iterations,
+                replay_mode=True,
             )
         return result, captured
 
@@ -318,6 +324,7 @@ def _invoke(
             budget_spec=None,
             panel_json=inputs.panel.role_config.model_dump_json(),
             max_iterations=iterations,
+            replay_mode=True,
         )
     return _subsystem_to_dict(subsystem), captured
 
