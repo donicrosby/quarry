@@ -31,6 +31,7 @@ from quarry.schemas import (
     ArtifactRef,
     CallGraph,
     CandidateFinding,
+    EntryPoint,
     ExploitChain,
     ExploitStep,
     FinalFinding,
@@ -76,6 +77,7 @@ from quarry_activities.inputs import (
     CloneRepoResult,
     CreateSnapshotInput,
     DispatchLifecycleHooksInput,
+    FuzzSpec,
     HttpRequestActivityInput,
     LoadHandoffArtifactsInput,
     LoadHandoffArtifactsOutput,
@@ -92,7 +94,7 @@ from quarry_activities.inputs import (
 from quarry_activities.read_artifact import body_text_from_response_artifact
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
-from quarry_activities.validation import SecretValidationResult
+from quarry_activities.validation import FuzzValidationResult, SecretValidationResult
 
 # Live-verdict vocabulary + per-class registry dispatch (ADR-017). Canonical
 # definitions live in quarry_activities.verdict_evaluators; re-exported here
@@ -126,6 +128,9 @@ from quarry_persistence import QuarryRepository
 # Explicit re-exports (back-compat): candidate-source converters moved to
 # quarry_workflows.candidate_sources (cruft-purge §5.1); tests and integration
 # callers still import them from this module.
+from quarry_workflows.candidate_sources import (  # noqa: F401
+    fuzz_candidates_from_activity_payload as fuzz_candidates_from_activity_payload,
+)
 from quarry_workflows.candidate_sources import (  # noqa: F401
     secret_candidates_from_activity_payload as secret_candidates_from_activity_payload,
 )
@@ -1185,6 +1190,7 @@ class RunScanWorkflow:
                 scan,
                 repo_path,
                 artifact_root,
+                arch_doc,
                 hunt_panel_json,
                 kb_root_index_key,
                 round_index,
@@ -1848,6 +1854,7 @@ class RunScanWorkflow:
         scan: Scan,
         repo_path: str,
         artifact_root: str,
+        arch_doc: ArchitectureDoc | None,
         hunt_panel_json: str | None,
         kb_root_index_key: str | None,
         round_index: int,
@@ -2097,6 +2104,25 @@ class RunScanWorkflow:
                             "finding.rejected",
                             {"finding_id": candidate.id},
                         )
+
+            # ── Deterministic fuzz sweep (C5 fuzzing-harness) ──────────────────
+            # A deterministic, non-agentic fuzzer over the round's CLI/fuzz-harness
+            # entry points: build the target, mutate its attacker-controlled args,
+            # run each mutant in the sandbox, classify crashes and emit one
+            # candidate per unique crash (fed through the same promote gate as the
+            # secrets/SSRF sweeps).  Round-0 only: fuzzing is the expensive sweep,
+            # and a re-round would rebuild and re-run an unchanged target.
+            if round_index == 0:
+                await self._run_fuzz_sweep(
+                    scan_input,
+                    scan,
+                    repo_path,
+                    artifact_root,
+                    arch_doc,
+                    round_tasks,
+                    candidate_findings,
+                    final_findings,
+                )
 
             # ── Handoff artifacts (versioned-handoff-artifacts, task 4.2) ──────
             # Persist the three versioned artifacts at the end of the HUNT pass,
@@ -3309,6 +3335,176 @@ class RunScanWorkflow:
             )
 
         return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
+
+    async def _run_fuzz_sweep(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        arch_doc: ArchitectureDoc | None,
+        round_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
+        final_findings: list[FinalFinding],
+    ) -> None:
+        """Deterministic fuzz sweep over the round's CLI/fuzz-harness entry points.
+
+        Gated on single-class focus (requirement: Fuzz dispatch gates on
+        single-class focus).  Each entry point additionally requires a non-empty
+        ``invocation`` and the ``args`` attacker-controlled channel; anything
+        else is recorded as a skip, never guessed at.  The non-agentic ``fuzz``
+        activity returns one crash record per unique crash; each becomes a
+        candidate promoted through the ``validate-fuzz-candidate`` gate exactly
+        like the deterministic secrets sweep.  Best-effort: an activity failure
+        is recorded and never aborts the scan.
+        """
+        focused_classes = list(scan.profile.vuln_classes)
+        focus_reason = fuzz_focus_skip_reason(focused_classes)
+        if focus_reason is not None:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "fuzz.skipped",
+                {
+                    "reason": focus_reason,
+                    "classes": ",".join(c.value for c in focused_classes),
+                },
+            )
+            return
+        vuln_class = focused_classes[0]
+
+        entry_points = fuzz_entry_points_for_dispatch(round_tasks)
+        if not entry_points:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "fuzz.skipped",
+                {"reason": "no-eligible-entry-point"},
+            )
+            return
+
+        build_commands = tuple(arch_doc.build_commands) if arch_doc is not None else ()
+        existing_ids = {c.id for c in candidate_findings}
+        for entry_point in entry_points:
+            skip_reason = fuzz_skip_reason(entry_point)
+            if skip_reason is not None:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.skipped",
+                    {"reason": skip_reason, "entry_point": entry_point.file},
+                )
+                continue
+            spec = FuzzSpec(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id or "local",
+                repo_path=repo_path,
+                entry_point_file=entry_point.file,
+                entry_point_function=entry_point.function,
+                invocation=tuple(entry_point.invocation),
+                attacker_controlled_input=entry_point.attacker_controlled_input,
+                vuln_class=vuln_class.value,
+                seed_input=_FUZZ_DEFAULT_SEED_INPUT,
+                seed=scan_input.scan_seed or 0,
+                run_budget=_FUZZ_DEFAULT_RUN_BUDGET,
+                timeout_seconds=_FUZZ_DEFAULT_TIMEOUT_SECONDS,
+                build_commands=build_commands,
+                binary_path=fuzz_binary_path(entry_point),
+                artifact_store_path=artifact_root,
+            )
+            try:
+                result_payload = await workflow.execute_activity(
+                    "fuzz",
+                    spec,
+                    start_to_close_timeout=timedelta(minutes=30),
+                    heartbeat_timeout=timedelta(minutes=5),
+                    retry_policy=self._retry_policy,
+                )
+            except Exception as exc:
+                if is_cancelled_exception(exc):
+                    raise
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.failed",
+                    {"entry_point": entry_point.file, "error": _describe_failure(exc)},
+                )
+                continue
+            result_data = _fuzz_result_mapping(result_payload)
+            if result_data.get("status") != "ran":
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.skipped",
+                    {
+                        "reason": str(result_data.get("reason", "")),
+                        "entry_point": entry_point.file,
+                    },
+                )
+                continue
+            fuzz_candidates = fuzz_candidates_from_activity_payload(
+                result_payload,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+                vuln_class=vuln_class,
+            )
+            for candidate in fuzz_candidates:
+                if candidate.id in existing_ids:
+                    continue  # re-run: crash candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "fuzz"},
+                )
+                validation_payload = await workflow.execute_activity(
+                    "validate-fuzz-candidate",
+                    ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=self._retry_policy,
+                )
+                validation = _fuzz_validation_result_from_activity(validation_payload)
+                if validation.is_valid:
+                    final = final_from_candidate(candidate, scan.id, workflow.now())
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    final_findings.append(final)
+                    await self._emit_and_dispatch(
+                        scan_input,
+                        scan,
+                        artifact_root,
+                        "finding.validated",
+                        {"finding_id": final.id},
+                        finding=final,
+                        severity=final.severity,
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.rejected",
+                        {"finding_id": candidate.id},
+                    )
+            if not fuzz_candidates:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.no_crash",
+                    {
+                        "entry_point": entry_point.file,
+                        "runs": str(result_data.get("runs_executed", 0)),
+                    },
+                )
 
     async def _calibrate_one_finding(
         self,
@@ -4817,6 +5013,98 @@ def _validation_result_from_activity(payload: object) -> SecretValidationResult:
             checks_run=_required_str_list(values, "checks_run"),
         )
     msg = f"Unexpected validation payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Fuzz dispatch helpers (C5 fuzzing-harness)
+# ---------------------------------------------------------------------------
+
+#: Bounded budget for one fuzz pass (total runs / per-run wall-clock seconds).
+_FUZZ_DEFAULT_RUN_BUDGET: int = 64
+_FUZZ_DEFAULT_TIMEOUT_SECONDS: int = 10
+
+#: Base attacker-supplied value the mutation engine starts from when recon
+#: supplies no per-entry-point seed.
+_FUZZ_DEFAULT_SEED_INPUT: str = "AAAA"
+
+#: Entry-point kinds the fuzzer may dispatch on.
+_FUZZ_ENTRY_POINT_KINDS: frozenset[str] = frozenset({"fuzz_harness", "cli_arg"})
+
+
+def fuzz_entry_points_for_dispatch(round_tasks: list[AgentTask]) -> list[EntryPoint]:
+    """Unique CLI/fuzz-harness entry points across *round_tasks*, in discovery order."""
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    entry_points: list[EntryPoint] = []
+    for task in round_tasks:
+        for entry_point in task.entry_points:
+            if entry_point.kind not in _FUZZ_ENTRY_POINT_KINDS:
+                continue
+            key = (entry_point.file, entry_point.function, tuple(entry_point.invocation))
+            if key in seen:
+                continue
+            seen.add(key)
+            entry_points.append(entry_point)
+    return entry_points
+
+
+def fuzz_skip_reason(entry_point: EntryPoint) -> str | None:
+    """Why *entry_point* cannot be fuzzed in v1, or ``None`` when it can.
+
+    Fail-closed and explicit: a non-args channel, an empty invocation, or a
+    non-fuzzable kind skips the entry point with a recorded reason rather than
+    guessing how to invoke it.
+    """
+    if entry_point.kind not in _FUZZ_ENTRY_POINT_KINDS:
+        return "kind-not-fuzzable"
+    if not entry_point.invocation:
+        return "missing-invocation"
+    if entry_point.attacker_controlled_input != "args":
+        return f"channel-not-args:{entry_point.attacker_controlled_input}"
+    return None
+
+
+def fuzz_focus_skip_reason(focused_classes: list[VulnerabilityClass]) -> str | None:
+    """Why an *n*-class focus cannot dispatch fuzz, or ``None`` when it can.
+
+    Fuzz attributes every crash to the scan's single focused class, so a
+    multi-class or default-ALL focus skips the sweep entirely (requirement
+    ``Fuzz dispatch gates on single-class focus``).
+    """
+    if len(focused_classes) != 1:
+        return "focus-not-single-class"
+    return None
+
+
+def fuzz_binary_path(entry_point: EntryPoint) -> str:
+    """Repo-relative path of the built binary, taken from recon's ``invocation[0]``."""
+    raw = entry_point.invocation[0]
+    return raw[2:] if raw.startswith("./") else raw
+
+
+def _fuzz_result_mapping(payload: object) -> dict[str, object]:
+    """Return a ``fuzz`` activity payload as a mapping (empty when it is not one)."""
+    if isinstance(payload, dict):
+        return cast(dict[str, object], payload)
+    dump = getattr(payload, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        if isinstance(dumped, dict):
+            return cast(dict[str, object], dumped)
+    return {}
+
+
+def _fuzz_validation_result_from_activity(payload: object) -> FuzzValidationResult:
+    if isinstance(payload, FuzzValidationResult):
+        return payload
+    if isinstance(payload, dict):
+        values = cast(dict[str, Any], payload)
+        return FuzzValidationResult(
+            verdict=_required_str(values, "verdict"),
+            reasons=_required_str_list(values, "reasons"),
+            checks_run=_required_str_list(values, "checks_run"),
+        )
+    msg = f"Unexpected fuzz validation payload: {type(payload).__name__}"
     raise TypeError(msg)
 
 
