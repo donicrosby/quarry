@@ -33,8 +33,12 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"),  # Google API key
     re.compile(r"(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}"),  # GitLab personal access token
     # JWT, anchored on the base64url ``eyJ`` header/payload prefix and matched
-    # through the signature so no fragment of the token survives.
-    re.compile(r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    # through the signature so no fragment of the token survives.  Header and
+    # payload quantifiers are bounded ({1,512}: base64url segments above ~4KB
+    # are not real JWTs) so ``eyJ``-repeated hostile bodies cannot drive
+    # quadratic backtracking — the scrubber runs on attacker-reachable capture
+    # content with no body-size cap upstream (impl review F1, t_a9f7f456).
+    re.compile(r"eyJ[A-Za-z0-9_-]{1,512}\.eyJ[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]+"),
     # KEY/SECRET/TOKEN/PASSWORD = "value" assignments (value is the secret).
     # Accepts camelCase names (apiKey, authToken) and JSON-style quoted keys.
     re.compile(

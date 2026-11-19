@@ -164,3 +164,25 @@ def test_bare_key_prefixes_do_not_mangle_ordinary_prose() -> None:
     )
     for line in prose:
         assert scrub(line).text == line
+
+
+def test_jwt_pattern_is_linear_on_eyej_repeated_input() -> None:
+    """ReDoS regression (impl review F1, t_a9f7f456): the unbounded JWT header/
+    payload quantifiers went quadratic on ``eyJ``-repeated hostile bodies
+    (0.11s @ 8k -> 6.3s @ 64k, ~25min @ 1MB).  The bounded pattern must stay
+    linear-ish and fast at attack sizes, while still redacting a real JWT."""
+    import time
+
+    hostile = "eyJ" * 65536
+    start = time.monotonic()
+    scrub(hostile)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"scrub took {elapsed:.3f}s on 64k eyJ-repeated input"
+
+    legit = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    )
+    scrubbed = scrub(f"token {legit} trailing")
+    assert legit not in scrubbed.text
+    assert scrubbed.hits >= 1
