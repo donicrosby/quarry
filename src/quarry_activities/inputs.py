@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import ChangedFile
+from quarry.schemas import CanaryCallback, ChangedFile
 
 
 class CreateSnapshotInput(BaseModel):
@@ -327,3 +327,18 @@ class LoadHandoffArtifactsOutput(BaseModel):
     hunt_handoff_json: str | None = None
     architecture_doc_json: str | None = None
     coverage_ledger_json: str | None = None
+
+
+class IngestCanaryCallbacksInput(BaseModel):
+    """Input payload for the worker-side canary-callback capture-index consumer.
+
+    The B10 per-exec listener returns safe-field callbacks in memory on
+    ``SandboxExecCapture.canary_callbacks``; the workflow forwards them here and
+    the activity writes each one into the capture index with its originating
+    hunt task id. The capture root is resolved worker-side from settings.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    callbacks: tuple[CanaryCallback, ...] = ()
+    hunt_task_id: str = ""

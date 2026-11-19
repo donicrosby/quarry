@@ -57,6 +57,38 @@ services:
       retries: 5
       start_period: 15s
 
+  # Recording MITM proxy (traffic-capture-verified-evidence). Every agent HTTP
+  # request from the worker transits this sidecar, which writes the full exchange
+  # into the shared content-addressed capture store and indexes it for query.
+  #
+  # HARDENING: no `ports:` entry. The proxy is reachable only on the compose
+  # network; publishing :8788 to the host would expose an intercepting proxy.
+  proxy:
+    image: mitmproxy/mitmproxy:12.3.1
+    command:
+      - "--listen-host"
+      - "0.0.0.0"
+      - "--listen-port"
+      - "8788"
+      - "--set"
+      - "confdir=/home/mitmproxy/.mitmproxy"
+      - "-s"
+      - "/app/src/quarry_traffic/addon.py"
+    environment:
+      QUARRY_TRAFFIC_CAPTURE_ROOT: /data/traffic-capture
+      PYTHONPATH: /app/src
+    volumes:
+      - ./src:/app/src:ro
+      - traffic-capture:/data/traffic-capture
+      - proxy-certs:/home/mitmproxy/.mitmproxy
+    healthcheck:
+      # The CA is generated on first start; the worker waits for it so its TLS
+      # trust store is populated before any proxied HTTPS request.
+      test: ["CMD-SHELL", "test -f /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   worker:
     # Same image as the server; built once by the server service.
     image: quarry:local
@@ -69,14 +101,35 @@ services:
       CHUTES_API_KEY: ${CHUTES_API_KEY:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GIT_CLONE_TOKEN: ${GIT_CLONE_TOKEN:-}
+      # Recording-proxy funnel: agent HTTP transits the recording sidecar;
+      # infrastructure egress (model providers, Temporal, auth) bypasses it.
+      HTTP_PROXY: ${QUARRY_HTTP_PROXY:-http://proxy:8788}
+      HTTPS_PROXY: ${QUARRY_HTTPS_PROXY:-http://proxy:8788}
+      NO_PROXY: ${QUARRY_NO_PROXY:-localhost,127.0.0.1,::1,temporal,server,host.docker.internal,api.openai.com,api.anthropic.com,openrouter.ai,api.chutes.ai,generativelanguage.googleapis.com}
+      # Trust the proxy's interception CA for proxied HTTPS (mounted read-only).
+      SSL_CERT_FILE: /mitmproxy-certs/mitmproxy-ca-cert.pem
+      REQUESTS_CA_BUNDLE: /mitmproxy-certs/mitmproxy-ca-cert.pem
+      QUARRY_TRAFFIC_CAPTURE_ROOT: /data/traffic-capture
+      QUARRY_EVIDENCE_STORE_ROOT: /data/evidence
     volumes:
       - quarry-data:/data
       - ./examples:/app/examples:ro
+      - traffic-capture:/data/traffic-capture
+      - evidence-store:/data/evidence
+      - proxy-certs:/mitmproxy-certs:ro
     depends_on:
       temporal:
+        condition: service_healthy
+      proxy:
         condition: service_healthy
 
 volumes:
   # Shared SQLite DB + scan artifacts. Dev-grade: two containers share one SQLite
   # file and rely on its locking. Postgres is the future path for concurrency.
   quarry-data:
+  # Shared with the proxy sidecar: the disposable full-capture store.
+  traffic-capture:
+  # The durable, hash-verified evidence store (never reclaimed with capture).
+  evidence-store:
+  # mitmproxy's generated CA, shared read-only into the worker's trust store.
+  proxy-certs:

@@ -215,6 +215,9 @@ class ArtifactKind(StrEnum):
     # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
     ARCHITECTURE_DOC = "architecture_doc"
     HUNT_HANDOFF = "hunt_handoff"
+    # traffic-capture-verified-evidence: redacted, hash-verified evidence blob
+    # snapshotted from a capture exchange. Quarantined proof content.
+    EVIDENCE = "evidence"
 
 
 class RedactionStatus(StrEnum):

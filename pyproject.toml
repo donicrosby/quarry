@@ -82,6 +82,7 @@ module-name = [
   "quarry_plugins",
   "quarry_prompts",
   "quarry_tools",
+  "quarry_traffic",
   "quarry_tui",
   "quarry_worker",
   "quarry_workflows",

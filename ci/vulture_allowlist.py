@@ -176,7 +176,6 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.session_updates,
     src.quarry_workflows.run_scan.candidate_finding_count,
     src.quarry_workflows.run_scan.final_finding_count,
-
     # --- Protocol signature params, dunder params, instance attrs ---
     src.quarry_artifacts.s3_store.Body,
     src.quarry_artifacts.s3_store.Bucket,
@@ -240,7 +239,6 @@ _ALLOWLIST = [
     src.quarry_tools.treesitter.frame,
     src.quarry_tools.treesitter.signum,
     src.quarry_workflows.tracer_stage.trace_id,
-
     # --- BaseHTTPRequestHandler dynamic dispatch (do_* methods + silenced log) ---
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_GET,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_POST,
@@ -250,7 +248,6 @@ _ALLOWLIST = [
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PATCH,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message.format,
-
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
     src.quarry.benchmark_inventory.inventory_as_dicts,
     # Plugin-level match->CandidateFinding converters: the spec pins them on the
@@ -259,10 +256,18 @@ _ALLOWLIST = [
     # tests reference these directly.
     src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
     src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
-
     # --- browser-worker-playwright: helpers referenced only from tests/ ---
     src.quarry_activities.playwright_driver.store_screenshot,
-
+    # --- traffic-capture-verified-evidence: operator API, library callbacks, third-party attrs ---
+    # mitmdump discovers the addon list by name from the -s script (not an in-tree call).
+    src.quarry_traffic.addon.addons,
+    # Public evidence-store read surface consumed by operators/reporting/tests.
+    src.quarry_traffic.evidence.EvidenceStore.binds,
+    # sqlite3/tarfile attributes assigned on third-party objects vulture cannot follow.
+    src.quarry_traffic.capture_index.CaptureIndex._conn.row_factory,
+    src.quarry_traffic.evidence.EvidenceStore._conn.row_factory,
+    src.quarry_traffic.capture_store.TarInfo.size,
+    src.quarry_traffic.capture_store.TarInfo.mtime,
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
     src.quarry.schemas.VerdictDefaults,
