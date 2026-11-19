@@ -41,6 +41,7 @@ from quarry.schemas import (
     HttpRequestSpec,
     HttpResponseCapture,
     TargetEndpoint,
+    path_matches_do_not_test,
 )
 from quarry_activities.inputs import AuthzMatrixActivityInput, HttpRequestActivityInput
 from quarry_artifacts.local import LocalArtifactStore
@@ -57,10 +58,12 @@ async def authz_matrix_activity(inp: AuthzMatrixActivityInput) -> AuthzMatrixRes
     """Probe every endpoint as every persona and persist the resulting matrix.
 
     Deterministic ordering: endpoints sorted by path, personas in declaration
-    order. Each cell records the HTTP status code and a hash of the response
-    body; a transport error is recorded as the cell's ``error`` and the matrix
-    continues with the remaining cells. The result is persisted as a scan
-    artifact and returned with its ``ArtifactRef`` for provenance.
+    order. An endpoint matching the top-level ``do_not_test`` ceiling yields no
+    cell — the ceiling blocks every persona. Each cell records the HTTP status
+    code and a hash of the response body; a transport error is recorded as the
+    cell's ``error`` and the matrix continues with the remaining cells. The
+    result is persisted as a scan artifact and returned with its ``ArtifactRef``
+    for provenance.
     """
     endpoint = TargetEndpoint.model_validate_json(inp.target_endpoint_json)
     store = LocalArtifactStore(Path(inp.artifact_store_path) / inp.scan_id)
@@ -68,6 +71,9 @@ async def authz_matrix_activity(inp: AuthzMatrixActivityInput) -> AuthzMatrixRes
     rows: list[AuthzMatrixRow] = []
     for ep in sorted(inp.endpoints, key=lambda e: e.path):
         cells: list[AuthzMatrixCell] = []
+        if path_matches_do_not_test(ep.path, inp.do_not_test):
+            rows.append(AuthzMatrixRow(endpoint_path=ep.path, endpoint_method=ep.method))
+            continue
         for persona in inp.personas:
             with suppress(RuntimeError):
                 activity.heartbeat()
