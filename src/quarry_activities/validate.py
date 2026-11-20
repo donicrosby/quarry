@@ -35,7 +35,9 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.checklist import enforce_checklist_invariants
 from quarry_models.credibility import compute_credibility
 from quarry_models.factory import build_model_client
@@ -159,6 +161,8 @@ def _run_debater(
     turn_timeout_seconds: int,
     limiter: Any | None,
     checklist_enabled: bool = False,
+    artifact_root: str | None = None,
+    replay_mode: bool = False,
 ) -> tuple[RefuteResponse | None, list[ChecklistItem]]:
     """Run the independent debater's refute loop over the same claim.
 
@@ -212,6 +216,12 @@ def _run_debater(
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        # The debater is a distinct agent instance from the reasoner but shares
+        # the same role/finding, so its log file carries a "-debater" suffix to
+        # avoid interleaving the two loops' lines in one file.
+        agent_instance_id=f"{compute_agent_instance_id('validate', finding.id)}-debater",
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
     final = result.final_answer
     if isinstance(final, ChecklistRefuteResponse):
@@ -274,6 +284,7 @@ def validate_impl(
     debater_limiter: Any | None = None,
     kb_root_index_key: str | None = None,
     checklist_enabled: bool = True,
+    replay_mode: bool = False,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -348,6 +359,9 @@ def validate_impl(
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        agent_instance_id=compute_agent_instance_id("validate", finding.id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -420,6 +434,8 @@ def validate_impl(
             turn_timeout_seconds=turn_timeout_seconds,
             limiter=debater_limiter,
             checklist_enabled=checklist_enabled,
+            artifact_root=artifact_root,
+            replay_mode=replay_mode,
         )
         refuted = refute.refuted if refute is not None else False
         # Deterministic backstop (run-5): a mitigation_stretching FAIL whose
@@ -486,6 +502,7 @@ def validate_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
@@ -519,6 +536,7 @@ def validate_activity(
             scan_seed,
             artifact_root,
             kb_root_index_key,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -543,6 +561,7 @@ def _validate_activity_impl(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -593,6 +612,7 @@ def _validate_activity_impl(
         debater_tier=debater_tier,
         debater_limiter=debater_limiter,
         checklist_enabled=_checklist_flag(),
+        replay_mode=replay_mode,
     )
 
     if debater_client is not None:

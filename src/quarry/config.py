@@ -1,5 +1,6 @@
 """Quarry configuration management."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,6 +61,15 @@ class QuarrySettings(BaseSettings):
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
 
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
+    # Dependency-manifest supply-chain scanner. Configurable typosquat name
+    # patterns; the check is a no-op until at least one pattern is configured.
+    # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')
+    typosquat_patterns: list[str] = Field(default_factory=list)
     # Proof-artifact quarantine (D6 / proof-artifact-quarantine). Per-kind size
     # limits in bytes, enforced before any artifact byte is accepted; the default
     # covers kinds without an explicit limit. A quarantined proof artifact is

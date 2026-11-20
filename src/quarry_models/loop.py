@@ -37,7 +37,8 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ValidationError, model_validator
 
@@ -51,6 +52,12 @@ from quarry.schemas import (
     ReasoningCheckResult,
 )
 from quarry_artifacts.store import ArtifactStore, build_artifact_store
+from quarry_models.agent_log import (
+    AgentLogEvent,
+    AgentLogEventType,
+    agent_log_key,
+    last_model_invocation_id,
+)
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import (
@@ -64,6 +71,9 @@ from quarry_models.types import (
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 from quarry_tools.errors import UnauthorizedToolError
+
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
 
 _log = logging.getLogger(__name__)
 
@@ -141,10 +151,9 @@ class ToolCallRequest(BaseModel):
         return d
 
 
-def _wrap_tool_result(tool_name: str, output: str) -> str:
-    """Wrap a tool result in <target_content> tags after scrubbing."""
-    scrubbed = scrub(output).text
-    return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
+def _wrap_tool_result(tool_name: str, scrubbed_output: str) -> str:
+    """Wrap an already-scrubbed tool result in <target_content> tags."""
+    return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed_output}\n</target_content>"
 
 
 def _estimate_tokens(messages: list[ModelMessage]) -> int:
@@ -281,6 +290,43 @@ def _try_emit(
         _log.warning("event_sink raised on %s; continuing", event_type, exc_info=True)
 
 
+def _redact_inputs(value: Any) -> Any:
+    """Recursively scrub every string in a tool-call input value.
+
+    Tool args (paths, patterns, URLs) are target-influenced and may carry a
+    secret literal; running them through the same ``scrub`` chokepoint the
+    prompt path uses keeps raw secrets out of the durable per-agent log.
+    """
+    if isinstance(value, str):
+        return scrub(value).text
+    if isinstance(value, dict):
+        mapping = cast("dict[Any, Any]", value)
+        return {str(k): _redact_inputs(v) for k, v in mapping.items()}
+    if isinstance(value, list):
+        items = cast("list[Any]", value)
+        return [_redact_inputs(v) for v in items]
+    return value
+
+
+def _append_log_line(store: ArtifactStore, key: str, entry: AgentLogEvent) -> None:
+    """Serialise *entry* as one JSONL line and append it to *key*.
+
+    The store's ``append_bytes`` op writes with ``O_APPEND``, so the line lands
+    after any existing lines — a replay appends, it never truncates.  A store
+    failure is logged and swallowed: a broken log must never crash the loop.
+    """
+    try:
+        data = entry.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
+        store.append_bytes(
+            key,
+            data,
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+    except Exception:
+        _log.warning("agent-log append failed for %s; continuing", key, exc_info=True)
+
+
 def _render_vague_feedback(
     failed_checks: list[str],
     detail: str,
@@ -396,6 +442,17 @@ def run_agent_loop(
     # lives in the dispatch path (quarry_models), never in workflow code, so it is
     # replay-safe.
     limiter: Any | None = None,
+    # Per-agent durable execution log (per-agent-durable-logs).  When BOTH an
+    # instance id and a store are given, the loop appends one JSONL line per
+    # event (tool_call / tool_result / model_call / stop) to
+    # ``agents/<scan_id>/<role>/<instance_id>.jsonl`` via the store's
+    # ``append_bytes`` op (append-only, so replay never truncates).  Either
+    # absent => no log file is written (backward compatible).
+    agent_instance_id: str | None = None,
+    agent_log_store: ArtifactStore | None = None,
+    # True when this run is a replay of an already-logged task: log lines then
+    # carry ``replay: true`` so a replay is distinguishable from the original.
+    replay_mode: bool = False,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -450,6 +507,15 @@ def run_agent_loop(
         gap seen in the compressed turns.
     context_window_threshold:
         Fraction of ``context_window_tokens`` at which a reset fires. Default 0.8.
+    agent_instance_id:
+        Deterministic per-agent id (``<role>-<task_id_prefix_8>``). Together with
+        ``agent_log_store`` it enables the per-agent durable execution log.
+    agent_log_store:
+        Artifact store the per-agent JSONL log is appended to. When either this
+        or ``agent_instance_id`` is None, no log is written (backward compatible).
+    replay_mode:
+        True on a replay of an already-logged task; log lines then carry
+        ``replay: true`` so a replay is distinguishable from the original run.
 
     Returns
     -------
@@ -481,6 +547,45 @@ def run_agent_loop(
     _store: ArtifactStore | None = (
         build_artifact_store(artifact_store_path) if artifact_store_path else None
     )
+
+    # Per-agent execution log (per-agent-durable-logs).  Resolve the log key once;
+    # every emission below is a no-op unless BOTH an instance id and a store were
+    # supplied (callers that omit them keep the previous behaviour).  ``_emit_log``
+    # stamps the shared envelope so each line is self-attributing.
+    _log_store: ArtifactStore | None = agent_log_store
+    _log_instance_id: str | None = agent_instance_id
+    _log_key: str | None = (
+        agent_log_key(scan_id or "unknown", role, _log_instance_id)
+        if _log_store is not None and _log_instance_id is not None
+        else None
+    )
+
+    def _emit_log(event: AgentLogEventType, iteration: int, **fields: Any) -> None:
+        if _log_store is None or _log_key is None or _log_instance_id is None:
+            return
+        _append_log_line(
+            _log_store,
+            _log_key,
+            AgentLogEvent(
+                instance_id=_log_instance_id,
+                timestamp=datetime.now(UTC),
+                event=event,
+                iteration=iteration,
+                replay=replay_mode,
+                **fields,
+            ),
+        )
+
+    def _finish(result: AgentLoopResult) -> AgentLoopResult:
+        """Emit the terminal ``stop`` line (always the final log line), then return."""
+        _emit_log(
+            "stop",
+            result.iterations_used,
+            stop_reason=result.stop_reason,
+            iterations_used=result.iterations_used,
+            total_cost=result.total_cost,
+        )
+        return result
 
     # ADR-019 per-part provenance is constant for the loop's lifetime (it describes
     # the seed rendered prompt); compute the request kwargs once and stamp them on
@@ -563,13 +668,15 @@ def run_agent_loop(
                             estimated_cost=cost_per_iteration,
                         )
                     )
-                    return AgentLoopResult(
-                        final_answer=None,
-                        steps=steps,
-                        iterations_used=iteration,
-                        total_cost=total_cost,
-                        stop_reason="schema_rejected",
-                        unauthorized_tool_denials=list(unauthorized_denials),
+                    return _finish(
+                        AgentLoopResult(
+                            final_answer=None,
+                            steps=steps,
+                            iterations_used=iteration,
+                            total_cost=total_cost,
+                            stop_reason="schema_rejected",
+                            unauthorized_tool_denials=list(unauthorized_denials),
+                        )
                     )
                 # Render repair feedback from the registry template (ADR-019).
                 feedback = _render_schema_repair_feedback(
@@ -599,6 +706,13 @@ def run_agent_loop(
                 model_call_failed = True
                 break  # leave the reasoning sub-loop; the outer loop consumes this turn
             parsed = response.parsed
+            # Per-agent log: one model_call line per real model call, carrying the
+            # recorded ModelInvocation id so the log cross-references provenance.
+            _emit_log(
+                "model_call",
+                iteration,
+                model_invocation_id=last_model_invocation_id(client),
+            )
             _log.info(
                 "[%s turn=%d] ← %s",
                 agent_kind,
@@ -617,13 +731,15 @@ def run_agent_loop(
                         estimated_cost=cost_per_iteration,
                     )
                 )
-                return AgentLoopResult(
-                    final_answer=None,
-                    steps=steps,
-                    iterations_used=iteration,
-                    total_cost=total_cost,
-                    stop_reason="guard_triggered",
-                    unauthorized_tool_denials=list(unauthorized_denials),
+                return _finish(
+                    AgentLoopResult(
+                        final_answer=None,
+                        steps=steps,
+                        iterations_used=iteration,
+                        total_cost=total_cost,
+                        stop_reason="guard_triggered",
+                        unauthorized_tool_denials=list(unauthorized_denials),
+                    )
                 )
 
             # Check proposed_actions reasoning (ADR-020)
@@ -662,13 +778,15 @@ def run_agent_loop(
                                 rejected_reasoning_refs=list(reprompt_rejected_refs),
                             )
                         )
-                        return AgentLoopResult(
-                            final_answer=None,
-                            steps=steps,
-                            iterations_used=iteration,
-                            total_cost=total_cost,
-                            stop_reason="reasoning_rejected",
-                            unauthorized_tool_denials=list(unauthorized_denials),
+                        return _finish(
+                            AgentLoopResult(
+                                final_answer=None,
+                                steps=steps,
+                                iterations_used=iteration,
+                                total_cost=total_cost,
+                                stop_reason="reasoning_rejected",
+                                unauthorized_tool_denials=list(unauthorized_denials),
+                            )
                         )
 
                     # Re-prompt: render feedback (ADR-019 — all text in .j2)
@@ -761,13 +879,15 @@ def run_agent_loop(
             remaining = tool_call_cap - tool_calls_used
             if remaining <= 0:
                 _last_capped = parsed if isinstance(parsed, response_model) else None
-                return AgentLoopResult(
-                    final_answer=_last_capped,
-                    steps=steps,
-                    iterations_used=iteration,
-                    total_cost=total_cost,
-                    stop_reason="tool_call_cap",
-                    unauthorized_tool_denials=list(unauthorized_denials),
+                return _finish(
+                    AgentLoopResult(
+                        final_answer=_last_capped,
+                        steps=steps,
+                        iterations_used=iteration,
+                        total_cost=total_cost,
+                        stop_reason="tool_call_cap",
+                        unauthorized_tool_denials=list(unauthorized_denials),
+                    )
                 )
             if len(tool_calls) > remaining:
                 tool_calls = tool_calls[:remaining]
@@ -795,19 +915,28 @@ def run_agent_loop(
             _log.info("[%s turn=%d] final answer", agent_kind, iteration)
             # No tool calls → final answer
             final_answer = parsed
-            return AgentLoopResult(
-                final_answer=final_answer,
-                steps=steps,
-                iterations_used=iteration,
-                total_cost=total_cost,
-                stop_reason="final_answer",
-                unauthorized_tool_denials=list(unauthorized_denials),
+            return _finish(
+                AgentLoopResult(
+                    final_answer=final_answer,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="final_answer",
+                    unauthorized_tool_denials=list(unauthorized_denials),
+                )
             )
 
         # Execute tool calls and append results to history
         _log.info("[%s turn=%d] tools: %s", agent_kind, iteration, step_tool_names)
         tool_results: list[str] = []
         for tc in tool_calls:
+            # Per-agent log: the full (redacted) args of every dispatched call.
+            _emit_log(
+                "tool_call",
+                iteration,
+                tool_name=tc.tool,
+                inputs=cast("dict[str, Any]", _redact_inputs(tc.inputs)),
+            )
             try:
                 record = runner.run(tc.tool, tc.inputs)
                 output_text = record.output
@@ -818,11 +947,13 @@ def run_agent_loop(
                 if tc.tool not in unauthorized_denials:
                     unauthorized_denials.append(tc.tool)
                 _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
-                tool_results.append(
+                failure_text = (
                     f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
                     f"Retry with valid arguments (paths must be relative to the repo root, "
                     f"not URL routes)."
                 )
+                _emit_log("tool_result", iteration, output=scrub(failure_text).text)
+                tool_results.append(failure_text)
                 continue
             except Exception as exc:
                 # Any tool failure — bad/missing args, a path that escapes the repo
@@ -831,21 +962,26 @@ def run_agent_loop(
                 # error. Feed a descriptive message back so it retries; never crash
                 # the activity (which would lose every finding this agent produces).
                 _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
-                tool_results.append(
+                failure_text = (
                     f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
                     f"Retry with valid arguments (paths must be relative to the repo root, "
                     f"not URL routes)."
                 )
+                _emit_log("tool_result", iteration, output=scrub(failure_text).text)
+                tool_results.append(failure_text)
                 continue
 
-            # Redact secrets before the model ever sees the output. _wrap_tool_result
-            # scrubs the content (redaction MUST stay), so a target file that legitimately
-            # contains a secret — which a code-analysis agent must be able to read — reaches
-            # the model only as [REDACTED_SECRET_N], never raw. We deliberately do NOT halt
-            # the loop here: halting would make the agent unable to analyse any repository
-            # that contains a secret, and it added no protection beyond the scrub below
-            # (both use the same scrubber).
-            tool_results.append(_wrap_tool_result(tc.tool, output_text))
+            # Redact secrets before the model ever sees the output. scrub() is the
+            # single chokepoint (redaction MUST stay), so a target file that
+            # legitimately contains a secret — which a code-analysis agent must be
+            # able to read — reaches the model only as [REDACTED_SECRET_N], never
+            # raw. We deliberately do NOT halt the loop here: halting would make
+            # the agent unable to analyse any repository that contains a secret,
+            # and it added no protection beyond this scrub. The scrubbed text is
+            # used for BOTH the model's history and the per-agent log line.
+            scrubbed_output = scrub(output_text).text
+            _emit_log("tool_result", iteration, output=scrubbed_output)
+            tool_results.append(_wrap_tool_result(tc.tool, scrubbed_output))
 
         # Condensed tool-call result summary for a future reset summary.
         turn_results[iteration] = _condense_tool_results(tool_results)
@@ -857,13 +993,15 @@ def run_agent_loop(
 
         # Budget check after executing tools
         if budget_spec.max_cost_usd is not None and total_cost >= budget_spec.max_cost_usd:
-            return AgentLoopResult(
-                final_answer=None,
-                steps=steps,
-                iterations_used=iteration,
-                total_cost=total_cost,
-                stop_reason="budget_exceeded",
-                unauthorized_tool_denials=list(unauthorized_denials),
+            return _finish(
+                AgentLoopResult(
+                    final_answer=None,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="budget_exceeded",
+                    unauthorized_tool_denials=list(unauthorized_denials),
+                )
             )
 
         # ── Context-window enforcement (hunter-context-reset) ───────────────
@@ -931,11 +1069,13 @@ def run_agent_loop(
     # never submitted a clean final answer (no tool_calls). This prevents losing
     # findings that the model reported alongside tool_calls in its last turn.
     _last_response = parsed if isinstance(parsed, response_model) else None
-    return AgentLoopResult(
-        final_answer=_last_response,
-        steps=steps,
-        iterations_used=max_iterations,
-        total_cost=total_cost,
-        stop_reason="max_iterations",
-        unauthorized_tool_denials=list(unauthorized_denials),
+    return _finish(
+        AgentLoopResult(
+            final_answer=_last_response,
+            steps=steps,
+            iterations_used=max_iterations,
+            total_cost=total_cost,
+            stop_reason="max_iterations",
+            unauthorized_tool_denials=list(unauthorized_denials),
+        )
     )

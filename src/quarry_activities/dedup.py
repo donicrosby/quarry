@@ -30,6 +30,8 @@ from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import CandidateFinding, Provider
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
@@ -99,6 +101,7 @@ def dedup_impl(
     event_sink: Any | None = None,
     turn_timeout_seconds: int = 120,
     limiter: Any | None = None,
+    artifact_root: str | None = None,
 ) -> list[CandidateFinding]:
     """Core dedup implementation — callable from the activity and from tests.
 
@@ -183,6 +186,12 @@ def dedup_impl(
             event_sink=event_sink,
             turn_timeout_seconds=turn_timeout_seconds,
             limiter=limiter,
+            # Per-agent log: the dedup loop reuses the gapfill role, so its lines
+            # live under the gapfill role path, keyed by this cluster's lead
+            # finding id (each cluster is a distinct agent instance).
+            scan_id=cluster[0].scan_id,
+            agent_instance_id=compute_agent_instance_id("gapfill", cluster[0].id),
+            agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
         )
 
         if loop_result.final_answer and isinstance(loop_result.final_answer, DedupeResponse):
@@ -205,6 +214,7 @@ def deduplicate_activity(
     db_path: str | None = None,
     max_iterations: int = 8,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, Any]]:
     """Temporal activity: deduplicate CandidateFindings by root_cause_key.
 
@@ -230,6 +240,7 @@ def deduplicate_activity(
             db_path,
             max_iterations,
             scan_seed,
+            artifact_root,
         )
     finally:
         stop_heartbeat.set()
@@ -246,6 +257,7 @@ def _deduplicate_activity_impl(
     db_path: str | None = None,
     max_iterations: int = 8,
     scan_seed: int | None = None,
+    artifact_root: str | None = None,
 ) -> list[dict[str, Any]]:
     parsed: list[CandidateFinding] = []
     if candidates:
@@ -289,6 +301,7 @@ def _deduplicate_activity_impl(
         event_sink=make_event_sink(db_path, scan_id),
         turn_timeout_seconds=role_cfg.turn_timeout_seconds,
         limiter=limiter,
+        artifact_root=artifact_root,
     )
 
     scan_id = parsed[0].scan_id if parsed else ""

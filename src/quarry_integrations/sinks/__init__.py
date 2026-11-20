@@ -8,6 +8,7 @@ from quarry.plugin_types import FindingSink, PluginType
 from quarry_integrations.sinks.file_sink import FileSink
 from quarry_integrations.sinks.jira_dry_run import JiraDryRunSink
 from quarry_integrations.sinks.noop import NoopSink
+from quarry_integrations.sinks.sarif import SarifSink
 from quarry_integrations.sinks.slack_dry_run import SlackDryRunSink
 from quarry_plugins.registry import load_plugins, plugins_of_type
 
@@ -15,17 +16,19 @@ __all__ = [
     "FileSink",
     "JiraDryRunSink",
     "NoopSink",
+    "SarifSink",
     "SlackDryRunSink",
     "default_sinks",
 ]
 
 
 def default_sinks() -> list[FindingSink]:
-    """Sinks delivered on scan completion (dry-run previews + a local file copy).
+    """Sinks delivered on scan completion (dry-run previews + local payload copies).
 
     Sourced from the unified quarry.plugins loader; the cut-line default set
-    is exactly the three FINDING_SINK plugins registered in pyproject.toml
-    (file, jira_dry_run, slack_dry_run) — NoopSink is intentionally excluded.
+    is exactly the four FINDING_SINK plugins registered in pyproject.toml
+    (file, jira_dry_run, sarif, slack_dry_run) — NoopSink is intentionally
+    excluded.
     """
     plugins = load_plugins()
     # FindingSinkPlugin is an alias of FindingSink: every FINDING_SINK-typed plugin satisfies it.

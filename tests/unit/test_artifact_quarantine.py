@@ -145,6 +145,31 @@ class _RecordingStore:
             metadata=dict(metadata or {}),
         )
 
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append-only counterpart to put_bytes (durable-log interface)."""
+        self.order.append("append")
+        self.keys.append(key)
+        return ArtifactRef(
+            id="rec-1",
+            uri=f"memory://{key}",
+            kind=kind,
+            content_type=content_type,
+            sha256=sha256(data).hexdigest(),
+            size_bytes=len(data),
+            redaction_status=redaction_status,
+            created_at=_NOW,
+            metadata=dict(metadata or {}),
+        )
+
     def put_json(
         self,
         key: str,

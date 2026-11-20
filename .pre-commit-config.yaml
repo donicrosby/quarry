@@ -26,15 +26,22 @@ repos:
         pass_filenames: false
         types_or: [python, pyi]
 
+      - id: pinned-refs
+        name: pinned action + pre-commit refs (supply-chain)
+        entry: uv run python scripts/check_pinned_refs.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
   - repo: https://github.com/AleksaC/hadolint-py
-    rev: v2.12.1b3
+    rev: 6e7504451511eaeb62a3e7f14d63b0296cbf86eb # v2.15.1b3
     hooks:
       - id: hadolint
         name: hadolint (Dockerfile lint)
         args: ["--config", ".hadolint.yaml"]
 
   - repo: https://github.com/compilerla/conventional-pre-commit
-    rev: v4.4.0
+    rev: 33b50eb042bee26eac0ee96ad84aa9c1b4dccdd8 # v4.5.0
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]

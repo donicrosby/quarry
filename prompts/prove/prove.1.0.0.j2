@@ -53,6 +53,15 @@ Previous attempts for this finding (for context — adjust your approach):
 {{ prior_attempts_json }}
 </prior_attempts>
 {% endif %}
+{% if canary_token %}
+An out-of-band canary listener is available for this proof. When crafting sandbox
+commands, use the `QUARRY_CANARY_URL` environment variable as the callback target —
+its value is the full callback URL (including the probe token) and is expanded at
+command-execution time:
+- For SSRF: ensure the target fetches `$QUARRY_CANARY_URL`.
+- For XXE: include `$QUARRY_CANARY_URL` as an external entity reference.
+A request reaching the listener is the out-of-band confirmation of the finding.
+{% endif %}
 Read the relevant source code, then propose targeted probes. Keep proposed specs
 minimal and include only what is necessary to trigger the vulnerability.
 
