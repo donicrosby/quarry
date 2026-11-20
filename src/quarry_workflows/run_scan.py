@@ -174,6 +174,7 @@ from quarry_workflows.coverage_stage import (  # noqa: F401
     skipped_task_records as skipped_task_records,
 )
 from quarry_workflows.exploitation_loop import (
+    build_request_spec,
     evaluate_exploit_success,
     exploit_chain_to_candidate,
 )
@@ -1759,16 +1760,7 @@ class RunScanWorkflow:
             headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
             if session_cookies:
                 headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
-            spec = HttpRequestSpec(
-                method=spec_dict.get("method", "GET"),
-                path=str(spec_dict.get("path", "/")),
-                headers=headers,
-                body=spec_dict.get("body"),
-                auth_profile=spec_dict.get("auth_profile"),
-                multipart_fields=spec_dict.get("multipart_fields"),
-                follow_redirects=bool(spec_dict.get("follow_redirects", False)),
-                cookies=cast("dict[str, str]", spec_dict.get("cookies") or {}),
-            )
+            spec = build_request_spec(spec_dict, headers=headers)
 
             # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
             if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
