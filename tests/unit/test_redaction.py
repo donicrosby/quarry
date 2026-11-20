@@ -248,6 +248,7 @@ def test_jwt_with_long_payload_segment_is_redacted(payload_len: int) -> None:
     assert token not in result.text
     assert result.hits >= 1
 
+
 def test_assignment_pattern_is_linear_on_separatorless_input() -> None:
     """ReDoS regression (impl review F1, t_73697d4c): the assignment pattern's
     UNBOUNDED key-name runs went quadratic on a separator-less key-charset body
@@ -255,7 +256,6 @@ def test_assignment_pattern_is_linear_on_separatorless_input() -> None:
     a response body can reach).  The boundary-guarded, bounded-tail pattern must
     stay fast at attack sizes while every currently-redacted assignment shape
     still redacts."""
-    import time
 
     hostiles = (
         "A" * 16384,
@@ -288,3 +288,32 @@ def test_assignment_pattern_is_linear_on_separatorless_input() -> None:
         "Ask-about-the-new-onboarding-process-policy",
     ):
         assert scrub(line).text == line
+
+    # Coverage-cliff probes (impl review F-A1): the {0,255} tail bound must
+    # not drop shapes the pre-bound pattern redacted.  Key names whose
+    # post-keyword key-charset run is <= 255 chars still redact end-to-end
+    # through scrub(); the documented residual starts one char later.
+    for tail in (63, 64, 254, 255):
+        for body in (
+            f"X_SECRET{'A' * tail}:ZZVQX987654321",
+            f"X_SECRET{'A' * tail}=ZZVQX987654321",
+            f'"MY_SECRET{"A" * tail}": "ZZVQX987654321"',
+        ):
+            result = scrub(body)
+            assert "ZZVQX987654321" not in result.text, (tail, body[:44])
+            assert result.hits >= 1, (tail, body[:44])
+    # The exact F-A1 evidence shape: 65 ``A``s plus the separator underscore
+    # is a 66-char post-keyword run — leaked at {0,64}, must redact now.
+    result = scrub(f"X_SECRET_{'A' * 65}:ZZVQX987654321")
+    assert "ZZVQX987654321" not in result.text
+    assert result.hits >= 1
+    # Tripwire pinning the accepted residual: > 255 post-keyword key-charset
+    # chars are NOT redacted.  If this fails the tail bound moved — update
+    # the redaction.py comment with it.
+    assert scrub(f"X_SECRET{'A' * 256}:ZZVQX987654321").hits == 0
+
+    # The widened tail raises the pattern's constant, so pin linearity in
+    # isolation (min-of-5, same protocol as the JWT pin) at 16x the e2e size.
+    assignment = redaction._ASSIGNMENT_PATTERN  # type: ignore[reportPrivateUsage]
+    elapsed = _fastest_sub(assignment, "SECRET" * 43691)  # 262146 chars
+    assert elapsed < 1.0, f"assignment pattern took {elapsed:.3f}s on a 256k SECRET-run"
