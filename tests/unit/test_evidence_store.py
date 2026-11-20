@@ -270,3 +270,58 @@ def test_registered_runtime_secret_is_scrubbed(tmp_path: Path) -> None:
     finally:
         index.close()
         evidence.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression (S1): bare provider-key shapes and camelCase-keyed values must not
+# survive into the stored evidence blob
+# ---------------------------------------------------------------------------
+#
+# Each shape below matches no Authorization header and no *_KEY/_TOKEN
+# assignment name, so only the bare-key patterns can scrub it. The stored bytes
+# are compared byte-for-byte, not through a rendered view, so a leak in any
+# serialized field is caught.
+
+_PROVIDER_KEY_SHAPES: tuple[bytes, ...] = (
+    b"sk-live-abc123def456ghi789xyzABCDEF",  # OpenAI-style (cf. sk-proj-, sk-ant-)
+    b"AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",  # Google API key
+    b"glpat-abcdefghijklmnopqrstuvwxyz",  # GitLab personal access token
+    b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+    b"dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",  # JWT
+)
+
+
+@pytest.mark.parametrize("secret", _PROVIDER_KEY_SHAPES, ids=["openai", "google", "gitlab", "jwt"])
+def test_provider_key_shapes_are_scrubbed_from_stored_evidence(
+    stores: tuple[CaptureStore, CaptureIndex, EvidenceStore],
+    secret: bytes,
+) -> None:
+    store, index, evidence = stores
+    recorded = CaptureRecorder(store, index).record(_exchange(body=b'{"value": "' + secret + b'"}'))
+    assert secret in store.read_blob(recorded.sha256)  # the capture keeps raw bytes
+
+    (evidence_digest,) = evidence.snapshot_for_finding([recorded.sha256], "finding-key")
+
+    assert secret not in evidence.read(evidence_digest)
+    record = evidence.record(evidence_digest)
+    assert record is not None
+    assert record.scrubber_hit_count >= 1  # the scrub fired, not just for other hits
+
+
+def test_camel_case_assignment_value_is_scrubbed_from_stored_evidence(
+    stores: tuple[CaptureStore, CaptureIndex, EvidenceStore],
+) -> None:
+    # A value matching NO provider shape, keyed by camelCase "apiKey": only the
+    # assignment pattern can remove it, and the key name is kept for context.
+    value = b"Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lm"
+    store, index, evidence = stores
+    recorded = CaptureRecorder(store, index).record(_exchange(body=b'{"apiKey": "' + value + b'"}'))
+
+    (evidence_digest,) = evidence.snapshot_for_finding([recorded.sha256], "finding-camel")
+
+    stored = evidence.read(evidence_digest)
+    assert value not in stored
+    assert b"apiKey" in stored  # key name preserved for analysis context
+    record = evidence.record(evidence_digest)
+    assert record is not None
+    assert record.scrubber_hit_count >= 1
