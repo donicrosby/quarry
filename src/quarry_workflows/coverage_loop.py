@@ -64,6 +64,21 @@ def dedup_new_tasks(
     return result
 
 
+def compose_round_tasks(
+    agent_tasks: list[AgentTask],
+    matrix_tasks: list[AgentTask],
+) -> list[AgentTask]:
+    """The hunt queue for the loop's first round: agent tasks **plus** matrix tasks.
+
+    Matrix-conditioned tasks (W14) are minted inside the live-exploitation track,
+    *before* the coverage loop starts, so they have to be merged into the round
+    queue explicitly — otherwise a flagged endpoint is never hunted. Kept as a
+    helper (rather than an inline list literal) so the merge has a behavioural
+    regression guard: dropping ``matrix_tasks`` here fails its unit test.
+    """
+    return [*agent_tasks, *matrix_tasks]
+
+
 def yield_bar(cumulative_findings: int, coverage_yield_threshold: float) -> int:
     """The minimum new distinct findings a round must add to justify the next one.
 
