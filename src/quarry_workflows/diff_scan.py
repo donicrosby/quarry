@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from quarry.fingerprints import compute_fingerprint
+from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.schemas import (
     ArtifactRef,
     CandidateFinding,
@@ -346,6 +346,14 @@ def _candidate_from_secret_match(match: SecretMatch, *, scan_id: str) -> Candida
         key_name=match.key_name,
         evidence_kind="hardcoded_assignment",
     )
+    # Canonical target key (mirrors the secrets plugin) so the cascade's
+    # free-corroboration check compares keys, never bare affected_component
+    # equality (R1).
+    root_cause_key = compute_root_cause_key(
+        vuln_class=VulnerabilityClass.SECRETS,
+        file_path=match.file_path,
+        sink=match.key_name,
+    )
     return CandidateFinding(
         id=fingerprint[:32],
         scan_id=scan_id,
@@ -355,6 +363,7 @@ def _candidate_from_secret_match(match: SecretMatch, *, scan_id: str) -> Candida
         hypothesis=f"Variable '{match.key_name}' in {match.file_path}:{match.line_number} "
         f"contains a hardcoded value that may be a secret.",
         affected_component=match.file_path,
+        root_cause_key=root_cause_key,
         source_refs=[
             SourceRef(
                 file_path=match.file_path,

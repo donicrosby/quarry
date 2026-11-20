@@ -172,11 +172,19 @@ def _last_invocation_id(client: Any) -> str | None:
 def _same_target(a: CandidateFinding, b: CandidateFinding) -> bool:
     """Whether two findings assert the same target hypothesis.
 
+    The hypothesis is class-specific: the same component cited under a different
+    ``vuln_class`` is a DIFFERENT hypothesis, so a class mismatch is never a
+    match. This closes a cross-class free-corroboration spoof — a prompt-injected
+    hunter that echoes a grounded finding's ``affected_component`` under another
+    class must not harvest step-2 corroboration from it.
+
     ``root_cause_key`` is the canonical target key; when either finding lacks it
     the cited component is compared instead. No key at all on both sides is
     never treated as a match — two keyless findings are not evidence about each
     other.
     """
+    if a.vuln_class != b.vuln_class:
+        return False
     if a.root_cause_key and b.root_cause_key:
         return a.root_cause_key == b.root_cause_key
     return bool(a.affected_component) and a.affected_component == b.affected_component
@@ -247,7 +255,19 @@ def _deterministic_probe_verdict(finding: CandidateFinding) -> str | None:
     the finding already carries (``metadata["live_probe"]``) — status/marker/
     boolean-differential/timing checks only, never a model call. A finding with
     no recorded probe evidence has nothing to evaluate, so the step returns
-    ``None`` and the cascade falls through to the debater.
+    ``None`` and the cascade SKIPS step 4 without spending a probe unit (then
+    falling through to the debater).
+
+    DEVIATION (recorded): no stage in the current pipeline writes
+    ``metadata["live_probe"]`` — the only producer of live-probe evidence would
+    be the AGENTIC_VALIDATE/dynamic-probe stage, which runs AFTER this
+    VALIDATION-stage activity and lands its results as proof artifacts, not on
+    the finding's metadata. Until a producer populates ``metadata["live_probe"]``
+    at (or before) VALIDATION, step 4 is skipped for every finding in production
+    and its ``probe_oracle`` scenarios are reachable only when the evidence is
+    supplied directly (as the integration test does). Plumbing a real probe-
+    evidence producer is a follow-up change; the cascade no longer drains the
+    probe budget on the missing input.
     """
     evidence = _live_probe_evidence(finding.metadata.get("live_probe"))
     if evidence is None:

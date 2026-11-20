@@ -18,6 +18,11 @@ The object is pure orchestration: counter I/O lives behind the injected counter
 handles (``quarry_persistence.counters``) and every live/deterministic check
 lives behind the injected evaluator callables, so the cascade itself performs no
 I/O and stays testable in isolation.
+
+Step 4's ``probe`` evaluator is a pure check over evidence the finding already
+carries, so the cascade consults it BEFORE consuming a probe unit: a ``None``
+result means no evaluator can run for the finding, and the step is skipped
+without spending a unit (recorded as ``probe_unavailable``).
 """
 
 from __future__ import annotations
@@ -58,6 +63,11 @@ class CascadeStep(StrEnum):
     PASSIVE_LOW_SEVERITY = "passive_low_severity"
     PROBE_ORACLE = "probe_oracle"
     PROBE_BUDGET_EXHAUSTED = "probe_budget_exhausted"
+    # Step 4 was not applicable: no deterministic evaluator could run for this
+    # finding (it carries none of the evidence the evaluator reads). Recorded so
+    # the skip is visible and no probe unit is spent on a guaranteed-inconclusive
+    # evaluation.
+    PROBE_UNAVAILABLE = "probe_unavailable"
     PAID_DEBATER = "paid_debater"
     MODEL_BUDGET_EXHAUSTED = "model_budget_exhausted"
 
@@ -141,9 +151,10 @@ class CascadeOutcome(BaseModel):
     # confirming probe/debater) — the signal the coverage ledger promotes on.
     corroborated: bool = False
     # Zero-cost steps the cascade considered but skipped on the way to
-    # ``cascade_step`` (currently only ``probe_budget_exhausted``). Recorded so
-    # the skip is visible in the report even when a later step resolves the
-    # finding.
+    # ``cascade_step`` (``probe_budget_exhausted`` when the probe counter was
+    # zero, ``probe_unavailable`` when no evaluator could run for the finding).
+    # Recorded so the skip is visible in the report even when a later step
+    # resolves the finding.
     skipped_steps: list[CascadeStep] = Field(default_factory=_empty_steps)
 
 
@@ -187,7 +198,9 @@ class Corroborator:
         """Run the cascade over *finding*, returning its definitive outcome.
 
         Steps 1-3 are zero-cost gates. Step 4 spends one probe unit and assigns
-        UNREFUTED on confirm / CONTESTED on refute (stopping there); an
+        UNREFUTED on confirm / CONTESTED on refute (stopping there); when no
+        deterministic evaluator can run for the finding (``probe`` returns
+        ``None``) the step is skipped WITHOUT spending a unit, and an
         inconclusive probe falls through to the debater, exactly as an exhausted
         probe budget does. Step 5 spends one model unit and assigns UNREFUTED on
         confirm / REFUTED on refute. When both counters are exhausted the
@@ -221,10 +234,18 @@ class Corroborator:
                 verdict=CascadeVerdict.CONFIRMED,
             )
 
-        # Step 4 — deterministic evaluator under one probe unit.
+        # Step 4 — deterministic evaluator under one probe unit. The evaluator
+        # is a pure check over evidence the finding already carries (see the
+        # module docstring), so it is safe to consult it BEFORE consuming budget:
+        # a ``None`` result means no evaluator can run for this finding (there is
+        # nothing to evaluate), in which case step 4 is skipped WITHOUT spending
+        # a probe unit — taking one for a guaranteed-inconclusive evaluation
+        # would drain the probe budget for nothing.
         skipped: list[CascadeStep] = []
-        if counters.probe.take():
-            live_verdict = evaluators.probe(finding)
+        live_verdict = evaluators.probe(finding)
+        if live_verdict is None:
+            skipped.append(CascadeStep.PROBE_UNAVAILABLE)
+        elif counters.probe.take():
             if live_verdict == LIVE_CONFIRMED:
                 return CascadeOutcome(
                     credibility=CredibilityLevel.UNREFUTED,
@@ -239,8 +260,8 @@ class Corroborator:
                     cascade_step=CascadeStep.PROBE_ORACLE,
                     verdict=CascadeVerdict.REFUTED,
                 )
-            # Inconclusive probe (or no evaluator for this class): fall through
-            # to the debater, exactly as an exhausted probe budget does.
+            # Inconclusive probe: fall through to the debater, exactly as an
+            # exhausted probe budget does.
         else:
             skipped.append(CascadeStep.PROBE_BUDGET_EXHAUSTED)
 

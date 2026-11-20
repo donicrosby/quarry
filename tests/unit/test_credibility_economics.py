@@ -621,3 +621,171 @@ def test_timing_evaluator_registered_for_command_injection() -> None:
     from quarry_activities.verdict_evaluators import resolve_evaluator
 
     assert resolve_evaluator(VulnerabilityClass.COMMAND_INJECTION) is timing_differential_evaluator
+
+
+# ---------------------------------------------------------------------------
+# R1 — cross-class free-corroboration spoof
+# ---------------------------------------------------------------------------
+
+
+def _stored_db(tmp_path: Path, *findings: CandidateFinding) -> str:
+    """Create a scan DB and persist *findings* for the free-corroboration check."""
+    from quarry.schemas import Scan, ScanProfile, ScanStatus, Target
+    from quarry_persistence import QuarryRepository
+
+    db = tmp_path / "q.db"
+    repo = QuarryRepository(db)
+    repo.create_scan(
+        Scan(
+            id="scan-1",
+            workspace_id="local",
+            target_id="tgt-1",
+            requested_by="test",
+            profile=ScanProfile(id="p", name="p", vuln_classes=[VulnerabilityClass.SQL_INJECTION]),
+            status=ScanStatus.RUNNING,
+            created_at=_NOW,
+        ),
+        Target(id="tgt-1", workspace_id="local", repo_path="/tmp/repo", created_at=_NOW),
+    )
+    for finding in findings:
+        repo.save_candidate_finding(finding)
+    return str(db)
+
+
+def test_cross_class_component_echo_does_not_corroborate(tmp_path: Path) -> None:
+    """R1: a grounded finding on the same component under a DIFFERENT class is
+    NOT corroboration — the target hypothesis is class-specific, so a
+    prompt-injected hunter echoing a grounded finding's ``affected_component``
+    under another class harvests nothing."""
+    from quarry_activities.validate import (
+        _free_corroboration_step,  # type: ignore[reportPrivateUsage]
+    )
+
+    grounded = _finding(
+        fid="g",
+        vuln_class=VulnerabilityClass.SECRETS,
+        grounded=True,
+        affected="src/app.py",
+        root_cause_key=None,
+    )
+    db = _stored_db(tmp_path, grounded)
+    echo = _finding(
+        fid="echo",
+        vuln_class=VulnerabilityClass.SQL_INJECTION,
+        grounded=False,
+        model_id="gpt-4.1-mini",
+        affected="src/app.py",
+        root_cause_key=None,
+    )
+    assert _free_corroboration_step(db, echo) is None
+
+
+def test_same_class_keyless_component_echo_still_corroborates(tmp_path: Path) -> None:
+    """Positive control: the class check must not deny a genuine same-class,
+    same-component match (both keyless) — that is a real free-tool promotion."""
+    from quarry_activities.corroborator import CASCADE_STEP_FREE_TOOL
+    from quarry_activities.validate import (
+        _free_corroboration_step,  # type: ignore[reportPrivateUsage]
+    )
+
+    grounded = _finding(
+        fid="g",
+        vuln_class=VulnerabilityClass.SQL_INJECTION,
+        grounded=True,
+        affected="src/app.py",
+        root_cause_key=None,
+    )
+    db = _stored_db(tmp_path, grounded)
+    echo = _finding(
+        fid="echo",
+        vuln_class=VulnerabilityClass.SQL_INJECTION,
+        grounded=False,
+        model_id="gpt-4.1-mini",
+        affected="src/app.py",
+        root_cause_key=None,
+    )
+    assert _free_corroboration_step(db, echo) is CASCADE_STEP_FREE_TOOL
+
+
+def test_exploitation_chain_finding_gets_canonical_root_cause_key() -> None:
+    """R1: the exploitation site now sets ``root_cause_key`` so the cascade
+    compares keys, never bare component equality."""
+    from quarry.schemas import ExploitStep, HttpRequestSpec
+    from quarry_workflows.exploitation_loop import ExploitChain, exploit_chain_to_candidate
+
+    chain = ExploitChain(
+        scan_id="scan-1",
+        workspace_id="local",
+        vuln_class=VulnerabilityClass.SSRF,
+        proven=True,
+        steps=[
+            ExploitStep(
+                order=0,
+                intent="exploit",
+                request_spec=HttpRequestSpec(method="GET", path="/fetch-local"),
+                status_code=200,
+                confirmed=True,
+            )
+        ],
+    )
+    finding = exploit_chain_to_candidate(
+        chain,
+        finding_id="f",
+        title="t",
+        hypothesis="h",
+        created_by="exploit-loop",
+        created_at=_NOW,
+    )
+    assert finding is not None
+    assert finding.root_cause_key == "ssrf::/fetch-local"
+
+
+# ---------------------------------------------------------------------------
+# R2 — probe budget drained for a guaranteed-inconclusive evaluation
+# ---------------------------------------------------------------------------
+
+
+class _CountingCounter:
+    """A budget counter that records how many times it was consulted."""
+
+    def __init__(self, grants: bool = True) -> None:
+        self.grants = grants
+        self.takes = 0
+
+    def take(self) -> bool:
+        self.takes += 1
+        return self.grants
+
+
+def test_step4_unavailable_skips_without_spending_probe_unit() -> None:
+    """R2: when no deterministic evaluator can run for a finding, step 4 is
+    skipped and NO probe unit is consumed (previously the budget was drained for
+    nothing)."""
+    probe = _CountingCounter()
+    model = _CountingCounter()
+    outcome = Corroborator().decide(
+        _finding(grounded=False, model_id="gpt-4.1-mini"),
+        0.6,
+        CascadeCounters(probe=probe, model=model),
+        _evaluators(probe=None, debater=False),
+    )
+    assert outcome.cascade_step is CascadeStep.PAID_DEBATER
+    assert CascadeStep.PROBE_UNAVAILABLE in outcome.skipped_steps
+    assert probe.takes == 0
+    assert model.takes == 1
+
+
+def test_step4_runnable_probe_spends_exactly_one_unit() -> None:
+    """The availability gate must not weaken a runnable probe: it still costs one
+    unit and the debater is not reached."""
+    probe = _CountingCounter()
+    model = _CountingCounter()
+    outcome = Corroborator().decide(
+        _finding(grounded=False, model_id="gpt-4.1-mini"),
+        0.6,
+        CascadeCounters(probe=probe, model=model),
+        _evaluators(probe=LIVE_CONFIRMED),
+    )
+    assert outcome.cascade_step is CascadeStep.PROBE_ORACLE
+    assert probe.takes == 1
+    assert model.takes == 0
