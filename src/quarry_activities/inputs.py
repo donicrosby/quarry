@@ -479,3 +479,25 @@ class IngestCanaryCallbacksInput(BaseModel):
 
     callbacks: tuple[CanaryCallback, ...] = ()
     hunt_task_id: str = ""
+
+
+class CrawlActivityInput(BaseModel):
+    """Input payload for crawl_activity (live-crawl).
+
+    All values are JSON-serializable primitives at the Temporal boundary.
+    ``rendered_pages`` carries browser-rendered DOM keyed by absolute URL (a
+    JavaScript-rendered SPA the ``httpx`` path cannot see); it is populated by
+    the caller from the W1 ``browser_session`` activity and is ``None`` for the
+    plain HTML crawl. ``allowed_hosts`` is enforced independently inside the
+    activity (ADR-017 Layer 6) — an empty tuple refuses all egress.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_endpoint_json: str  # TargetEndpoint serialized
+    allowed_hosts: tuple[str, ...]
+    seed_paths: tuple[str, ...] = ("/",)
+    max_pages: int = 50
+    max_js_bundles: int = 25
+    scan_id: str = ""
+    rendered_pages: dict[str, str] | None = None

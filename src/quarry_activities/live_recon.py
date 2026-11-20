@@ -19,7 +19,7 @@ import json
 import threading
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from temporalio import activity
@@ -48,6 +48,12 @@ class LiveAttackMapEntry(BaseModel):
     ``code_file`` / ``code_function`` cite the ``EntryPoint`` in the recon
     ``ArchitectureDoc`` that this live endpoint exercises, so downstream
     exploitation is grounded in both the running app and its source.
+
+    ``source`` records where the entry came from: ``code_analysis`` for an
+    endpoint the code-recon / live-recon agent correlated, or ``crawl`` for one
+    a live crawl discovered (a linked page, a form action, or a client-side
+    route baked into a served bundle). It defaults to ``code_analysis`` so every
+    producer that predates the crawler is unchanged.
     """
 
     method: str
@@ -56,6 +62,53 @@ class LiveAttackMapEntry(BaseModel):
     code_function: str = ""
     auth_required: bool = False
     notes: str = ""
+    params: list[str] = []
+    source: Literal["code_analysis", "crawl"] = "code_analysis"
+
+
+_CRAWL_REACHED_NOTE = "also reached by crawl"
+
+
+def _map_key(entry: LiveAttackMapEntry) -> tuple[str, str]:
+    return (entry.method.upper(), entry.path)
+
+
+def merge_attack_maps(
+    code_entries: list[LiveAttackMapEntry],
+    crawl_entries: list[LiveAttackMapEntry],
+) -> list[LiveAttackMapEntry]:
+    """Merge code-analysis and crawl attack maps without losing provenance.
+
+    Entries are keyed by ``(method, path)``. Code-analysis entries are emitted
+    first in their original order and always win the code-correlation fields; a
+    crawl entry that reaches the same endpoint is folded in by annotating the
+    code entry (never duplicating it). Crawl-only entries follow, in their
+    original order. The crawl entry's ``source="crawl"`` does not overwrite the
+    cited code entry, so a downstream consumer can still tell that a live crawl
+    independently reached the endpoint.
+    """
+    merged: list[LiveAttackMapEntry] = []
+    by_key: dict[tuple[str, str], LiveAttackMapEntry] = {}
+
+    for entry in code_entries:
+        key = _map_key(entry)
+        if key in by_key:
+            continue
+        by_key[key] = entry
+        merged.append(entry)
+
+    for entry in crawl_entries:
+        key = _map_key(entry)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = entry
+            merged.append(entry)
+            continue
+        if _CRAWL_REACHED_NOTE not in existing.notes:
+            annotation = _CRAWL_REACHED_NOTE
+            existing.notes = f"{existing.notes} ({annotation})" if existing.notes else annotation
+
+    return merged
 
 
 class LiveReconResponse(BaseModel):
