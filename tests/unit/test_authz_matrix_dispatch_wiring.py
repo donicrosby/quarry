@@ -7,7 +7,9 @@ hunt/validate MockModelClient; see ``test_lifecycle_hooks_e2e.py``) — is
 **pure-helper tests plus source-level contract assertions** on the workflow body
 (see ``test_workflow_differential_dispatch.py``). These tests lock:
 
-- an explicit ``auth_profile`` bypasses persona selection;
+- an explicit ``auth_profile`` bypasses persona selection, but a name that does
+  not resolve in a configured ``AuthProfileSet`` is refused before egress
+  (fail-closed, matching the tool-call seam); an unconfigured set passes through;
 - a no-match request is refused before egress with a recorded reason;
 - zero personas behave exactly like the pre-change path (no persona refusals);
 - the VALIDATION dynamic-validation and live-prove egress paths apply no persona
@@ -30,6 +32,9 @@ from quarry.schemas import (
     AgentTask,
     ArtifactKind,
     ArtifactRef,
+    AuthProfile,
+    AuthProfileKind,
+    AuthProfileSet,
     ExploitStep,
     HttpRequestSpec,
     PersonaScope,
@@ -86,6 +91,12 @@ def _spec(path: str, *, auth_profile: str | None = None) -> HttpRequestSpec:
     return HttpRequestSpec(method="GET", path=path, auth_profile=auth_profile)
 
 
+def _profile_set(*names: str) -> AuthProfileSet:
+    return AuthProfileSet(
+        profiles=[AuthProfile(name=n, kind=AuthProfileKind.BEARER) for n in names]
+    )
+
+
 def _source() -> str:
     return _RUN_SCAN.read_text(encoding="utf-8")
 
@@ -137,6 +148,71 @@ class TestPlanPersonaDispatch:
         assert refusal is None
         assert out.auth_profile == "explicit"
 
+    def test_dangling_explicit_auth_profile_is_refused_before_egress(self) -> None:
+        """A named profile absent from the configured set must not reach egress.
+
+        ``dynamic_http`` silently skips credential injection for an unresolved
+        profile and sends the request UNAUTHENTICATED — so a target-steerable
+        model naming a non-existent profile would otherwise produce an
+        unauthenticated live probe mis-attributed as authenticated. Fail-closed,
+        mirroring the tool-call seam (``ToolRunner._check_auth_profile``).
+        """
+        authz = _authz([_persona()])
+        out, refusal = plan_persona_dispatch(
+            _spec("/public", auth_profile="ghost-token"),
+            authz,
+            host=_HOST,
+            path="/public",
+            auth_profile_set=_profile_set("user-token"),
+        )
+        assert refusal is not None
+        assert "does not resolve" in refusal
+        assert "ghost-token" in refusal
+        # The spec is returned unchanged; the refusal is what stops the egress.
+        assert out.auth_profile == "ghost-token"
+        step = ExploitStep(
+            order=0,
+            intent="exploit",
+            request_spec=out,
+            dispatched=False,
+            confirmed=False,
+            notes=refusal,
+        )
+        assert step.dispatched is False
+        assert step.notes == refusal
+
+    def test_resolvable_explicit_auth_profile_still_bypasses_selection(self) -> None:
+        """A ref present in the configured set dispatches unchanged (bypass kept)."""
+        authz = _authz([_persona(allowed_paths=["/admin"])])
+        out, refusal = plan_persona_dispatch(
+            _spec("/public", auth_profile="explicit"),
+            authz,
+            host=_HOST,
+            path="/public",
+            auth_profile_set=_profile_set("explicit"),
+        )
+        assert refusal is None
+        assert out.auth_profile == "explicit"
+
+    def test_unconfigured_auth_profile_set_passes_explicit_ref_through(self) -> None:
+        """No AuthProfileSet configured (``auth_profile_set_json=None``) → pass through.
+
+        Posture decision: an explicit ref is NOT refused when the scan loaded no
+        set, matching the tool-call seam (``ToolRunner._check_auth_profile``
+        returns ``None`` when unconfigured). With no set there is no profile to
+        resolve against, and ``dynamic_http`` injects no credential either way.
+        """
+        authz = _authz([_persona()])
+        out, refusal = plan_persona_dispatch(
+            _spec("/public", auth_profile="ghost-token"),
+            authz,
+            host=_HOST,
+            path="/public",
+            auth_profile_set=None,
+        )
+        assert refusal is None
+        assert out.auth_profile == "ghost-token"
+
     def test_no_match_refusal_reason_is_recorded_on_the_step(self) -> None:
         authz = _authz([_persona(allowed_paths=["/admin"])])
         out, refusal = plan_persona_dispatch(_spec("/public"), authz, host=_HOST, path="/public")
@@ -183,6 +259,12 @@ class TestDispatchWiringSource:
         assert "persona_refusal" in body
         assert "dispatched=False" in body
         assert "notes=persona_refusal" in body
+
+    def test_exploit_chain_threads_the_auth_profile_set(self) -> None:
+        """The explicit-ref refusal needs the scan's AuthProfileSet at the seam."""
+        body = _function_source(_source(), "_exploit_class_chain")
+        assert "AuthProfileSet.model_validate_json(scan_input.auth_profiles_json)" in body
+        assert "auth_profile_set=auth_profile_set" in body
 
     def test_validation_and_prove_egress_apply_no_persona_selection(self) -> None:
         source = _source()

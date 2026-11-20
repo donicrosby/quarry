@@ -1915,6 +1915,16 @@ class RunScanWorkflow:
         """
         steps: list[ExploitStep] = []
         session_cookies: dict[str, str] = {}
+        # Resolve the scan's AuthProfileSet once, so an explicit ``auth_profile``
+        # on a model-proposed step (untrusted output) that does not resolve is
+        # refused before egress — fail-closed, mirroring the tool-call seam
+        # (``ToolRunner._check_auth_profile``) and the startup persona guard.
+        # ``None`` (no set configured) passes through, matching the tool seam.
+        auth_profile_set = (
+            AuthProfileSet.model_validate_json(scan_input.auth_profiles_json)
+            if scan_input.auth_profiles_json
+            else None
+        )
         # Session-token analysis findings collected from this class's auth-bearing
         # captures; returned alongside the chain and registered by the caller in
         # the deterministic post-gather pass (task 7.2).
@@ -1984,11 +1994,15 @@ class RunScanWorkflow:
 
             # Persona-scoped dispatch (W14) — workflow-side, immediately after the
             # request_in_scope check (D4 precedent). Pure helper: an explicit
-            # auth_profile bypasses selection; with personas declared and no match
-            # the request is refused before egress (fail-closed, same refusal
-            # shape).
+            # auth_profile bypasses selection (but must resolve when a set is
+            # configured); with personas declared and no match the request is
+            # refused before egress (fail-closed, same refusal shape).
             spec, persona_refusal = plan_persona_dispatch(
-                spec, authorization, host=target_ep.host, path=spec.path
+                spec,
+                authorization,
+                host=target_ep.host,
+                path=spec.path,
+                auth_profile_set=auth_profile_set,
             )
             if persona_refusal is not None:
                 steps.append(
@@ -4709,13 +4723,19 @@ def plan_persona_dispatch(
     *,
     host: str,
     path: str,
+    auth_profile_set: AuthProfileSet | None = None,
 ) -> tuple[HttpRequestSpec, str | None]:
     """Resolve the persona-scoped outbound ``spec`` for the live-exploit chain (pure).
 
     Workflow-side only (D4 precedent — the ``http-request`` activity never selects
     personas). Rules, in order:
 
-    - an explicit ``spec.auth_profile`` bypasses persona selection entirely;
+    - an explicit ``spec.auth_profile`` bypasses persona selection entirely, but
+      when a scan ``AuthProfileSet`` is configured the name must resolve in it:
+      a dangling explicit ref (target-steerable model output) is refused before
+      egress (fail-closed, mirroring ``ToolRunner._check_auth_profile`` and the
+      startup persona-profile guard). An unconfigured set (``None``) passes
+      through, matching the tool seam;
     - with no personas declared the spec is returned unchanged (backward
       compatibility — no persona refusal is ever emitted);
     - otherwise the first persona whose host+path scope covers the request
@@ -4727,7 +4747,15 @@ def plan_persona_dispatch(
     Returns ``(spec, None)`` when the request may dispatch, or
     ``(spec, "<refusal reason>")`` when it must be refused.
     """
-    if spec.auth_profile is not None or not authorization.personas:
+    if spec.auth_profile is not None:
+        # Explicit ref: persona selection is skipped, but a dangling name must
+        # not reach egress (``dynamic_http`` would silently send it
+        # UNAUTHENTICATED). Refuse only when a set is configured — matching the
+        # tool-call seam's posture for an unconfigured set.
+        if auth_profile_set is not None and auth_profile_set.get(spec.auth_profile) is None:
+            return spec, f"refused: auth_profile '{spec.auth_profile}' does not resolve"
+        return spec, None
+    if not authorization.personas:
         return spec, None
     persona = persona_for_request(authorization, host=host, path=path)
     if persona is None:
