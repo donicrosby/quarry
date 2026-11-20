@@ -106,9 +106,17 @@ services:
       - |
         cat /etc/ssl/certs/ca-certificates.crt /mitmproxy-certs/mitmproxy-ca-cert.pem > /tmp/quarry-ca-bundle.pem
         exec quarry worker
+    # Memory cap for the worker container.  The browser-capable (quarry:dynamic)
+    # worker drives untrusted page JavaScript; without a cap a runaway Chromium
+    # can exhaust the host.  The kernel OOM-killer terminates the worker instead.
+    mem_limit: 2g
     environment:
       QUARRY_TEMPORAL_ADDRESS: temporal:7233
       QUARRY_DB_PATH: /data/quarry.db
+      # Container memory cap applied to each Tier-2 sandbox container the worker
+      # spawns (Docker --memory value); browser-capable sandboxes run on the
+      # per-policy restricted egress network and are capped here as well.
+      QUARRY_SANDBOX_MEMORY: ${QUARRY_SANDBOX_MEMORY:-2g}
       # Optional model/scan config + git auth — passed through from the host/.env.
       QUARRY_PANEL: ${QUARRY_PANEL:-}
       CHUTES_API_KEY: ${CHUTES_API_KEY:-}

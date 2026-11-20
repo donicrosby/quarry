@@ -146,12 +146,13 @@ def go(url: str = "/health"):
     return RedirectResponse(url=url)
 
 
-@app.post("/upload")
-def upload(filename: str, content: str) -> dict[str, str]:
-    """Unrestricted upload: the filename's extension is never validated.
+def _store_upload(filename: str, content: str) -> dict[str, str]:
+    """Store an uploaded file under the upload dir with NO validation.
 
-    Files land under the system temp dir (never inside the scanned repo) so the
-    fixture stays side-effect free for the repo snapshot golden test.
+    Unrestricted upload: the client-supplied filename (extension and path
+    traversal) and the content are stored verbatim. Files land under the system
+    temp dir (never inside the scanned repo) so the fixture stays side-effect
+    free for the repo snapshot golden test.
     """
     import tempfile
     from pathlib import Path as _Path
@@ -161,3 +162,74 @@ def upload(filename: str, content: str) -> dict[str, str]:
     stored = upload_dir / filename
     stored.write_text(content, encoding="utf-8")
     return {"stored": str(stored), "extension": stored.suffix}
+
+
+def upload(filename: str, content: str) -> dict[str, str]:
+    """Unrestricted upload helper: the filename's extension is never validated.
+
+    Kept as a plain function (not the route) so the benchmark fixture can call
+    the sink directly; the ``/upload`` route below accepts a real multipart
+    ``file`` part and stores it through the same sink.
+    """
+    return _store_upload(filename, content)
+
+
+def _multipart_file_part(content_type: str, body: bytes) -> tuple[str, str]:
+    """Extract the first file part's (filename, text) from a multipart body.
+
+    A deliberately tiny parser so the fixture accepts a real
+    ``multipart/form-data`` upload without pulling in a form-parsing dependency.
+    Only the first part carrying a ``filename`` is returned; the declared
+    ``Content-Type`` of the part is ignored, exactly as the vulnerable sink does.
+    """
+    marker = "boundary="
+    if marker not in content_type:
+        raise HTTPException(status_code=422, detail="multipart/form-data required")
+    boundary = content_type.split(marker, 1)[1].strip().strip('"').encode()
+    for part in body.split(b"--" + boundary):
+        if b"Content-Disposition:" not in part or b'filename="' not in part:
+            continue
+        head, sep, payload = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        filename = head.split(b'filename="', 1)[1].split(b'"', 1)[0].decode("utf-8", "replace")
+        return filename, payload.rstrip(b"\r\n").decode("utf-8", "replace")
+    raise HTTPException(status_code=422, detail="a multipart 'file' part is required")
+
+
+@app.post("/upload")
+async def upload_route(request: Request) -> dict[str, str]:
+    """Unrestricted upload: the filename's extension and the declared
+    content-type are never validated.
+
+    Stores the multipart/form-data ``file`` part the dynamic upload probe forges
+    verbatim; a request with no ``file`` part is a 422. The part's declared
+    ``Content-Type`` is ignored (never sniffed or checked).
+    """
+    body = await request.body()
+    filename, content = _multipart_file_part(request.headers.get("content-type", ""), body)
+    return _store_upload(filename, content)
+
+
+@app.get("/uploads/{filename:path}")
+def serve_upload(filename: str) -> dict[str, str]:
+    """Serving sink: returns a stored upload's bytes and extension verbatim.
+
+    Pairs with ``/upload`` so a live probe can fetch an uploaded file back and
+    confirm the sink stored it unsanitised: the dangerous extension survives and
+    the content is served with no ``Content-Disposition`` hardening. The stored
+    name is joined to the upload dir without sanitisation, so a traversal name
+    also reads outside it.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    upload_dir = _Path(tempfile.gettempdir()) / "quarry-vulnerable-uploads"
+    stored = upload_dir / filename
+    if not stored.is_file():
+        raise HTTPException(status_code=404, detail="Unknown upload")
+    return {
+        "name": filename,
+        "content": stored.read_text(encoding="utf-8"),
+        "extension": stored.suffix,
+    }

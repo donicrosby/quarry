@@ -6,7 +6,7 @@ import re
 import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -111,6 +111,9 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # Supply-chain risk detected statically from dependency manifests by the
+    # deterministic dependency-risk scanner.
+    SUPPLY_CHAIN = "supply_chain"
     # CLI-side classes (tempfile-race-terminal-escape change): unsafe temporary
     # file creation in shared directories, and attacker-controlled input echoed
     # to a terminal without ANSI/escape-sequence sanitization.
@@ -215,6 +218,8 @@ class ArtifactKind(StrEnum):
     # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
     ARCHITECTURE_DOC = "architecture_doc"
     HUNT_HANDOFF = "hunt_handoff"
+    # per-agent-durable-logs: append-only per-agent execution log (JSONL).
+    AGENT_LOG = "agent_log"
     # traffic-capture-verified-evidence: redacted, hash-verified evidence blob
     # snapshotted from a capture exchange. Quarantined proof content.
     EVIDENCE = "evidence"
@@ -748,6 +753,77 @@ def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
     return []
 
 
+def _empty_ints() -> list[int]:
+    return []
+
+
+LEGACY_SEVERITY_RATIONALE_TEXT = "No structured severity rationale from pre-contract scan."
+
+MODEL_OMITTED_SEVERITY_RATIONALE_TEXT = "Model did not provide structured severity rationale"
+
+
+class SeverityRationale(BaseModel):
+    """Structured severity justification carried by every finding (finding-contract).
+
+    Decomposes a severity label into **impact** (what the attacker gains),
+    **exploitability** (how hard the bug is to trigger) and **reachability**
+    (whether an attacker can reach the vulnerable code), so a CRITICAL from one
+    hunter means the same thing as a CRITICAL from another (ADR-026 rule 4 —
+    findings are data, not prose).
+
+    ``evidence_refs`` are indices into the finding's ``evidence_path`` (or, when
+    there is no ordered path, ``source_refs``) — the same shape as the existing
+    evidence pointers, never free text.
+
+    Two fallback markers keep the report honest instead of fabricating prose:
+    ``legacy`` marks a finding persisted before the contract existed, and
+    ``model_omitted`` marks slots the model did not supply (or emitters that
+    have no model-supplied rationale at all).
+    """
+
+    impact: str
+    exploitability: str
+    reachability: str
+    evidence_refs: list[int] = Field(default_factory=_empty_ints)
+    legacy: bool = False
+    model_omitted: bool = False
+
+    @field_validator("impact", "exploitability", "reachability")
+    @classmethod
+    def _require_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("severity rationale slots must be non-empty")
+        return value
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def _require_valid_indices(cls, value: list[int]) -> list[int]:
+        for index in value:
+            if index < 0:
+                raise ValueError("evidence_refs entries must be non-negative indices")
+        return value
+
+
+def legacy_severity_rationale() -> SeverityRationale:
+    """Backfill rationale for findings persisted before the contract existed."""
+    return SeverityRationale(
+        impact=LEGACY_SEVERITY_RATIONALE_TEXT,
+        exploitability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        reachability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        legacy=True,
+    )
+
+
+def model_omitted_severity_rationale() -> SeverityRationale:
+    """Fallback rationale when no model-supplied slots exist for a finding."""
+    return SeverityRationale(
+        impact=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        exploitability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        reachability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        model_omitted=True,
+    )
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
@@ -766,6 +842,14 @@ class CandidateFinding(BaseModel):
     confidence: Confidence = Confidence.LOW
     severity: Severity = Severity.MEDIUM
     severity_adjusted: Severity | None = None
+    # Structured severity justification (finding-contract). Required — an
+    # explicit ``severity_rationale=None`` is rejected; a payload persisted
+    # before the contract existed backfills to a ``legacy`` rationale.
+    # ``default_factory`` carries the same legacy backfill for statically typed
+    # call sites (pyright strict treats a defaultless pydantic field as a
+    # required constructor argument); the before-validator below is the
+    # normative backfill for raw payloads.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     # Calibration fields (candidate-precision-and-calibration). ``raw_severity``
     # is the hunter's severity and is never overwritten by calibration;
     # ``calibrated_severity``/``calibrated_priority`` are None until the
@@ -793,6 +877,23 @@ class CandidateFinding(BaseModel):
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        # Pre-contract findings were persisted without the key entirely. An
+        # explicit ``severity_rationale=None`` is NOT backfilled — the field is
+        # non-optional and must fail validation at the schema boundary.
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
+
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> CandidateFinding:
         # Pre-calibration findings only set ``severity``; mirror it into
@@ -810,6 +911,9 @@ class FinalFinding(BaseModel):
     vuln_class: VulnerabilityClass
     severity: Severity
     severity_adjusted: Severity | None = None
+    # Structured severity justification copied verbatim from the candidate
+    # (finding-contract). Required; pre-contract payloads backfill to legacy.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     raw_severity: Severity | None = None
     calibrated_severity: Severity | None = None
     calibrated_priority: int | None = None
@@ -826,6 +930,20 @@ class FinalFinding(BaseModel):
     triage_label: TriageLabel | None = None
     remediation: str | None = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
 
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> FinalFinding:
@@ -1719,6 +1837,19 @@ class HttpRequestSpec(BaseModel):
     # Per-request cookie injection; values are registered with the run scrubber
     # and redacted from stored request artifacts.
     cookies: dict[str, str] = Field(default_factory=dict)
+    # Timing-oracle annotations (verify-oracle-upgrade), declared by the
+    # proposing agent alongside the delay payload. injected_delay_ms opts the
+    # probe into the statistical timing path; absent leaves the hardened
+    # differential path (the timing path never guesses a delay).
+    injected_delay_ms: int | None = None
+    # The exact payload substrings this probe injects, declared by the agent
+    # alongside the payload. Differential evaluators normalize these out of the
+    # response bodies (a reflected payload must not read as a difference).
+    injected_values: tuple[str, ...] | None = None
+    # Optional hunter-supplied success marker. When present, the differential
+    # evaluator tests for it in the raw response bodies before generic
+    # heuristics; present-in-attack-only decides the finding on its own.
+    indicator: str | None = None
 
     @model_validator(mode="after")
     def _warn_multipart_and_body(self) -> HttpRequestSpec:
@@ -1859,16 +1990,30 @@ class ExploitChain(BaseModel):
 # Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
 # ---------------------------------------------------------------------------
 
+# Allowlisted environment-variable names and their permitted values for target
+# subprocess execution.  Both the names and the values are fixed and
+# infrastructure-provided: the prove agent selects from this map and never
+# supplies a free-form value.  LD_PRELOAD / LD_LIBRARY_PATH are deliberately
+# absent (no dynamic-loader injection surface) and PATH values are restricted to
+# standard system directories.
+ENV_VAR_ALLOWLIST: dict[str, frozenset[str]] = {
+    "EDITOR": frozenset({"/bin/sh"}),
+    "PATH": frozenset({"/usr/local/bin:/usr/bin:/bin"}),
+}
+
 
 class EnvProfile(StrEnum):
     """Named, vetted environment profiles for sandbox execution.
 
     The prove agent picks a NAME, never raw env-var values.  Credential injection
     (QUARRY_INJECTED_CRED_*) is the sole exception and is resolved worker-side (ADR-018).
+
+    REPO_READONLY is deferred: until a fixed, enumerated resolution map ships, any
+    env_profile other than NONE is refused at the tool-call boundary (fail-safe).
     """
 
     NONE = "none"  # empty env — default; tightest containment
-    REPO_READONLY = "repo_readonly"  # minimal PATH + repo root only, no credentials
+    REPO_READONLY = "repo_readonly"  # deferred: no resolution implementation yet
 
 
 class SandboxExecSpec(BaseModel):
@@ -1877,16 +2022,39 @@ class SandboxExecSpec(BaseModel):
     Parallels HttpRequestSpec: carries no inline secrets; auth_profile and env_profile
     are NAMES resolved worker-side at dispatch (ADR-018).  input_files are crafted
     attacker-controlled files staged into the sandbox working dir before execution.
+    env carries allowlisted variables (fixed, infrastructure-provided values) and is
+    applied to the target subprocess only — the sandbox runtime never inherits it.
     """
 
     command: str
     args: list[str] = Field(default_factory=list)
     stdin: str | None = None
     env_profile: EnvProfile = EnvProfile.NONE
+    env: dict[str, str] = Field(default_factory=dict)  # allowlisted names + values only
     cwd: str = "."  # relative to sandbox working dir; restricted worker-side
     input_files: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = 30  # hard-capped worker-side (max 60 s)
     auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("env")
+    @classmethod
+    def _reject_non_allowlisted_env(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject env names/values outside the fixed ENV_VAR_ALLOWLIST."""
+        for name, value in v.items():
+            allowed_values = ENV_VAR_ALLOWLIST.get(name)
+            if allowed_values is None:
+                msg = (
+                    f"env var name '{name}' is not on the sandbox allowlist. "
+                    f"Permitted names: {sorted(ENV_VAR_ALLOWLIST)}"
+                )
+                raise ValueError(msg)
+            if value not in allowed_values:
+                msg = (
+                    f"env var value for '{name}' is not allowed. "
+                    f"Permitted values: {sorted(allowed_values)}"
+                )
+                raise ValueError(msg)
+        return v
 
     @field_validator("auth_profile")
     @classmethod
@@ -1946,14 +2114,14 @@ class SandboxExecCapture(BaseModel):
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
     timed_out: bool = False
+    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
+    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
     # The stored ArtifactRefs (stdout, stderr) as the quarantine pipeline
     # returned them, so the pure workflow can attach the recorded sha256/size to
     # the proof artifact's evidence refs. Empty for captures built before this
     # field existed (legacy/replay payloads) — the workflow then reconstructs
     # id-only refs.
     artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
-    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
-    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
 
 
 class ProveCorpus(BaseModel):

@@ -1,5 +1,6 @@
 """Quarry configuration management."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,7 +60,22 @@ class QuarrySettings(BaseSettings):
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+    # Container memory cap for the Tier-2 sandbox (Docker ``--memory`` value,
+    # e.g. "2g").  Empty => the backend default (DEFAULT_MEMORY_LIMIT).  A
+    # browser-capable worker executing untrusted page JS must be capped so a
+    # runaway Chromium is OOM-killed rather than starving the host.
+    # env: QUARRY_SANDBOX_MEMORY
+    sandbox_memory: str = ""
 
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
+    # Dependency-manifest supply-chain scanner. Configurable typosquat name
+    # patterns; the check is a no-op until at least one pattern is configured.
+    # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')
+    typosquat_patterns: list[str] = Field(default_factory=list)
     # Proof-artifact quarantine (D6 / proof-artifact-quarantine). Per-kind size
     # limits in bytes, enforced before any artifact byte is accepted; the default
     # covers kinds without an explicit limit. A quarantined proof artifact is
@@ -75,12 +91,6 @@ class QuarrySettings(BaseSettings):
     # env: QUARRY_QUARANTINE_MAX_ARTIFACT_BYTES
     quarantine_remote_backend: str = ""  # env: QUARRY_QUARANTINE_REMOTE_BACKEND
     malware_scanner: str = ""  # env: QUARRY_MALWARE_SCANNER ("" = no scanner configured)
-
-    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
-    # a single pinned host interface the target can reach — never a wildcard.
-    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
-    canary_host: str = ""
-    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
 
     # Traffic-capture recording proxy + verified evidence store
     # (traffic-capture-verified-evidence). The capture root is the shared volume

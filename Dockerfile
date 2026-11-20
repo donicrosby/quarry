@@ -84,7 +84,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     QUARRY_DB_PATH=/data/quarry.db
 EXPOSE 8000
 VOLUME ["/data"]
-USER quarry
+USER 1000
 # Default to the API server with its embedded worker disabled; the dedicated
 # worker service owns the Temporal task queue (avoids a dual-worker race).
 CMD ["quarry", "server", "--no-worker"]
@@ -101,7 +101,7 @@ FROM runtime AS quarry-dynamic
 ARG PLAYWRIGHT_VERSION=1.49.0
 # uv binary for installing the extra into the existing uv-managed venv.
 COPY --from=uvbin /uv /bin/uv
-USER root
+USER 0
 # Browsers land outside the venv in a world-readable path so they survive the
 # uv-managed venv and are reachable by the unprivileged `quarry` user.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
@@ -110,6 +110,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /app/.venv/bin/python "playwright==${PLAYWRIGHT_VERSION}" \
     && /app/.venv/bin/python -m playwright install --with-deps chromium \
     && chmod -R a+rX /opt/playwright
-USER quarry
+USER 1000
 # This stage is the dedicated dynamic (browser) worker.
 CMD ["quarry", "worker"]
