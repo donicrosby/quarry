@@ -1,6 +1,14 @@
 """Tests for the redaction scrubber chokepoint."""
 
+from __future__ import annotations
+
+import re
+import time
+
+import pytest
+
 from quarry.schemas import SENSITIVE_ENV_KEYS
+from quarry_models import redaction
 from quarry_models.redaction import Scrubber, scrub
 
 
@@ -166,18 +174,55 @@ def test_bare_key_prefixes_do_not_mangle_ordinary_prose() -> None:
         assert scrub(line).text == line
 
 
-def test_jwt_pattern_is_linear_on_eyej_repeated_input() -> None:
-    """ReDoS regression (impl review F1, t_a9f7f456): the unbounded JWT header/
-    payload quantifiers went quadratic on ``eyJ``-repeated hostile bodies
-    (0.11s @ 8k -> 6.3s @ 64k, ~25min @ 1MB).  The bounded pattern must stay
-    linear-ish and fast at attack sizes, while still redacting a real JWT."""
-    import time
+def _jwt_pattern() -> re.Pattern[str]:
+    """The scrubber's JWT-shape pattern object (the unit this pin measures).
 
-    hostile = "eyJ" * 65536
-    start = time.monotonic()
-    scrub(hostile)
-    elapsed = time.monotonic() - start
-    assert elapsed < 1.0, f"scrub took {elapsed:.3f}s on 64k eyJ-repeated input"
+    ``scrub()`` and ``Scrubber.scrub()`` apply every pattern in turn, so the
+    compiled JWT pattern is reached for directly to time it in isolation.
+    """
+    patterns = redaction._PATTERNS  # type: ignore[reportPrivateUsage]
+    return next(p for p in patterns if "eyJ" in p.pattern)
+
+
+def _fastest_sub(pattern: re.Pattern[str], text: str, repeats: int = 5) -> float:
+    """Fastest of ``repeats`` wall-clock timings of ``pattern.sub`` on ``text``.
+
+    The minimum, not the mean: a transient co-tenant scheduling stall inflates a
+    single sample but cannot move the fastest one, so the pin does not flake.
+    """
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.monotonic()
+        pattern.sub("[REDACTED]", text)
+        best = min(best, time.monotonic() - start)
+    return best
+
+
+# Hostile ``eyJ``-driven bodies (~196KB each): a dotless run, dotted units, and
+# a pre-dot cluster with a long dot-free tail.  The bounded header quantifier is
+# linear on all three; the old unbounded quantifiers were quadratic on the first.
+_JWT_HOSTILE_BODIES: tuple[str, ...] = (
+    "eyJ" * 65536,  # 196608 bytes — the shape that wedged scrub() before F1
+    "eyJ." * 32768,  # dotted units
+    "eyJ" * 32768 + "." + "A" * 98274,  # pre-dot cluster + long dot-free tail
+)
+
+
+def test_jwt_pattern_is_linear_on_eyej_repeated_input() -> None:
+    """ReDoS regression (impl review F1): the unbounded JWT header/payload
+    quantifiers went quadratic on ``eyJ``-repeated hostile bodies (0.11s @ 8k ->
+    6.3s @ 64k, ~25min @ 1MB).  The JWT pattern itself must stay linear at
+    attack sizes.
+
+    Timed in isolation, not through ``scrub()``: the chokepoint also runs the
+    pre-existing assignment pattern, which is separately quadratic on
+    separator-less input (its own lane), so a ``scrub()``-level timing assert
+    would measure that pattern instead of the JWT one.
+    """
+    pattern = _jwt_pattern()
+    for body in _JWT_HOSTILE_BODIES:
+        elapsed = _fastest_sub(pattern, body)
+        assert elapsed < 1.0, f"JWT pattern took {elapsed:.3f}s on a {len(body)}-byte hostile body"
 
     legit = (
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
@@ -186,3 +231,19 @@ def test_jwt_pattern_is_linear_on_eyej_repeated_input() -> None:
     scrubbed = scrub(f"token {legit} trailing")
     assert legit not in scrubbed.text
     assert scrubbed.hits >= 1
+
+
+@pytest.mark.parametrize("payload_len", [516, 1200, 4000, 5500])
+def test_jwt_with_long_payload_segment_is_redacted(payload_len: int) -> None:
+    """F2-R2 regression (impl review): bounding the payload quantifier at
+    {1,512} let any JWT whose payload segment exceeded 515 chars survive whole.
+    Real access/id tokens carry multi-KB base64url payloads, so the payload
+    quantifier is left unbounded and these must be redacted in full."""
+    header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    payload = "eyJ" + "A" * (payload_len - 3)
+    token = f"{header}.{payload}.{'S' * 43}"
+
+    result = scrub(f"token {token} trailing")
+
+    assert token not in result.text
+    assert result.hits >= 1
