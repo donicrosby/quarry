@@ -31,7 +31,7 @@ from quarry_activities.target import start_local_target, terminate_local_target
 
 REPO_ROOT = Path("examples/vulnerable-fastapi")
 _SCAN_ID = "scan-golden-file-upload-chains"
-_MARKER = "QRYMARKER-W13"
+_MARKER = "QRYMARKER"
 _UPLOAD_DIR = Path(tempfile.gettempdir()) / "quarry-vulnerable-uploads"
 
 
@@ -86,10 +86,10 @@ def _upload_spec(filename: str, value: str, content_type: str) -> HttpRequestSpe
 @pytest.mark.skipif(not REPO_ROOT.exists(), reason="vulnerable-fastapi example not available")
 async def test_upload_then_fetch_back_reads_marker(tmp_path: Path) -> None:
     with _launched_target() as port:
-        name = f"w13-roundtrip-{port}.txt"
+        name = f"upload-roundtrip-{port}.txt"
         upload = _upload_spec(name, _MARKER, "text/plain")
         up = await http_request_activity(
-            _activity_input(upload, port=port, tmp_path=tmp_path, finding="w13-upload")
+            _activity_input(upload, port=port, tmp_path=tmp_path, finding="upload-step")
         )
         assert up.status_code == 200
         stored = json.loads(_body(up, tmp_path))
@@ -97,7 +97,7 @@ async def test_upload_then_fetch_back_reads_marker(tmp_path: Path) -> None:
 
         fetch = HttpRequestSpec(method="GET", path=f"/uploads/{name}")
         got = await http_request_activity(
-            _activity_input(fetch, port=port, tmp_path=tmp_path, finding="w13-fetch")
+            _activity_input(fetch, port=port, tmp_path=tmp_path, finding="fetchback-step")
         )
 
     assert got.status_code == 200
@@ -108,10 +108,10 @@ async def test_upload_then_fetch_back_reads_marker(tmp_path: Path) -> None:
 @pytest.mark.skipif(not REPO_ROOT.exists(), reason="vulnerable-fastapi example not available")
 async def test_php_shell_extension_is_accepted(tmp_path: Path) -> None:
     with _launched_target() as port:
-        name = f"w13-shell-{port}.php"
+        name = f"upload-shell-{port}.php"
         spec = _upload_spec(name, "<?php echo 1; ?>", "application/x-php")
         capture = await http_request_activity(
-            _activity_input(spec, port=port, tmp_path=tmp_path, finding="w13-shell")
+            _activity_input(spec, port=port, tmp_path=tmp_path, finding="shell-step")
         )
 
     assert capture.status_code == 200
@@ -125,10 +125,10 @@ async def test_path_traversal_filename_escapes_upload_dir(tmp_path: Path) -> Non
     with _launched_target() as port:
         # upload_dir is <tmp>/quarry-vulnerable-uploads; "../<name>" resolves one
         # level up — outside the upload dir — and the temp root exists.
-        traversal = f"../w13-traversal-{port}.txt"
+        traversal = f"../upload-traversal-{port}.txt"
         spec = _upload_spec(traversal, _MARKER, "text/plain")
         capture = await http_request_activity(
-            _activity_input(spec, port=port, tmp_path=tmp_path, finding="w13-traversal")
+            _activity_input(spec, port=port, tmp_path=tmp_path, finding="traversal-step")
         )
 
     assert capture.status_code == 200
@@ -142,11 +142,11 @@ async def test_path_traversal_filename_escapes_upload_dir(tmp_path: Path) -> Non
 @pytest.mark.skipif(not REPO_ROOT.exists(), reason="vulnerable-fastapi example not available")
 async def test_content_type_mismatch_is_accepted(tmp_path: Path) -> None:
     with _launched_target() as port:
-        name = f"w13-ct-{port}.php"
+        name = f"upload-ct-{port}.php"
         # A dangerous extension declared as a benign content-type.
         spec = _upload_spec(name, _MARKER, "text/plain")
         capture = await http_request_activity(
-            _activity_input(spec, port=port, tmp_path=tmp_path, finding="w13-ct")
+            _activity_input(spec, port=port, tmp_path=tmp_path, finding="content-type-step")
         )
 
     assert capture.status_code == 200
@@ -157,11 +157,11 @@ async def test_content_type_mismatch_is_accepted(tmp_path: Path) -> None:
 @pytest.mark.skipif(not REPO_ROOT.exists(), reason="vulnerable-fastapi example not available")
 async def test_oversized_upload_has_no_server_side_cap(tmp_path: Path) -> None:
     with _launched_target() as port:
-        name = f"w13-oversized-{port}.bin"
+        name = f"upload-oversized-{port}.bin"
         payload = "A" * (256 * 1024)  # 256 KiB — far beyond any legitimate probe
         spec = _upload_spec(name, payload, "application/octet-stream")
         capture = await http_request_activity(
-            _activity_input(spec, port=port, tmp_path=tmp_path, finding="w13-oversized")
+            _activity_input(spec, port=port, tmp_path=tmp_path, finding="oversized-step")
         )
 
     assert capture.status_code == 200

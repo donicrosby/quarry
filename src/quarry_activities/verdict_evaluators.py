@@ -45,6 +45,7 @@ __all__ = [
     "default_evaluator",
     "evaluate_live_verdict",
     "evaluate_live_verdict_with_source",
+    "file_upload_evaluator",
     "live_verdict_from_status",
     "register_builtin_evaluators",
     "register_evaluator",
@@ -309,6 +310,48 @@ def ssrf_evaluator(ev: LiveProbeEvidence) -> Verdict:
     return LIVE_NOT_CORROBORATED
 
 
+def file_upload_evaluator(ev: LiveProbeEvidence) -> Verdict:
+    """File-upload upload→fetch-back CHAIN evaluator (primary + fetch-back pair).
+
+    The dynamic-validate prompt orders the agent's proposals as the multipart
+    upload first, then the fetch-back that reads the stored artifact, so the
+    upload rides as the primary probe and the fetch-back as ``additional[0]``.
+    Corroboration is a TWO-step observation: the handler ACCEPTED the file the
+    validation should have refused (step 1) AND the stored artifact was served
+    back (step 2).  One step alone is not corroboration — the point of the chain
+    is that a 2xx upload that is never read back proves nothing.
+
+    - no fetch-back probe → ``inconclusive`` (the chain needs both steps; the
+      upload's 2xx alone cannot corroborate).
+    - upload 4xx → ``not_corroborated`` (the handler enforced the rule the
+      candidate claims is missing); any other non-2xx upload → ``inconclusive``
+      (probe error / server fault — cannot decide).
+    - fetch-back 4xx → ``not_corroborated`` (the stored file was not served
+      back — renamed, unsanitised-but-absent, or guarded); any other non-2xx
+      fetch-back → ``inconclusive``.
+    - either body unresolvable (None) → ``inconclusive`` (no text to read back).
+    - both steps 2xx and the fetch-back returns a non-empty body → ``corroborated``;
+      a resolved-but-empty body → ``not_corroborated`` (nothing read back).
+
+    Honest limitation: the evaluator does not know the marker the agent uploaded,
+    so it corroborates on the two-step OBSERVATION (both steps 2xx + a non-empty
+    read-back), not a marker equality — the same class of limitation SQLi/SSRF
+    document.  Extra probes beyond the fetch-back are ignored.
+    """
+    if not ev.additional:
+        return LIVE_INCONCLUSIVE
+    fetch_back = ev.additional[0]
+    if not _is_2xx(ev.status_code):
+        return LIVE_NOT_CORROBORATED if 400 <= ev.status_code < 500 else LIVE_INCONCLUSIVE
+    if not _is_2xx(fetch_back.status_code):
+        return LIVE_NOT_CORROBORATED if 400 <= fetch_back.status_code < 500 else LIVE_INCONCLUSIVE
+    if fetch_back.body_text is None:
+        return LIVE_INCONCLUSIVE
+    if fetch_back.body_text.strip():
+        return LIVE_CORROBORATED
+    return LIVE_NOT_CORROBORATED
+
+
 def register_builtin_evaluators() -> None:
     """Register the shipped per-class evaluators (idempotent, import-safe).
 
@@ -320,6 +363,11 @@ def register_builtin_evaluators() -> None:
     register_evaluator(VulnerabilityClass.SSTI, ssti_evaluator, min_probes=1)
     register_evaluator(VulnerabilityClass.SQL_INJECTION, sql_injection_evaluator, min_probes=2)
     register_evaluator(VulnerabilityClass.SSRF, ssrf_evaluator, min_probes=2)
+    # FILE_UPLOAD corroborates through a CHAIN (upload + fetch-back), so it
+    # needs the pair: ``min_probes=2`` makes dynamic dispatch keep both the
+    # agent's upload and fetch-back proposals instead of silently dropping the
+    # fetch-back (see ``select_dynamic_probe_specs``).
+    register_evaluator(VulnerabilityClass.FILE_UPLOAD, file_upload_evaluator, min_probes=2)
 
 
 register_builtin_evaluators()
