@@ -40,6 +40,14 @@ redirects to an off-scope host SHALL NOT be followed.
 - **WHEN** the crawl activity runs with an empty `allowed_hosts`
 - **THEN** no request is sent and the returned map is empty
 
+#### Scenario: redactable tokens never reach the result raw
+
+- **WHEN** a same-host redirect URL, a rendered DOM, a dedupe-appended
+  parameter, a form input, or a recorded error string carries a value the run
+  `Scrubber` redacts
+- **THEN** every emitted field (fetched page URLs, form inputs, entry params,
+  refusal records) carries the redacted placeholder, never the raw value
+
 ### Requirement: Form extraction records method, action, and inputs
 
 The crawler SHALL extract every HTML form's method (defaulting to `GET` when
@@ -79,3 +87,34 @@ rendered DOM instead of the raw response body.
   server HTML contains no links
 - **THEN** the crawler extracts the links and routes from the rendered DOM
   rather than from the server response
+
+### Requirement: A per-fetch transport failure does not fail the crawl
+
+A transport failure on any single URL — connection refused, connection
+aborted mid-response, read timeout, TLS mismatch — SHALL be caught per fetch,
+recorded (an error string naming the failure class, and an attack-map entry
+for the failed endpoint carrying it in its notes), and traversal SHALL
+continue. Such a failure SHALL NOT fail the crawl activity.
+
+#### Scenario: one dead link does not kill the crawl
+
+- **WHEN** a crawled page links to an endpoint whose connection is refused or
+  whose response is aborted mid-body
+- **THEN** the crawl completes, the remaining pages are fetched and mapped,
+  and the failed endpoint is recorded with its error class
+
+### Requirement: Pathological bodies are refused before scrubbing
+
+A fetched body — on the `httpx` path or the rendered-DOM path — whose longest
+unbroken `[A-Za-z0-9_]` run exceeds the configured run limit, or whose summed
+squared run lengths exceed the configured work budget, SHALL be refused with a
+recorded reason and SHALL NOT be scrubbed, parsed, or emitted. (The shared
+`Scrubber`'s assignment pattern is quadratic on separator-less runs —
+pre-existing redaction-lane debt; this guard contains it crawl-side.)
+
+#### Scenario: separator-less body is refused, not parsed
+
+- **WHEN** an in-scope page serves a body dominated by unbroken alphanumeric
+  runs (a separator-less blob, or many legal-length runs packed together)
+- **THEN** the page is refused with a recorded reason, no value from it is
+  parsed or emitted, and the crawl continues without wedging

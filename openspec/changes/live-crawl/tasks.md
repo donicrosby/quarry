@@ -49,3 +49,28 @@
 - [x] 4.5 `uv run pytest tests/unit tests/integration/test_crawl_spa_live.py -q -n 4`
   plus the affected live-recon / registry tests.
 - [x] 4.6 Commit on `impl/crawl-site-map`; report SHA and gate output.
+
+## 5. Close-out revise (findings from the impl review)
+
+- [x] 5.1 F1 (availability): catch `httpx.RequestError` per fetch in
+  `_fetch_html` and return an `error:<ExceptionName>` string for that URL;
+  record the error string (scrubbed) plus an attack-map entry for the dead
+  endpoint, and continue the walk. Wire-level regression tests: aborted
+  connection mid-body and closed port, both asserting the crawl completes and
+  records the failure.
+- [x] 5.2 F2 (info-leak): make scrubbing total at the emission boundary —
+  rendered DOM scrubbed at ingest, dedupe-appended params scrubbed,
+  `pages_fetched` URLs scrubbed, form inputs scrubbed, error strings scrubbed
+  before recording. Wire-level leak-probe regression tests (same-host redirect
+  URL, max-redirects error string, rendered DOM, dedupe branch), each using a
+  `ghp_`-shaped token the scrubber verifiably redacts with the serialized
+  result as the leak oracle.
+- [x] 5.3 F3 (DoS): refuse bodies whose longest unbroken `[A-Za-z0-9_]` run
+  exceeds 2048 or whose summed squared run lengths exceed 20,000,000, with a
+  recorded reason, BEFORE scrubbing or parsing; applied to both the `httpx`
+  and rendered-DOM ingest paths. Thresholds derived from measured scrub timings
+  (a longest-run-only guard at ~8K leaves multi-second scrubs and admits a
+  38.6s multi-run packing). Wire-level regression tests: overlong single run,
+  multi-run packing, 512KB wedge body refused fast, rendered-DOM run.
+- [x] 5.4 Re-run gates (ruff, format, pyright, vulture, openspec --strict,
+  full battery) and re-verify a clean merge into current main.
