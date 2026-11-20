@@ -279,6 +279,8 @@ def diff_run_results(a: BenchmarkRunResult, b: BenchmarkRunResult) -> BenchmarkD
         regressions.append("proof_rate")
     if deltas["token_cost_per_proven_finding"] > 0:
         regressions.append("token_cost_per_proven_finding")
+    if deltas["wall_clock_seconds"] > 0:
+        regressions.append("wall_clock_seconds")
     regressions.extend(
         f"recall[{vuln_class}]" for vuln_class, delta in recall_deltas.items() if delta < 0
     )

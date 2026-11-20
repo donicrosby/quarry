@@ -66,6 +66,44 @@ class _HttpRequestTool:
                 "type": ["string", "null"],
                 "description": "Functional area context for scope checks",
             },
+            "multipart_fields": {
+                "type": ["array", "null"],
+                "description": (
+                    "multipart/form-data parts. When non-empty the request is sent as "
+                    "multipart and the raw body is ignored. Use filename/content_type "
+                    "to send a file part (file-upload probing)."
+                ),
+                "items": {
+                    "type": "object",
+                    "required": ["name", "value"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string", "description": "Form field name"},
+                        "value": {"type": "string", "description": "Field value / file content"},
+                        "filename": {
+                            "type": ["string", "null"],
+                            "description": "Filename for a file part",
+                        },
+                        "content_type": {
+                            "type": ["string", "null"],
+                            "description": "Content-Type for a file part",
+                        },
+                    },
+                },
+            },
+            "follow_redirects": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Follow 3xx redirects (max 10 hops). Every hop is re-checked "
+                    "against allowed_hosts; off-scope hops are not followed."
+                ),
+            },
+            "cookies": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Per-request cookies sent as the Cookie header",
+            },
         },
         "additionalProperties": False,
     }
@@ -87,6 +125,9 @@ class _HttpRequestTool:
             "auth_profile": inputs.get("auth_profile"),
             "vuln_class": inputs.get("vuln_class"),
             "functional_area": inputs.get("functional_area"),
+            "multipart_fields": inputs.get("multipart_fields"),
+            "follow_redirects": inputs.get("follow_redirects", False),
+            "cookies": inputs.get("cookies", {}),
         }
         return json.dumps(dispatch_payload)
 

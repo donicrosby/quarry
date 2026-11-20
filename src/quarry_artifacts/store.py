@@ -48,8 +48,8 @@ class _JsonArtifact(Protocol):
 class ArtifactStore(Protocol):
     """Protocol shared by all artifact-store backends.
 
-    LocalArtifactStore satisfies this structurally; the Redis/S3 backends
-    (deferred) will implement it explicitly.
+    Every backend (local filesystem, Redis, S3) implements this interface
+    explicitly, including ``append_bytes``.
     """
 
     def put_bytes(
@@ -62,6 +62,24 @@ class ArtifactStore(Protocol):
         metadata: dict[str, Any] | None = None,
         redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
     ) -> ArtifactRef: ...
+
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the object at *key* instead of rewriting it.
+
+        The append-only counterpart to ``put_bytes`` (which truncates).  The
+        per-agent execution log relies on it so a replay appends after the
+        original run's lines rather than truncating them.
+        """
+        ...
 
     def put_json(
         self,

@@ -33,6 +33,7 @@ from typing import Any, cast
 
 from temporalio import activity
 
+from quarry.config import QuarrySettings
 from quarry.egress import TARGET_HOST, EgressPolicyError, resolve_egress_policy
 from quarry.schemas import (
     CANARY_PATH_MAX_CHARS,
@@ -52,6 +53,7 @@ from quarry_activities.sandbox import (
     SandboxBackend,
     SandboxResult,
 )
+from quarry_artifacts.quarantine import put_quarantined_artifact
 from quarry_artifacts.store import build_artifact_store
 from quarry_models.redaction import Scrubber
 
@@ -165,7 +167,7 @@ def _resolve_credentials(auth_profile_set_json: str | None) -> dict[str, str]:
     return env
 
 
-def _build_sandbox_backend() -> SandboxBackend:
+def build_sandbox_backend() -> SandboxBackend:
     """Return the configured SandboxBackend.
 
     Reads QUARRY_SANDBOX_BACKEND (via QuarrySettings):
@@ -175,8 +177,6 @@ def _build_sandbox_backend() -> SandboxBackend:
 
     QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
     """
-    from quarry.config import QuarrySettings
-
     settings = QuarrySettings()
     backend = (settings.sandbox_backend or "").lower().strip()
     if backend in ("", "local"):
@@ -658,7 +658,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     egress_policy = _resolve_policy_json(inp.egress_policy_json)
 
     store = build_artifact_store(inp.artifact_store_path)
-    sandbox = _build_sandbox_backend()
+    sandbox = build_sandbox_backend()
 
     # Tier 1 is CLI-only: it cannot enforce a destination-set policy (no
     # kernel-enforced network namespace), so a live-target dispatch is scoped to
@@ -713,20 +713,26 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     wrapped_stdout = f"<target_content>{stdout_scrub.text}</target_content>"
     wrapped_stderr = f"<target_content>{stderr_scrub.text}</target_content>"
 
-    stdout_ref = store.put_bytes(
+    stdout_outcome = put_quarantined_artifact(
+        store,
         f"{inp.scan_id}/{inp.candidate_finding_id}/stdout",
         wrapped_stdout.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDOUT,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
-    stderr_ref = store.put_bytes(
+    stderr_outcome = put_quarantined_artifact(
+        store,
         f"{inp.scan_id}/{inp.candidate_finding_id}/stderr",
         wrapped_stderr.encode("utf-8"),
         kind=ArtifactKind.TOOL_STDERR,
         content_type="text/plain",
         redaction_status=redaction_status,
+        scan_id=inp.scan_id,
     )
+    stdout_ref = stdout_outcome.artifact_ref
+    stderr_ref = stderr_outcome.artifact_ref
 
     return SandboxExecCapture(
         exit_code=result.exit_code,
@@ -738,6 +744,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
         timed_out=result.timed_out,
         canary_callbacks=canary_callbacks,
         resolved_target_ips=resolved_target_ips,
+        artifact_refs=[stdout_ref, stderr_ref],
     )
 
 

@@ -11,7 +11,7 @@ This is intentionally simple and deterministic. No LLM review, no entropy analys
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from temporalio import activity
 
@@ -155,3 +155,83 @@ def promote_to_final_finding_metadata(
         "validation_checks": "; ".join(result.checks_run),
         "is_validated": result.is_valid,
     }
+
+
+# ---------------------------------------------------------------------------
+# Fuzz-candidate validation (C5 fuzzing-harness)
+# ---------------------------------------------------------------------------
+
+
+def _empty_str_list() -> list[str]:
+    return []
+
+
+@dataclass(frozen=True)
+class FuzzValidationResult:
+    """Result of validating a fuzz crash candidate."""
+
+    verdict: str
+    reasons: list[str] = field(default_factory=_empty_str_list)
+    checks_run: list[str] = field(default_factory=_empty_str_list)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.verdict == "validated"
+
+
+@activity.defn(name="validate-fuzz-candidate")
+def validate_fuzz_candidate(
+    finding: ValidateCandidateInput | dict[str, str | list[str] | None] | CandidateFinding,
+) -> FuzzValidationResult:
+    """Validate a fuzz crash candidate deterministically.
+
+    Promotes candidates whose crash signature is consistent (non-empty crash
+    hash + a signal or sanitizer kind + non-empty trigger input); rejects the
+    inconsistent ones the spec enumerates.
+    """
+    if isinstance(finding, dict):
+        finding_json = finding.get("finding_json")
+        if not isinstance(finding_json, str):
+            msg = "finding_json must be a string"
+            raise TypeError(msg)
+        finding = ValidateCandidateInput(finding_json=finding_json)
+    if isinstance(finding, ValidateCandidateInput):
+        finding = CandidateFinding.model_validate_json(finding.finding_json)
+    return _validate_fuzz_candidate_impl(finding)
+
+
+def _validate_fuzz_candidate_impl(finding: CandidateFinding) -> FuzzValidationResult:
+    checks_run: list[str] = []
+    reasons: list[str] = []
+
+    crash_hash = str(finding.metadata.get("crash_hash", "") or "")
+    signal = str(finding.metadata.get("signal", "") or "")
+    sanitizer = str(finding.metadata.get("sanitizer", "") or "")
+    stderr_length = int(str(finding.metadata.get("stderr_length", 0) or 0))
+    trigger_input = finding.trigger_input or ""
+
+    checks_run.append("crash_hash_present")
+    if not crash_hash:
+        reasons.append("missing crash hash")
+        return FuzzValidationResult(verdict="rejected", reasons=reasons, checks_run=checks_run)
+
+    checks_run.append("signal_or_sanitizer_kind")
+    if not signal and not sanitizer:
+        if stderr_length == 0:
+            reasons.append("zero-length stderr without a sanitizer match")
+            return FuzzValidationResult(verdict="rejected", reasons=reasons, checks_run=checks_run)
+        reasons.append("no signal or sanitizer kind recorded")
+        return FuzzValidationResult(verdict="rejected", reasons=reasons, checks_run=checks_run)
+
+    checks_run.append("sanitizer_kind_has_stderr")
+    if sanitizer and stderr_length == 0:
+        reasons.append("sanitizer kind recorded but stored stderr is empty")
+        return FuzzValidationResult(verdict="rejected", reasons=reasons, checks_run=checks_run)
+
+    checks_run.append("trigger_input_non_empty")
+    if not trigger_input:
+        reasons.append("missing trigger input")
+        return FuzzValidationResult(verdict="rejected", reasons=reasons, checks_run=checks_run)
+
+    reasons.append("crash hash, signal/sanitizer kind and trigger input are present")
+    return FuzzValidationResult(verdict="validated", reasons=reasons, checks_run=checks_run)

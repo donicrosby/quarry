@@ -154,6 +154,143 @@ class TestVulnerableCliCommandInjection:
         assert result.exit_code != 0
 
 
+class TestVulnerableCliEnvInjection:
+    """Acceptance proof — attacker-controlled env injection via the controlled env dict.
+
+    ``EDITOR`` is allowlisted to ``/bin/sh`` (attacker-env-injection REQ-1), so
+    handing the CLI that env dict turns its ``--edit`` path into arbitrary command
+    execution over attacker-staged content: ``/bin/sh`` runs the "edited" file.
+    """
+
+    def test_editor_env_injection_executes_staged_content(
+        self, built_binary: Path, tmp_path: Path
+    ) -> None:
+        bin_dest = tmp_path / "vulnerable-cli"
+        shutil.copy2(built_binary, bin_dest)
+        bin_dest.chmod(0o755)
+
+        sandbox = LocalSubprocessSandbox()
+        spec = SandboxExecSpec(
+            command="sh",
+            args=["-c", "./vulnerable-cli --edit pwn.sh"],
+            env={"EDITOR": "/bin/sh"},
+            cwd=".",
+            input_files={"pwn.sh": "echo QUARRY_EDITOR_INJECTION_PROOF\n"},
+            timeout_seconds=10,
+        )
+        result = sandbox.run(
+            spec,
+            work_dir=tmp_path,
+            resolved_env={},
+            egress_policy=None,
+        )
+        assert result.exit_code == 0, (
+            f"expected the injected editor to run; rc={result.exit_code} stderr={result.stderr!r}"
+        )
+        assert "QUARRY_EDITOR_INJECTION_PROOF" in result.stdout, (
+            f"injected EDITOR=/bin/sh did not execute the staged file; stdout={result.stdout!r}"
+        )
+
+
+class TestVulnerableCliTempfileRace:
+    """C8 proof: a predictable temp path in a shared directory is racy.
+
+    The CLI resolves its shared temp directory from ``TMPDIR`` and uses the
+    fixed name ``vulnerable-cli-tmp`` with a check-then-create window.  The
+    sandbox points ``TMPDIR`` at the working dir so the attacker file can be
+    pre-planted through ``input_files`` (which rejects absolute paths).
+    """
+
+    def _stage_binary(self, built_binary: Path, tmp_path: Path) -> None:
+        bin_dest = tmp_path / "vulnerable-cli"
+        shutil.copy2(built_binary, bin_dest)
+        bin_dest.chmod(0o755)
+
+    def test_pre_planted_file_wins_the_race(self, built_binary: Path, tmp_path: Path) -> None:
+        self._stage_binary(built_binary, tmp_path)
+
+        sandbox = LocalSubprocessSandbox()
+        spec = SandboxExecSpec(
+            command="sh",
+            args=["-c", "./vulnerable-cli --write-temp 'benign-content'"],
+            cwd=".",
+            env_profile=EnvProfile.NONE,
+            timeout_seconds=10,
+            input_files={"vulnerable-cli-tmp": "ATTACKER-PLANTED-CONTENT"},
+        )
+        result = sandbox.run(
+            spec,
+            work_dir=tmp_path,
+            resolved_env={"TMPDIR": str(tmp_path)},
+            egress_policy=None,
+        )
+
+        assert result.exit_code == 0
+        # The tool trusted the attacker-planted file instead of the content it
+        # was asked to write — the race is won by the pre-plant.
+        assert "ATTACKER-PLANTED-CONTENT" in result.stdout
+        assert "benign-content" not in result.stdout
+        assert (tmp_path / "vulnerable-cli-tmp").read_text() == "ATTACKER-PLANTED-CONTENT"
+
+    def test_absent_pre_plant_uses_requested_content(
+        self, built_binary: Path, tmp_path: Path
+    ) -> None:
+        """Control: with nothing pre-planted the CLI writes its own content."""
+        self._stage_binary(built_binary, tmp_path)
+
+        sandbox = LocalSubprocessSandbox()
+        spec = SandboxExecSpec(
+            command="sh",
+            args=["-c", "./vulnerable-cli --write-temp 'benign-content'"],
+            cwd=".",
+            env_profile=EnvProfile.NONE,
+            timeout_seconds=10,
+        )
+        result = sandbox.run(
+            spec,
+            work_dir=tmp_path,
+            resolved_env={"TMPDIR": str(tmp_path)},
+            egress_policy=None,
+        )
+
+        assert result.exit_code == 0
+        assert "benign-content" in result.stdout
+
+
+class TestVulnerableCliTerminalEscape:
+    """C9 proof: attacker-controlled input echoed to stdout with no ANSI strip."""
+
+    def test_ansi_escapes_reach_stdout_unsanitized(
+        self, built_binary: Path, tmp_path: Path
+    ) -> None:
+        bin_dest = tmp_path / "vulnerable-cli"
+        shutil.copy2(built_binary, bin_dest)
+        bin_dest.chmod(0o755)
+
+        # ESC[2J (erase display) + ESC[H (cursor home) + a visible marker.
+        payload = "\x1b[2J\x1b[Hpwned"
+        sandbox = LocalSubprocessSandbox()
+        spec = SandboxExecSpec(
+            command="sh",
+            args=["-c", f"./vulnerable-cli --echo-input '{payload}'"],
+            cwd=".",
+            env_profile=EnvProfile.NONE,
+            timeout_seconds=10,
+        )
+        result = sandbox.run(
+            spec,
+            work_dir=tmp_path,
+            resolved_env={},
+            egress_policy=None,
+        )
+
+        assert result.exit_code == 0
+        # The raw escape bytes are reproduced verbatim in the captured stdout.
+        assert "\x1b[2J" in result.stdout
+        assert "\x1b[H" in result.stdout
+        assert "pwned" in result.stdout
+
+
 class TestVulnerableCliGolden:
     def test_golden_json_exists_and_is_valid(self) -> None:
         golden_path = (
@@ -176,3 +313,18 @@ class TestVulnerableCliGolden:
                 assert "proof_signal" in finding["cli_invocation"], (
                     f"Ground truth finding {finding['id']} missing proof_signal"
                 )
+
+    def test_golden_covers_new_cli_classes(self) -> None:
+        """C8/C9: the fixture ground truth carries both new CLI-side classes."""
+        golden_path = (
+            Path(__file__).parent.parent / "golden" / "ground_truth" / "vulnerable-cli.json"
+        )
+        findings: list[dict[str, object]] = json.loads(golden_path.read_text())
+        by_class = {str(f["vuln_class"]): f for f in findings}
+        assert "tempfile_race" in by_class
+        assert "terminal_escape" in by_class
+        tempfile = by_class["tempfile_race"]
+        assert tempfile["file_path"] == "src/main.rs"
+        cli_invocation = tempfile["cli_invocation"]
+        assert isinstance(cli_invocation, dict)
+        assert cli_invocation.get("proof_signal") == "ATTACKER-PLANTED-CONTENT"

@@ -67,6 +67,24 @@ tasks:
     cmds:
       - uv run python scripts/prompt_lint.py src
 
+  sbom:
+    desc: Generate a CycloneDX SBOM from the locked dependency tree (uv.lock).
+    cmds:
+      - uv export --frozen --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
+
+  sign-release:
+    desc: |
+      Sign a released image digest with cosign (keyless) — what the release
+      workflow runs. Set IMAGE and DIGEST, e.g.
+      IMAGE=quarry-server DIGEST=sha256:... task sign-release
+    vars:
+      IMAGE: '{{.IMAGE | default "quarry-server"}}'
+      DIGEST: '{{.DIGEST | default ""}}'
+      OWNER: '{{.OWNER | default "donicrosby"}}'
+    cmds:
+      - 'test -n "{{.DIGEST}}" || { echo "set DIGEST=sha256:<digest>"; exit 1; }'
+      - cosign sign --yes "ghcr.io/{{.OWNER}}/{{.IMAGE}}@{{.DIGEST}}"
+
   hadolint:
     desc: Lint the Dockerfile with hadolint (via docker).
     cmds:

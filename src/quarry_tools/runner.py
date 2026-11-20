@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from quarry.plugin_types import ToolRegistry
 from quarry.schemas import AuthProfileSet, ScopeExclusion
@@ -71,6 +72,42 @@ def _path_glob_to_url_prefix(glob_value: str) -> str:
     if parts:
         return f"/{parts[0]}/"
     return "/"
+
+
+def _resolve_binary(command: str) -> str | None:
+    """Resolve *command* to a binary path for ``binary`` exclusion matching.
+
+    Absolute paths are returned by direct identity; bare command names are
+    resolved via ``shutil.which``.  Returns ``None`` when the command is empty
+    or cannot be resolved — callers treat that as fail-open (no match).
+    """
+    if not command:
+        return None
+    if Path(command).is_absolute():
+        return command
+    return shutil.which(command)
+
+
+def _filesystem_path_matches(candidate: str, value: str, repo_root: Path | None = None) -> bool:
+    """Return True if *candidate* matches a ``filesystem_path`` exclusion *value*.
+
+    Matching is ``fnmatch``-based on the candidate path with backslashes
+    normalized to forward slashes.  When *candidate* is an absolute path and
+    *repo_root* is supplied, the repo-root-relative form is also matched, so an
+    absolute path into an excluded subtree (``<repo>/.git/config`` against
+    ``.git/**``) is blocked regardless of the process cwd.
+    """
+    normalized = candidate.replace("\\", "/")
+    if fnmatch.fnmatch(normalized, value):
+        return True
+    if repo_root is not None and Path(candidate).is_absolute():
+        resolved = Path(candidate).resolve()
+        root = repo_root.resolve()
+        if resolved.is_relative_to(root) and fnmatch.fnmatch(
+            resolved.relative_to(root).as_posix(), value
+        ):
+            return True
+    return False
 
 
 def check_exclusion(
@@ -155,6 +192,29 @@ def _matches_scope_exclusion(exclusion: ScopeExclusion, inputs: dict[str, Any]) 
         if cmd and fnmatch.fnmatch(cmd, value):
             return True
 
+    elif kind == "binary":
+        # Sandbox-specific: resolve the command name to a binary path, then match
+        # the resolved path against the exclusion value.  Distinct from `command`,
+        # which matches the agent-supplied name *before* resolution.  Fail-open
+        # when the binary cannot be resolved (no resolution data to match on).
+        resolved_binary = _resolve_binary(str(inputs.get("command", "")))
+        if resolved_binary is not None and fnmatch.fnmatch(resolved_binary, value):
+            return True
+
+    elif kind == "filesystem_path":
+        # Blocks tool access to paths matching the exclusion value.  For
+        # run_in_sandbox the surface is the crafted `input_files` keys (that tool
+        # has no `path` input); an explicit `path` input is also matched so the
+        # module-level `check_exclusion` helper covers this kind.
+        path_input = inputs.get("path")
+        if path_input is not None and _filesystem_path_matches(str(path_input), value):
+            return True
+        input_files = inputs.get("input_files")
+        if isinstance(input_files, dict):
+            for rel_path in cast("dict[str, Any]", input_files):
+                if _filesystem_path_matches(str(rel_path), value):
+                    return True
+
     return False
 
 
@@ -200,6 +260,25 @@ class ToolRunner:
             if _matches_scope_exclusion(exclusion, inputs):
                 return f"{exclusion.value}:{exclusion.kind}"
 
+        return None
+
+    def _check_filesystem_path_exclusion(self, path_str: str) -> str | None:
+        """Return a denial reason if a ``filesystem_path`` exclusion blocks *path_str*.
+
+        This is the static-tool counterpart to the dynamic Layer-4 guard: it is
+        applied at the static-path branch in :meth:`run` before the repo-root
+        escape check, so static tools (``read_file``, ``list_dir``) are blocked
+        from reading excluded paths.  Sandbox-scoped kinds (``command``,
+        ``binary``) never reach here, preserving the invariant that static tools
+        are unaffected by sandbox-scoped exclusions.  Unlike the dynamic guard,
+        this check is not gated on ``block_dynamic`` — a ``filesystem_path``
+        exclusion guards static reads regardless.
+        """
+        for exclusion in self._scope_exclusions:
+            if exclusion.kind != "filesystem_path":
+                continue
+            if _filesystem_path_matches(path_str, exclusion.value, self._repo_root):
+                return f"{exclusion.value}:{exclusion.kind}"
         return None
 
     def _check_allowed_hosts(self, tool_name: str, inputs: dict[str, Any]) -> str | None:
@@ -317,6 +396,21 @@ class ToolRunner:
 
         # Path restriction — check any 'path' input before execution (static tools)
         if "path" in inputs and tool_name not in _DYNAMIC_TOOLS:
+            # filesystem_path scope exclusion — refuse before the repo-root escape
+            # check so an excluded path is denied (not merely flagged as an escape).
+            filesystem_denial = self._check_filesystem_path_exclusion(str(inputs["path"]))
+            if filesystem_denial is not None:
+                return ToolCallRecord(
+                    tool_name=tool_name,
+                    inputs=inputs,
+                    output="",
+                    allowed=False,
+                    invocation_id=invocation_id,
+                    started_at=started,
+                    completed_at=started,
+                    denied_reason=filesystem_denial,
+                    status="refused",
+                )
             _resolve_path(str(inputs["path"]), self._repo_root)
 
         output = tool.run(inputs, self._repo_root)
