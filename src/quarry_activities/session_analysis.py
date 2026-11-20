@@ -577,6 +577,8 @@ def token_finding_to_candidate(
         root_cause_key=root_cause_key,
         confidence=finding.confidence,
         severity=finding.severity,
+        # Deterministic analysis of a captured HTTP response — tool-observed.
+        grounded=True,
         severity_rationale=model_omitted_severity_rationale(),
         created_by="session-analysis",
         created_at=datetime.now(UTC),

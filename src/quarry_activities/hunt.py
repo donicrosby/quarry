@@ -139,6 +139,8 @@ def _parse_finding(
     scan_id: str,
     workspace_id: str,
     vuln_class: VulnerabilityClass,
+    *,
+    originating_model_id: str | None = None,
 ) -> CandidateFinding | None:
     """Convert a model-output finding dict to a CandidateFinding, or None on parse failure.
 
@@ -147,6 +149,13 @@ def _parse_finding(
     unreliable (it writes taxonomy labels like "Horizontal IDOR" or
     "URL_Manipulation" that are not canonical enum values). Trusting it caused real
     findings to be silently dropped, so we ignore it and use the assigned class.
+
+    Write-time credibility gate (credibility-economics): a hunter finding is a
+    *model judgment* — the model reasoned from the code it read — so it is tagged
+    ``grounded=False`` with the hunter's model id, and the tier discount applies
+    until the finding is corroborated. Deterministic tool sweeps (secrets, SSRF,
+    tempfile-race, terminal-escape, diff scan) tag their own findings
+    ``grounded=True`` at construction instead.
     """
     try:
         affected = raw.get("affected_component", "")
@@ -199,6 +208,8 @@ def _parse_finding(
             evidence_path=_parse_evidence_path(raw, file_path, start_line),
             severity_rationale=_parse_severity_rationale(raw),
             root_cause_key=root_cause_key,
+            grounded=False,
+            originating_model_id=originating_model_id,
             created_by="hunt-agent",
             created_at=datetime.now(UTC),
             metadata={"fingerprint": fingerprint},
@@ -224,6 +235,7 @@ def hunt_impl(
     kb_root_index_key: str | None = None,
     context_window_tokens: int | None = None,
     context_window_threshold: float = 0.8,
+    originating_model_id: str | None = None,
     replay_mode: bool = False,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
@@ -363,9 +375,17 @@ def hunt_impl(
         hunt_class = task.vuln_class
         for raw in result.final_answer.findings:
             cf = (
-                _parse_finding(raw, task.scan_id, "local", hunt_class)
+                _parse_finding(
+                    raw,
+                    task.scan_id,
+                    "local",
+                    hunt_class,
+                    originating_model_id=originating_model_id,
+                )
                 if hunt_class is not None
-                else _parse_exploratory_finding(raw, task.scan_id)
+                else _parse_exploratory_finding(
+                    raw, task.scan_id, originating_model_id=originating_model_id
+                )
             )
             if cf is not None:
                 findings.append(cf)
@@ -384,6 +404,8 @@ def hunt_impl(
 def _parse_exploratory_finding(
     raw: dict[str, Any],
     scan_id: str,
+    *,
+    originating_model_id: str | None = None,
 ) -> CandidateFinding | None:
     """Parse an exploratory hunter's finding, taking the class from the model.
 
@@ -398,7 +420,9 @@ def _parse_exploratory_finding(
         vuln_class = VulnerabilityClass(raw_class)
     except ValueError:
         return None
-    return _parse_finding(raw, scan_id, "local", vuln_class)
+    return _parse_finding(
+        raw, scan_id, "local", vuln_class, originating_model_id=originating_model_id
+    )
 
 
 @activity.defn(name="hunt-vuln-class")
@@ -528,6 +552,7 @@ def _hunt_activity_impl(
         kb_root_index_key=effective_kb_key,
         context_window_tokens=role_cfg.context_window_tokens,
         context_window_threshold=role_cfg.context_window_threshold,
+        originating_model_id=role_cfg.model,
         replay_mode=replay_mode,
     )
 

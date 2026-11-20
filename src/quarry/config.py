@@ -92,6 +92,12 @@ class QuarrySettings(BaseSettings):
     quarantine_remote_backend: str = ""  # env: QUARRY_QUARANTINE_REMOTE_BACKEND
     malware_scanner: str = ""  # env: QUARRY_MALWARE_SCANNER ("" = no scanner configured)
 
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
+
     # Traffic-capture recording proxy + verified evidence store
     # (traffic-capture-verified-evidence). The capture root is the shared volume
     # the mitmproxy sidecar writes and the worker-side evidence snapshot reads;

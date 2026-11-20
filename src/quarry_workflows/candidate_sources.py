@@ -117,6 +117,8 @@ def _secret_candidate_from_match_record(
         ],
         evidence_path=[],
         confidence=Confidence.MEDIUM,
+        # Deterministic secret-match sweep — tool-observed.
+        grounded=True,
         severity_rationale=model_omitted_severity_rationale(),
         created_by="secrets-scanner",
         created_at=created_at,
@@ -197,6 +199,8 @@ def ssrf_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                # Deterministic outbound-request-sink sweep — tool-observed.
+                grounded=True,
                 severity_rationale=model_omitted_severity_rationale(),
                 created_by="ssrf-sweep",
                 created_at=created_at,
@@ -397,6 +401,8 @@ def tempfile_race_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                # Deterministic predictable-temp-path sweep — tool-observed.
+                grounded=True,
                 severity_rationale=model_omitted_severity_rationale(),
                 created_by="tempfile-race-sweep",
                 created_at=created_at,
@@ -481,6 +487,8 @@ def terminal_escape_candidates_from_activity_payload(
                 ],
                 evidence_path=[EvidencePathElement(path=file_path, line=line_number)],
                 confidence=Confidence.MEDIUM,
+                # Deterministic terminal-write sink sweep — tool-observed.
+                grounded=True,
                 severity_rationale=model_omitted_severity_rationale(),
                 created_by="terminal-escape-sweep",
                 created_at=created_at,

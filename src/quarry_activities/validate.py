@@ -20,7 +20,14 @@ from typing import Any, cast
 from pydantic import BaseModel, model_validator
 from temporalio import activity
 
-from quarry.panel_config import DEFAULT_PANEL, ModelTier, RoleConfig, TierKind, resolve_tier
+from quarry.panel_config import (
+    DEFAULT_PANEL,
+    CredibilityConfig,
+    ModelTier,
+    RoleConfig,
+    TierKind,
+    resolve_tier,
+)
 from quarry.schemas import (
     AgentTask,
     CandidateFinding,
@@ -33,13 +40,26 @@ from quarry.schemas import (
     ValidationResult,
     VulnerabilityClass,
 )
+from quarry_activities.corroborator import (
+    CASCADE_STEP_FREE_SIGNAL,
+    CASCADE_STEP_FREE_TOOL,
+    CascadeCounters,
+    CascadeEvaluators,
+    CascadeOutcome,
+    CascadeStep,
+    Corroborator,
+)
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_activities.verdict_evaluators import (
+    LiveProbeEvidence,
+    evaluate_live_verdict_with_source,
+)
 from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
 from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.checklist import enforce_checklist_invariants
-from quarry_models.credibility import compute_credibility
+from quarry_models.credibility import compute_credibility, credibility_prior_for
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mitigation_gate import sanitize_checklist_fails
@@ -47,6 +67,15 @@ from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
 from quarry_models.validation import validate_claim_from_finding
+from quarry_persistence.counters import (
+    MODEL_COUNTER_NAME,
+    PROBE_COUNTER_NAME,
+    InProcessBudgetCounter,
+    SqliteBudgetCounter,
+    initialize_credibility_counters,
+)
+from quarry_persistence.db import create_sqlite_engine
+from quarry_persistence.repositories import QuarryRepository
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -135,6 +164,167 @@ def _last_invocation_id(client: Any) -> str | None:
     last = cast("Any", invocations[-1])
     candidate_id = getattr(last, "id", None)
     return candidate_id if isinstance(candidate_id, str) else None
+
+
+# ---------------------------------------------------------------------------
+# Corroboration cascade wiring (credibility-economics)
+# ---------------------------------------------------------------------------
+
+
+def _same_target(a: CandidateFinding, b: CandidateFinding) -> bool:
+    """Whether two findings assert the same target hypothesis.
+
+    The hypothesis is class-specific: the same component cited under a different
+    ``vuln_class`` is a DIFFERENT hypothesis, so a class mismatch is never a
+    match. This closes a cross-class free-corroboration spoof — a prompt-injected
+    hunter that echoes a grounded finding's ``affected_component`` under another
+    class must not harvest step-2 corroboration from it.
+
+    ``root_cause_key`` is the canonical target key; when either finding lacks it
+    the cited component is compared instead. No key at all on both sides is
+    never treated as a match — two keyless findings are not evidence about each
+    other.
+    """
+    if a.vuln_class != b.vuln_class:
+        return False
+    if a.root_cause_key and b.root_cause_key:
+        return a.root_cause_key == b.root_cause_key
+    return bool(a.affected_component) and a.affected_component == b.affected_component
+
+
+def _free_corroboration_step(
+    db_path: str | None,
+    finding: CandidateFinding,
+) -> CascadeStep | None:
+    """Step 2 of the cascade: free corroboration from already-stored findings.
+
+    Returns ``FREE_TOOL_CORROBORATION`` when another finding on the same target
+    is tool-grounded, ``FREE_SIGNAL_CORROBORATION`` when two or more distinct
+    originating models independently produced a finding on the same target, and
+    ``None`` (fall through) otherwise. With no persistence store there is
+    nothing to corroborate against, so the step falls through.
+    """
+    if db_path is None:
+        return None
+    stored = QuarryRepository(db_path).load_candidate_findings(finding.scan_id)
+    others = [f for f in stored if f.id != finding.id and _same_target(f, finding)]
+    if any(f.grounded for f in others):
+        return CASCADE_STEP_FREE_TOOL
+    models = {
+        f.originating_model_id for f in (*others, finding) if f.originating_model_id is not None
+    }
+    if len(models) >= 2:
+        return CASCADE_STEP_FREE_SIGNAL
+    return None
+
+
+def _live_probe_evidence(raw: object) -> LiveProbeEvidence | None:
+    """Build ``LiveProbeEvidence`` from a finding's recorded probe payload.
+
+    Deny-by-default: a missing or malformed payload yields ``None`` (the caller
+    then treats the probe as inconclusive and falls through to the debater)
+    rather than raising inside the activity.
+    """
+    if not isinstance(raw, dict):
+        return None
+    values = cast("dict[str, Any]", raw)
+    status = values.get("status_code")
+    if not isinstance(status, int):
+        return None
+    additional_raw = values.get("additional")
+    additional: list[LiveProbeEvidence] = []
+    if isinstance(additional_raw, list):
+        for item in cast("list[object]", additional_raw):
+            parsed = _live_probe_evidence(item)
+            if parsed is not None:
+                additional.append(parsed)
+    body = values.get("body_text")
+    duration = values.get("duration_seconds")
+    injected = values.get("injected_delay_seconds")
+    return LiveProbeEvidence(
+        status_code=status,
+        body_text=body if isinstance(body, str) else None,
+        additional=tuple(additional),
+        duration_seconds=float(duration) if isinstance(duration, (int, float)) else None,
+        injected_delay_seconds=float(injected) if isinstance(injected, (int, float)) else None,
+    )
+
+
+def _deterministic_probe_verdict(finding: CandidateFinding) -> str | None:
+    """Step 4 of the cascade: the existing per-class registry, deterministic mode.
+
+    Reuses :func:`evaluate_live_verdict_with_source` over whatever probe evidence
+    the finding already carries (``metadata["live_probe"]``) — status/marker/
+    boolean-differential/timing checks only, never a model call. A finding with
+    no recorded probe evidence has nothing to evaluate, so the step returns
+    ``None`` and the cascade SKIPS step 4 without spending a probe unit (then
+    falling through to the debater).
+
+    DEVIATION (recorded): no stage in the current pipeline writes
+    ``metadata["live_probe"]`` — the only producer of live-probe evidence would
+    be the AGENTIC_VALIDATE/dynamic-probe stage, which runs AFTER this
+    VALIDATION-stage activity and lands its results as proof artifacts, not on
+    the finding's metadata. Until a producer populates ``metadata["live_probe"]``
+    at (or before) VALIDATION, step 4 is skipped for every finding in production
+    and its ``probe_oracle`` scenarios are reachable only when the evidence is
+    supplied directly (as the integration test does). Plumbing a real probe-
+    evidence producer is a follow-up change; the cascade no longer drains the
+    probe budget on the missing input.
+    """
+    evidence = _live_probe_evidence(finding.metadata.get("live_probe"))
+    if evidence is None:
+        return None
+    verdict, _source = evaluate_live_verdict_with_source(finding.vuln_class, evidence)
+    return verdict
+
+
+def _run_cascade(
+    *,
+    finding: CandidateFinding,
+    config: CredibilityConfig,
+    db_path: str | None,
+    debater: Any,
+) -> CascadeOutcome:
+    """Build the cascade's counters/evaluators for *finding* and run it."""
+    prior, _discount = credibility_prior_for(
+        grounded=finding.grounded,
+        originating_model_id=finding.originating_model_id,
+    )
+    if db_path is None:
+        counters = CascadeCounters(
+            probe=InProcessBudgetCounter(config.probe_budget, unlimited=config.probe_unlimited),
+            model=InProcessBudgetCounter(config.model_budget, unlimited=config.model_unlimited),
+        )
+    else:
+        initialize_credibility_counters(
+            db_path=db_path,
+            scan_id=finding.scan_id,
+            probe_budget=config.probe_budget,
+            model_budget=config.model_budget,
+        )
+        engine = create_sqlite_engine(db_path)
+        counters = CascadeCounters(
+            probe=SqliteBudgetCounter(
+                engine,
+                finding.scan_id,
+                PROBE_COUNTER_NAME,
+                unlimited=config.probe_unlimited,
+            ),
+            model=SqliteBudgetCounter(
+                engine,
+                finding.scan_id,
+                MODEL_COUNTER_NAME,
+                unlimited=config.model_unlimited,
+            ),
+        )
+    evaluators = CascadeEvaluators(
+        free_corroboration=lambda f: _free_corroboration_step(db_path, f),
+        probe=_deterministic_probe_verdict,
+        debater=debater,
+        severity_threshold=config.severity_threshold,
+    )
+    corroborator = Corroborator(severity_threshold=config.severity_threshold)
+    return corroborator.decide(finding, prior, counters, evaluators)
 
 
 # Prompt template versions for the validate ensemble. v1.1.0 adds the
@@ -284,6 +474,8 @@ def validate_impl(
     debater_limiter: Any | None = None,
     kb_root_index_key: str | None = None,
     checklist_enabled: bool = True,
+    credibility_config: CredibilityConfig | None = None,
+    db_path: str | None = None,
     replay_mode: bool = False,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
@@ -420,56 +612,96 @@ def validate_impl(
     ]
     credibility: CredibilityLevel | None = None
     recorded_checklist: list[ChecklistItem] = []
+    corroborated = False
+    cascade_step: str | None = None
     if debater_client is not None and debater_tier is not None:
-        refute, recorded_checklist = _run_debater(
-            finding=finding,
-            claim=claim,
-            repo_path=repo_path,
-            debater_client=debater_client,
-            debater_tier=debater_tier,
-            max_iterations=max_iterations,
-            budget_spec=budget_spec,
-            cost_per_iteration=cost_per_iteration,
-            event_sink=event_sink,
-            turn_timeout_seconds=turn_timeout_seconds,
-            limiter=debater_limiter,
-            checklist_enabled=checklist_enabled,
-            artifact_root=artifact_root,
-            replay_mode=replay_mode,
-        )
-        refuted = refute.refuted if refute is not None else False
-        # Deterministic backstop (run-5): a mitigation_stretching FAIL whose
-        # evidence names no real defensive primitive (e.g. cites only
-        # `timeout`/`capture_output` on a shell=True sink) is downgraded to
-        # unresolved so it cannot drive a rejection.
-        recorded_checklist = sanitize_checklist_fails(recorded_checklist, repo_root=repo_path)
-        # Default-false-positive stance: when the checklist refuter keeps the
-        # default (undischarged / refuted), a reasoner "validated" verdict is not
-        # promoted — it is retained as needs_proof, never silently dropped.
-        if checklist_enabled and refuted:
-            has_fail = any(i.outcome is ChecklistOutcome.FAIL for i in recorded_checklist)
-            if has_fail and verdict != "rejected":
-                verdict = "rejected"
-                # The checklist drives the rejection — surface its reasons so the
-                # rejected verdict carries the code-backed explanation.
-                if refute is not None and refute.reasons:
-                    reasons = list(refute.reasons)
-                ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
-            elif verdict == "validated":
-                verdict = "needs_proof"
-                ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
-        ensemble.append(
-            EnsembleJudgement(
-                role="validate",
-                tier=TierKind.DEBATER.value,
-                provider=debater_tier.provider.value,
-                model=debater_tier.model,
-                verdict=JudgementVerdict.REFUTED if refuted else JudgementVerdict.UNREFUTED,
-                refuted=refuted,
-                model_invocation_id=_last_invocation_id(debater_client),
+        refute: RefuteResponse | None = None
+        cascade_outcome: CascadeOutcome | None = None
+
+        def _run_debater_for_cascade(_finding: CandidateFinding) -> bool | None:
+            """Step-5 hook: run the real debater and stash its result.
+
+            The cascade decides WHETHER to spend a model unit; this closure is
+            what the unit buys. Its result is stashed so the verdict
+            post-processing below runs on exactly the debater's own output.
+            """
+            nonlocal refute
+            refute, checklist = _run_debater(
+                finding=finding,
+                claim=claim,
+                repo_path=repo_path,
+                debater_client=debater_client,
+                debater_tier=debater_tier,
+                max_iterations=max_iterations,
+                budget_spec=budget_spec,
+                cost_per_iteration=cost_per_iteration,
+                event_sink=event_sink,
+                turn_timeout_seconds=turn_timeout_seconds,
+                limiter=debater_limiter,
+                checklist_enabled=checklist_enabled,
+                artifact_root=artifact_root,
+                replay_mode=replay_mode,
             )
-        )
-        credibility = compute_credibility(ensemble)
+            recorded_checklist.extend(checklist)
+            return None if refute is None else refute.refuted
+
+        run_debater = True
+        if credibility_config is not None:
+            cascade_outcome = _run_cascade(
+                finding=finding,
+                config=credibility_config,
+                db_path=db_path,
+                debater=_run_debater_for_cascade,
+            )
+            corroborated = cascade_outcome.corroborated
+            cascade_step = cascade_outcome.cascade_step.value
+            # Only the step-5 outcome runs the paid debater. Every cheaper step
+            # assigns its definitive CredibilityLevel directly, without ensemble
+            # review and without spending a model unit.
+            run_debater = cascade_outcome.cascade_step is CascadeStep.PAID_DEBATER
+
+        if run_debater:
+            if refute is None:
+                # No cascade configured: run the debater exactly as before.
+                _run_debater_for_cascade(finding)
+            refuted = refute.refuted if refute is not None else False
+            # Deterministic backstop (run-5): a mitigation_stretching FAIL whose
+            # evidence names no real defensive primitive (e.g. cites only
+            # `timeout`/`capture_output` on a shell=True sink) is downgraded to
+            # unresolved so it cannot drive a rejection.
+            recorded_checklist = sanitize_checklist_fails(recorded_checklist, repo_root=repo_path)
+            # Default-false-positive stance: when the checklist refuter keeps the
+            # default (undischarged / refuted), a reasoner "validated" verdict is not
+            # promoted — it is retained as needs_proof, never silently dropped.
+            if checklist_enabled and refuted:
+                has_fail = any(i.outcome is ChecklistOutcome.FAIL for i in recorded_checklist)
+                if has_fail and verdict != "rejected":
+                    verdict = "rejected"
+                    # The checklist drives the rejection — surface its reasons so the
+                    # rejected verdict carries the code-backed explanation.
+                    if refute is not None and refute.reasons:
+                        reasons = list(refute.reasons)
+                    ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
+                elif verdict == "validated":
+                    verdict = "needs_proof"
+                    ensemble[0] = ensemble[0].model_copy(update={"verdict": verdict})
+            ensemble.append(
+                EnsembleJudgement(
+                    role="validate",
+                    tier=TierKind.DEBATER.value,
+                    provider=debater_tier.provider.value,
+                    model=debater_tier.model,
+                    verdict=(JudgementVerdict.REFUTED if refuted else JudgementVerdict.UNREFUTED),
+                    refuted=refuted,
+                    model_invocation_id=_last_invocation_id(debater_client),
+                    credibility_prior=finding.credibility_prior,
+                )
+            )
+            credibility = compute_credibility(ensemble)
+        elif cascade_outcome is not None:
+            # Resolved at a cheaper step: the cascade's level is definitive and
+            # ``compute_credibility`` is not invoked at all.
+            credibility = cascade_outcome.credibility
 
     return ValidationResult(
         id=str(uuid.uuid4()),
@@ -486,6 +718,8 @@ def validate_impl(
         credibility=credibility,
         ensemble=ensemble if debater_client is not None else [],
         checklist=recorded_checklist if debater_client is not None else [],
+        corroborated=corroborated,
+        cascade_step=cascade_step,
         created_at=datetime.now(UTC),
     )
 
@@ -502,6 +736,7 @@ def validate_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
     replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
@@ -512,6 +747,10 @@ def validate_activity(
     and takes priority over *panel*.  When provider is MOCK the existing mock client
     is used unchanged; when provider is LITELLM a real ``LiteLLMModelClient`` is built
     and the ``provider_policy`` is threaded through the agent loop.
+
+    *credibility_config_json*, when provided, is the serialised ``[credibility]``
+    section: it enables the write-time tier discounting and the cost-ordered
+    corroboration cascade. Absent, the activity takes the pre-change path.
     """
     stop_heartbeat = threading.Event()
     _ctx = contextvars.copy_context()
@@ -536,6 +775,7 @@ def validate_activity(
             scan_seed,
             artifact_root,
             kb_root_index_key,
+            credibility_config_json,
             replay_mode,
         )
     finally:
@@ -561,10 +801,17 @@ def _validate_activity_impl(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
     replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
+
+    credibility_config: CredibilityConfig | None = (
+        CredibilityConfig.model_validate_json(credibility_config_json)
+        if credibility_config_json is not None
+        else None
+    )
 
     active_panel: dict[str, Any] = panel if panel is not None else dict(DEFAULT_PANEL)
     budget_spec = BudgetSpec(max_cost_usd=budget_cap_usd)
@@ -612,8 +859,29 @@ def _validate_activity_impl(
         debater_tier=debater_tier,
         debater_limiter=debater_limiter,
         checklist_enabled=_checklist_flag(),
+        credibility_config=credibility_config,
+        db_path=db_path,
         replay_mode=replay_mode,
     )
+
+    # Cascade provenance (credibility-economics task 8.2): record the step that
+    # resolved the finding and the definitive CredibilityLevel it assigned, so
+    # the discount decision is auditable after the run.
+    if result.cascade_step is not None:
+        cascade_sink = make_event_sink(db_path, finding.scan_id)
+        if cascade_sink is not None:
+            cascade_sink(
+                "finding.cascade",
+                {
+                    "finding_id": finding.id,
+                    "cascade_step": result.cascade_step,
+                    "credibility": (
+                        result.credibility.value if result.credibility is not None else ""
+                    ),
+                    "corroborated": str(result.corroborated).lower(),
+                    "credibility_prior": str(finding.credibility_prior),
+                },
+            )
 
     if debater_client is not None:
         persist_model_invocations(db_path, finding.scan_id, debater_client)

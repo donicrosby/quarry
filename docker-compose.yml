@@ -107,8 +107,6 @@ services:
         cat /etc/ssl/certs/ca-certificates.crt /mitmproxy-certs/mitmproxy-ca-cert.pem > /tmp/quarry-ca-bundle.pem
         exec quarry worker
     # Memory cap for the worker container.  The browser-capable (quarry:dynamic)
-    # worker drives untrusted page JavaScript; without a cap a runaway Chromium
-    # can exhaust the host.  The kernel OOM-killer terminates the worker instead.
     mem_limit: 2g
     environment:
       QUARRY_TEMPORAL_ADDRESS: temporal:7233
