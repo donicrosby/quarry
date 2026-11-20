@@ -287,6 +287,9 @@ _ALLOWLIST = [
     src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
     # --- browser-worker-playwright: helpers referenced only from tests/ ---
     src.quarry_activities.playwright_driver.store_screenshot,
+    # live-crawl: merge helper is the code/crawl attribution seam W6 (GraphQL
+    # discovery) and W16 (DOM analysis) consume; exercised by tests today.
+    src.quarry_activities.live_recon.merge_attack_maps,
     # --- traffic-capture-verified-evidence: operator API, library callbacks, third-party attrs ---
     # mitmdump discovers the addon list by name from the -s script (not an in-tree call).
     src.quarry_traffic.addon.addons,
