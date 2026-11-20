@@ -229,6 +229,52 @@ def test_severity_filter_drops_results_below_the_threshold(
     assert severities == expected
 
 
+def _run_filter_unchecked(log_path: Path, threshold: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["jq", "--arg", "threshold", threshold, "-f", str(FILTER_PATH), str(log_path)],
+        capture_output=True,
+        text=True,
+        # The CI callers rely on jq's exit status, so the failure path is
+        # inspected rather than raised.
+        check=False,
+    )
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required for the severity filter")
+@pytest.mark.parametrize("threshold", ["bogus", "HIGH", "hig", ""])
+def test_severity_filter_fails_closed_on_an_invalid_threshold(
+    tmp_path: Path, threshold: str
+) -> None:
+    # Regression: an invalid threshold and a log result with no quarry severity
+    # both ranked -1, so `>=` held and every finding (including no-severity
+    # results) survived the gate. An invalid threshold is a config error and
+    # must fail the step instead.
+    log_path = tmp_path / "log.sarif.json"
+    log_path.write_text(json.dumps(_fixture_sarif()), encoding="utf-8")
+
+    completed = _run_filter_unchecked(log_path, threshold)
+
+    assert completed.returncode != 0
+    assert completed.stdout == ""  # nothing is written for upload before the guard fires
+    assert "invalid severity_threshold" in completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required for the severity filter")
+def test_filter_invocations_do_not_mask_a_jq_failure() -> None:
+    # Fail-closed depends on both CI definitions honoring jq's non-zero exit for
+    # an invalid threshold; swallowing it (`|| true`) would reopen the gate.
+    filter_step = _steps()[_step("Filter SARIF")]
+    assert "|| true" not in str(filter_step["run"])
+
+    filter_commands = [
+        str(command)
+        for command in cast("list[Any]", _gitlab_job()["script"])
+        if "ci/sarif_severity_filter.jq" in str(command)
+    ]
+    assert len(filter_commands) == 1
+    assert "|| true" not in filter_commands[0]
+
+
 @pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required for the severity filter")
 def test_both_ci_definitions_share_the_canonical_filter_bytes(tmp_path: Path) -> None:
     # The GitHub workflow and the GitLab component must invoke the same filter

@@ -114,6 +114,7 @@ class SandboxBackend(Protocol):
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult: ...
 
 
@@ -324,8 +325,14 @@ class LocalSubprocessSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
-        """Execute spec.command inside work_dir and return captured output."""
+        """Execute spec.command inside work_dir and return captured output.
+
+        ``canary_active`` is accepted for Protocol conformance and ignored: Tier 1
+        has no container capabilities to drop (it is CLI-only, no kernel-enforced
+        egress — see the class docstring).
+        """
         if egress_policy is not None and not egress_policy.is_empty():
             msg = (
                 "LocalSubprocessSandbox (Tier 1) cannot enforce a destination-set "
@@ -401,6 +408,15 @@ EGRESS_ALLOWED_IPS_ENV = "QUARRY_EGRESS_ALLOWED_IPS"
 
 #: Prefix of the per-policy restricted Docker network name.
 EGRESS_NETWORK_PREFIX = "quarry-egress-"
+
+#: Default per-container memory cap for the Tier-2 sandbox (a Docker ``--memory``
+#: value).  A browser-capable container (``quarry:dynamic``) executing untrusted
+#: target JavaScript can grow without bound; capping memory at the container
+#: level lets the kernel OOM-killer terminate a runaway Chromium instead of
+#: starving the worker host (browser-worker-playwright tasks.md 5.2).  Override
+#: per instance via the ``memory_limit`` constructor argument; pass ``""`` to opt
+#: out of a cap entirely.
+DEFAULT_MEMORY_LIMIT: str = "2g"
 
 
 def egress_network_name(egress_policy: ResolvedEgressPolicy | None) -> str | None:
@@ -497,12 +513,17 @@ class ContainerSandbox:
            ``QUARRY_EGRESS_ALLOWED_IPS`` for audit.
          - *work_dir* bind-mounted to the same path inside the container.
          - Only cleaned ``resolved_env`` forwarded (no proxy vars).
+         - ``--memory``/``--memory-swap`` set to the container memory cap (see
+           :data:`DEFAULT_MEMORY_LIMIT`), so a runaway process inside the
+           sandbox is OOM-killed by the kernel rather than the worker host.
       3. Runs with a hard timeout cap and captures stdout/stderr.
       4. On timeout: kills the container then returns ``timed_out=True``.
       5. Caps and returns output as a :class:`SandboxResult`.
 
     ``image`` defaults to ``python:3.12-slim``; override via constructor for
-    language-specific minimal runtime images (ADR-024 §A).
+    language-specific minimal runtime images (ADR-024 §A).  ``memory_limit``
+    sets the container memory cap (default :data:`DEFAULT_MEMORY_LIMIT`); pass
+    ``""`` to opt out.
 
     Known residual (accepted): the restricted network is content-addressed per
     policy, so concurrent sandboxes with the *same* pinned ip-union share one
@@ -516,8 +537,14 @@ class ContainerSandbox:
     # Default runtime image — minimal, no build toolchain.
     DEFAULT_IMAGE: str = "python:3.12-slim"
 
-    def __init__(self, image: str = DEFAULT_IMAGE) -> None:
+    def __init__(self, image: str = DEFAULT_IMAGE, *, memory_limit: str | None = None) -> None:
+        """Configure the sandbox image and container memory cap.
+
+        *memory_limit* is a Docker ``--memory`` value (e.g. ``"2g"``).  ``None``
+        uses :data:`DEFAULT_MEMORY_LIMIT`; pass ``""`` to run without a cap.
+        """
         self._image = image
+        self._memory_limit = DEFAULT_MEMORY_LIMIT if memory_limit is None else memory_limit
 
     def run(
         self,
@@ -526,6 +553,7 @@ class ContainerSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         """Execute *spec* inside a throwaway Docker container."""
         _validate_args(spec.args)
@@ -549,6 +577,7 @@ class ContainerSandbox:
             egress_policy=egress_policy,
             network=network,
             container_name=container_name,
+            canary_active=canary_active,
         )
 
         start = time.monotonic()
@@ -645,8 +674,22 @@ class ContainerSandbox:
         egress_policy: ResolvedEgressPolicy | None,
         network: str | None,
         container_name: str,
+        canary_active: bool = False,
     ) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", container_name]
+
+        # While a canary is active the sandbox must not be able to raw-craft a
+        # spoofed source IP toward the canary (the source-IP filter is the
+        # containment invariant, so spoofing it would forge corroboration).
+        # Ping-based proofs without a canary keep their raw sockets.
+        if canary_active:
+            cmd += ["--cap-drop", "NET_RAW", "--cap-drop", "NET_ADMIN"]
+        # Container memory cap.  --memory-swap is pinned equal to --memory so the
+        # container cannot exceed the cap via swap; a runaway browser/JS process
+        # is OOM-killed instead of starving the worker host.  Omitted when the
+        # limit is empty (explicit opt-out).
+        if self._memory_limit:
+            cmd += ["--memory", self._memory_limit, "--memory-swap", self._memory_limit]
 
         if network is None:
             # No egress: kernel-enforced network namespace with no routes.
@@ -735,6 +778,7 @@ class K8sJobSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         raise NotImplementedError(
             "K8sJobSandbox is deferred to the CLI hunting follow-on. "

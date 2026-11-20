@@ -128,6 +128,7 @@ def counting_validate_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
 ) -> dict[str, object]:
     """Fake validate activity: tracks peak concurrency + dispatch order.
 
@@ -793,6 +794,7 @@ def _promoting_validator_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: object = None,
 ) -> dict[str, object]:
@@ -1547,6 +1549,7 @@ def _instrumented_prove_activity(
     scan_seed: int | None = None,
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
+    canary_token: str | None = None,
 ) -> dict[str, object]:
     """Fake prove activity: no specs proposed, optional fail/stagger per id.
 
@@ -1747,6 +1750,7 @@ def _needs_proof_validator(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    credibility_config_json: str | None = None,
 ) -> dict[str, object]:
     """Fake validator that parks every candidate as NEEDS_PROOF."""
     return {

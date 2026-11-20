@@ -9,6 +9,10 @@
 #
 # A result with no (or an unknown) quarry severity ranks below every threshold
 # and is dropped, so a malformed log can never smuggle a finding past the gate.
+#
+# An *invalid threshold* is an operator/config error, not "rank lowest": a typo
+# or a wrong-case input (`HIGH`, `hig`) ranks below everything and would keep
+# every result, so the filter exits non-zero instead of passing the gate.
 
 def quarry_rank:
   if type == "string"
@@ -16,6 +20,10 @@ def quarry_rank:
   else -1
   end;
 
-.runs[0].results |= map(
-  select((.properties.quarry.severity | quarry_rank) >= ($threshold | quarry_rank))
-)
+if ($threshold | quarry_rank) < 0
+then error("invalid severity_threshold: \($threshold)")
+else
+  .runs[0].results |= map(
+    select((.properties.quarry.severity | quarry_rank) >= ($threshold | quarry_rank))
+  )
+end

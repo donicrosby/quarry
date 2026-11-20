@@ -60,7 +60,18 @@ class QuarrySettings(BaseSettings):
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+    # Container memory cap for the Tier-2 sandbox (Docker ``--memory`` value,
+    # e.g. "2g").  Empty => the backend default (DEFAULT_MEMORY_LIMIT).  A
+    # browser-capable worker executing untrusted page JS must be capped so a
+    # runaway Chromium is OOM-killed rather than starving the host.
+    # env: QUARRY_SANDBOX_MEMORY
+    sandbox_memory: str = ""
 
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
     # Dependency-manifest supply-chain scanner. Configurable typosquat name
     # patterns; the check is a no-op until at least one pattern is configured.
     # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')

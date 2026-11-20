@@ -177,6 +177,11 @@ log to `severity_threshold`, uploads it to GitHub code scanning (category
 | `severity_threshold` | no | `low` | Minimum severity that fails the check |
 | `quarry_version` | no | `latest` | Quarry git ref to check out and install |
 
+`quarry_version` must be a git ref that actually exists on the Quarry repository
+(branch, tag, or commit SHA): the default literal `latest` only works if such a
+branch or tag is published — otherwise `actions/checkout` fails the job — so pin a
+real ref such as `main` or a release tag.
+
 Example caller:
 
 ```yaml

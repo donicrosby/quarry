@@ -6,6 +6,7 @@ import re
 import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
+from fnmatch import fnmatch
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -220,6 +221,8 @@ class ArtifactKind(StrEnum):
     HUNT_HANDOFF = "hunt_handoff"
     # per-agent-durable-logs: append-only per-agent execution log (JSONL).
     AGENT_LOG = "agent_log"
+    # Multi-persona authorization matrix: endpoint × persona status/hash grid.
+    AUTHZ_MATRIX = "authz_matrix"
 
 
 class RedactionStatus(StrEnum):
@@ -250,6 +253,10 @@ def _empty_candidate_findings() -> list[CandidateFinding]:
 
 
 def _empty_strings() -> list[str]:
+    return []
+
+
+def _empty_canary_callbacks() -> list[CanaryCallback]:
     return []
 
 
@@ -553,6 +560,64 @@ class Target(BaseModel):
     created_at: datetime
 
 
+# Privilege vocabulary a persona declares. ``unauthenticated`` is the
+# no-credential persona; the rest order low → high privilege.
+PrivilegeLevel = Literal["unauthenticated", "guest", "user", "admin"]
+
+
+def _default_persona_paths() -> list[str]:
+    """Default ``allowed_paths`` for a persona — the whole host root."""
+    return ["/"]
+
+
+def path_matches_do_not_test(path: str, patterns: tuple[str, ...] | list[str]) -> bool:
+    """True when *path* matches any ``do_not_test`` pattern.
+
+    The top-level ``do_not_test`` list is a ceiling over every persona: the
+    authz-matrix activity uses this predicate to refuse probing an endpoint
+    before egress. Matching follows the ``_path_pattern_matches`` convention.
+    """
+    return any(_path_pattern_matches(path, pattern) for pattern in patterns)
+
+
+def _path_pattern_matches(path: str, pattern: str) -> bool:
+    """Match *path* against a scope pattern (glob or exact/prefix).
+
+    Mirrors the ``do_not_test`` matching convention enforced by the
+    live-exploitation rules of engagement (``quarry_workflows.roe._path_matches``):
+    ``fnmatch`` globs first, then an exact-or-prefix comparison. Kept local so
+    ``quarry.schemas`` never imports ``quarry_workflows``.
+    """
+    if fnmatch(path, pattern):
+        return True
+    prefix = pattern.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+class PersonaScope(BaseModel):
+    """One named persona in a multi-persona ``TargetAuthorization``.
+
+    ``profile_ref`` names an ``AuthProfile`` in the scan's ``AuthProfileSet``;
+    ``None`` declares an unauthenticated persona (no credential injection).
+    ``allowed_hosts`` / ``allowed_paths`` bound where the persona applies;
+    ``privilege_level`` orders personas for privilege-escalation reasoning;
+    ``expected_denied_paths`` is the *declared ground truth* the matrix violation
+    rules evaluate against (a 2xx on one of these paths is a violation).
+    """
+
+    name: str
+    profile_ref: str | None = None
+    allowed_hosts: list[str] = Field(default_factory=_empty_strings)
+    allowed_paths: list[str] = Field(default_factory=_default_persona_paths)
+    do_not_test: list[str] = Field(default_factory=_empty_strings)
+    privilege_level: PrivilegeLevel
+    expected_denied_paths: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_personas() -> list[PersonaScope]:
+    return []
+
+
 class TargetAuthorization(BaseModel):
     id: str
     target_id: str
@@ -564,6 +629,45 @@ class TargetAuthorization(BaseModel):
     notes: str | None = None
     do_not_test: list[str] = Field(default_factory=_empty_strings)
     created_at: datetime
+    # Optional multi-persona declaration. Empty preserves the historical
+    # single-authorization behavior exactly.
+    personas: list[PersonaScope] = Field(default_factory=_empty_personas)
+
+    @model_validator(mode="after")
+    def _validate_persona_scopes(self) -> TargetAuthorization:
+        """Reject persona declarations that escape the top-level authorization.
+
+        - duplicate persona names within one authorization
+        - a persona host absent from the top-level ``allowed_hosts``
+        - a persona ``allowed_paths`` / ``expected_denied_paths`` entry that
+          intersects a top-level ``do_not_test`` pattern
+
+        Zero personas is valid (backward compatibility).
+        """
+        seen_names: set[str] = set()
+        for persona in self.personas:
+            if persona.name in seen_names:
+                msg = f"duplicate persona name: '{persona.name}'."
+                raise ValueError(msg)
+            seen_names.add(persona.name)
+
+            for host in persona.allowed_hosts:
+                if host not in self.allowed_hosts:
+                    msg = (
+                        f"persona '{persona.name}' allowed_hosts contains host "
+                        f"'{host}' absent from the top-level allowed_hosts."
+                    )
+                    raise ValueError(msg)
+
+            for path in (*persona.allowed_paths, *persona.expected_denied_paths):
+                for pattern in self.do_not_test:
+                    if _path_pattern_matches(path, pattern):
+                        msg = (
+                            f"persona '{persona.name}' path '{path}' intersects "
+                            f"top-level do_not_test pattern '{pattern}'."
+                        )
+                        raise ValueError(msg)
+        return self
 
 
 def _empty_tier_dicts() -> list[dict[str, Any]]:
@@ -724,6 +828,11 @@ class EnsembleJudgement(BaseModel):
     verdict: JudgementVerdict | str
     refuted: bool | None = None  # set only for debater judgements
     model_invocation_id: str | None = None
+    # The candidate's tier-discounted credibility prior at the time the
+    # judgement was recorded (credibility-economics). Provenance only: the
+    # ordinal ``compute_credibility`` posterior is computed from stances, never
+    # from this number.
+    credibility_prior: float = 1.0
 
     @field_validator("verdict", mode="before")
     @classmethod
@@ -854,6 +963,32 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    # Write-time credibility economics (credibility-economics). ``grounded`` is
+    # provenance, not a score: True when the finding's claim came from a
+    # deterministic tool observation (a parsed HTTP status, a regex/grep match, a
+    # port scan, a proven exploit chain), False when a model produced it from
+    # reasoning. It is set explicitly at every construction site and never
+    # recomputed. Distinct from citation-grounding
+    # (``validate._refute_must_be_grounded``) and knowledge-base grounding
+    # (``kb_recon.py`` grounded entities).
+    grounded: bool = True
+    # The model that produced the finding when it was a model judgment; None for
+    # deterministic tool output. Resolves the reliability tier used to discount
+    # a judgment.
+    originating_model_id: str | None = None
+    # Tier-discounted credibility prior (``base * (1.0 if grounded else
+    # tier_factor)``), derived in ``_derive_credibility_prior`` below. A
+    # cascade/coverage-ledger input only — it never modulates the ordinal
+    # ``compute_credibility`` posterior.
+    credibility_prior: float = 1.0
+    # The tier factor actually applied when the finding was discounted (None when
+    # the finding is tool-grounded). Recorded so the discount is auditable.
+    credibility_discount: float | None = None
+    # Set by the corroboration cascade when the finding was corroborated
+    # (tool-grounded evidence or independent signals); promotes its coverage cell.
+    corroborated: bool = False
+    # The cascade step that resolved the finding, for report provenance.
+    cascade_step: str | None = None
     # Ensemble credibility posterior (MDASH, design D3). ``None`` when the finding
     # was not reviewed by a debater/counterpoint ensemble. ``ensemble`` retains
     # each contributing judgement (provenance-linked) so the report is auditable.
@@ -893,6 +1028,30 @@ class CandidateFinding(BaseModel):
         # ``raw_severity`` so the raw value is always exposed.
         if self.raw_severity is None:
             self.raw_severity = self.severity
+        return self
+
+    @model_validator(mode="after")
+    def _derive_credibility_prior(self) -> CandidateFinding:
+        """Derive the tier-discounted credibility prior from the write-time tag.
+
+        ``prior = base * (1.0 if grounded else tier_factor)``; the applied tier
+        factor (when any) is recorded as ``credibility_discount``. Deriving it
+        here makes the invariant hold at every construction site — including the
+        sites that build findings in workflow code — instead of relying on each
+        caller to recompute it. Findings written before this field existed
+        deserialise with ``grounded=True`` (no discount), so their prior is 1.0.
+        """
+        # Local import: ``quarry_models.credibility`` imports ``quarry.schemas``
+        # (and ``quarry.panel_config``, which does too), so a module-level import
+        # here would be circular.
+        from quarry_models.credibility import credibility_prior_for
+
+        prior, discount = credibility_prior_for(
+            grounded=self.grounded,
+            originating_model_id=self.originating_model_id,
+        )
+        self.credibility_prior = prior
+        self.credibility_discount = discount
         return self
 
 
@@ -1021,7 +1180,7 @@ class AgentTask(BaseModel):
     # consuming activity resolves it via the kb_context injector at execution
     # time — the task itself carries only the reference, never the content.
     kb_root_index_key: str | None = None
-    source: Literal["recon", "gapfill", "feedback"] = "recon"
+    source: Literal["recon", "gapfill", "feedback", "authz-matrix"] = "recon"
     gapfill_pass: int = 0
     # The iterative-coverage-loop round (0-based) in which this task is hunted
     # (ADR-022). round_index=0 for recon-derived tasks; gapfill/feedback tasks
@@ -1053,6 +1212,11 @@ class ValidationResult(BaseModel):
     # The recorded negative-constraint checklist (cpc slice 5). Populated when the
     # debater runs the checklist refute regime; empty for the legacy binary refuter.
     checklist: list[ChecklistItem] = Field(default_factory=_empty_checklist)
+    # Corroboration cascade outcome (credibility-economics): the step that
+    # resolved the finding and whether it was corroborated. Both stay at their
+    # defaults when the scan has no ``[credibility]`` config (legacy path).
+    corroborated: bool = False
+    cascade_step: str | None = None
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -1124,6 +1288,39 @@ class HunterGap(BaseModel):
     vuln_class: VulnerabilityClass | None = None
 
 
+class CoverageCell(BaseModel):
+    """Tier-aware occupancy state of one ``(scope, vuln_class)`` coverage cell.
+
+    A cell is *covered* only when at least one of its occupants is
+    tool-grounded (``grounded=True``), was corroborated by the cascade
+    (``corroborated=True``), or carries a tier-discounted credibility prior at
+    or above the STRONG factor (0.9). A cell whose sole occupants are all
+    discounted stays uncovered and is therefore eligible for one gapfill
+    re-hunt; once that re-hunt produces no new corroborated finding the cell is
+    recorded ``terminal_uncovered`` and permanently excluded from gapfill.
+    """
+
+    vuln_class: VulnerabilityClass
+    scope: str
+    covered: bool
+    terminal_uncovered: bool = False
+    # Occupancy counts, for audit: how many findings landed in the cell, and how
+    # many of them counted toward coverage.
+    occupant_count: int = 0
+    covered_occupants: int = 0
+    # True when coverage came from a cascade corroboration rather than from the
+    # finding's own grounded/tier status.
+    corroboration_promotion: bool = False
+    # The reliability tier of the occupant that decided coverage (audit trail for
+    # the frontier/strong-tier judgment case). None when coverage came from a
+    # tool-grounded or corroborated occupant.
+    tier: str | None = None
+
+
+def _empty_coverage_cells() -> list[CoverageCell]:
+    return []
+
+
 class CoverageLedger(BaseModel):
     id: str
     scan_id: str
@@ -1133,6 +1330,13 @@ class CoverageLedger(BaseModel):
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
+    # Tier-aware ``(scope, vuln_class)`` cell occupancy (credibility-economics).
+    # A cell counts as covered only when it has an occupant that is
+    # tool-grounded, corroborated, or carries a prior at/above ``TIER_THRESHOLD``;
+    # cells left uncovered after a gapfill attempt are recorded
+    # ``terminal_uncovered`` and excluded from further gapfill. Empty for ledgers
+    # built without findings (pre-guarantee behaviour).
+    cells: list[CoverageCell] = Field(default_factory=_empty_coverage_cells)
     # Proactive production-file accounting (candidate-precision-and-calibration).
     # Every first-party file in the snapshot manifest is accounted for exactly
     # once: covered by an investigation, intentionally excluded (with reason),
@@ -1915,6 +2119,70 @@ class SessionTokenAnalysisResult(BaseModel):
     findings: list[CandidateFinding] = Field(default_factory=_empty_candidate_findings)
 
 
+# ---------------------------------------------------------------------------
+# Multi-persona authorization matrix (endpoint × persona status/hash grid)
+# ---------------------------------------------------------------------------
+
+
+def _empty_authz_personas() -> list[AuthzMatrixPersona]:
+    return []
+
+
+def _empty_authz_cells() -> list[AuthzMatrixCell]:
+    return []
+
+
+def _empty_authz_rows() -> list[AuthzMatrixRow]:
+    return []
+
+
+class AuthzMatrixEndpoint(BaseModel):
+    """One attack-map endpoint probed by the matrix."""
+
+    method: str
+    path: str
+
+
+class AuthzMatrixPersona(BaseModel):
+    """A persona as the matrix needs it: pre-resolved, no credential values.
+
+    ``profile_ref`` is the explicit ``AuthProfile`` name the workflow resolved
+    for this cell (``None`` = unauthenticated). ``expected_denied_paths`` is the
+    declared ground truth the violation rules evaluate against.
+    """
+
+    name: str
+    profile_ref: str | None = None
+    privilege_level: PrivilegeLevel
+    expected_denied_paths: list[str] = Field(default_factory=_empty_strings)
+
+
+class AuthzMatrixCell(BaseModel):
+    """One (endpoint, persona) probe result: status code, body hash, error."""
+
+    persona: str
+    status_code: int | None = None
+    body_hash: str | None = None
+    error: str | None = None
+
+
+class AuthzMatrixRow(BaseModel):
+    """One endpoint's row across every persona."""
+
+    endpoint_path: str
+    endpoint_method: str
+    cells: list[AuthzMatrixCell] = Field(default_factory=_empty_authz_cells)
+
+
+class AuthzMatrixResult(BaseModel):
+    """The persisted matrix: personas, rows, and the artifact it was stored in."""
+
+    scan_id: str
+    personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
+    rows: list[AuthzMatrixRow] = Field(default_factory=_empty_authz_rows)
+    artifact_ref: ArtifactRef | None = None
+
+
 class DynamicEvidenceLink(BaseModel):
     """Source-to-dynamic provenance chain: white-box anchor → HTTP round-trip → finding."""
 
@@ -2061,12 +2329,43 @@ class SandboxExecSpec(BaseModel):
         return v
 
 
+#: Maximum characters retained from a request-controlled canary path.
+CANARY_PATH_MAX_CHARS: int = 2048
+
+
+class CanaryCallback(BaseModel):
+    """One HTTP request observed by the canary listener during a sandbox run.
+
+    Only safe fields are captured: ``method``, ``path``, ``source_ip`` and
+    ``timestamp``.  Request headers and bodies are never stored — the listener
+    must not retain attacker-controlled content beyond the length-capped path.
+    """
+
+    timestamp: str
+    method: str
+    path: str
+    source_ip: str
+
+    @field_validator("path")
+    @classmethod
+    def _cap_path(cls, value: str) -> str:
+        """Clamp the request-controlled path to a fixed maximum length."""
+        return value[:CANARY_PATH_MAX_CHARS]
+
+
 class SandboxExecCapture(BaseModel):
     """Captured result of a sandbox execution.  Parallels HttpResponseCapture.
 
     stdout/stderr stored as artifacts (TOOL_STDOUT/TOOL_STDERR), never inline.
     Both streams pass through Scrubber.scrub() + <target_content> wrap before
     any prompt re-entry (same policy as HTTP response bodies).
+
+    ``canary_callbacks`` carries the requests the canary listener observed while
+    the command ran (empty when no canary token was set).  ``resolved_target_ips``
+    carries the pinned ``target-host`` IPs the activity enforced, so the pure
+    workflow-side evaluator can corroborate callbacks without doing DNS — it is
+    empty for a Tier-1 (no-egress) dispatch, which structurally keeps canary
+    corroboration Tier-2-only.
     """
 
     exit_code: int
@@ -2076,6 +2375,8 @@ class SandboxExecCapture(BaseModel):
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
     timed_out: bool = False
+    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
+    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
     # The stored ArtifactRefs (stdout, stderr) as the quarantine pipeline
     # returned them, so the pure workflow can attach the recorded sha256/size to
     # the proof artifact's evidence refs. Empty for captures built before this
