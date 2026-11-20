@@ -302,6 +302,12 @@ _ALLOWLIST = [
     src.quarry.schemas.SENSITIVE_ENV_KEYS,
     src.quarry.schemas.VerdictDefaults.deployment_intent,
     src.quarry.schemas.VerdictDefaults.reverification_outcome,
+    # multi-persona-authz-matrix: pydantic fields set by BaseModel __init__.
+    src.quarry.schemas.PersonaScope.privilege_level,
+    src.quarry.schemas.AuthzMatrixPersona.privilege_level,
+    src.quarry.schemas.AuthzMatrixCell.body_hash,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_path,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_method,
     src.quarry_activities.browser_login.BrowserLoginResolver,
     src.quarry_activities.calibrate.RULE_REDUNDANT_CAPABILITY_DOWNGRADE,
     src.quarry_activities.credentials.CredentialProvider,

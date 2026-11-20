@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import BuildCommand, ChangedFile
+from quarry.schemas import AuthzMatrixEndpoint, AuthzMatrixPersona, BuildCommand, ChangedFile
 
 
 class CreateSnapshotInput(BaseModel):
@@ -423,3 +423,38 @@ class LoadHandoffArtifactsOutput(BaseModel):
     hunt_handoff_json: str | None = None
     architecture_doc_json: str | None = None
     coverage_ledger_json: str | None = None
+
+
+def _empty_authz_endpoints() -> list[AuthzMatrixEndpoint]:
+    return []
+
+
+def _empty_authz_personas() -> list[AuthzMatrixPersona]:
+    return []
+
+
+class AuthzMatrixActivityInput(BaseModel):
+    """Input payload for the authz-matrix activity (multi-persona authZ matrix).
+
+    All values are JSON-serializable primitives at the Temporal boundary; the
+    workflow pre-resolves each persona's ``profile_ref`` and pre-filters
+    endpoints by top-level ``request_in_scope`` before the call. The activity
+    performs NO persona selection — it probes every supplied (endpoint, persona)
+    pair with that persona's explicit ``profile_ref``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    target_endpoint_json: str  # TargetEndpoint serialized
+    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
+    artifact_store_path: str  # path for LocalArtifactStore
+    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+    # Top-level do_not_test ceiling: endpoints matching any pattern are never
+    # probed (no cell), regardless of persona.
+    do_not_test: tuple[str, ...] = ()
+    endpoints: list[AuthzMatrixEndpoint] = Field(default_factory=_empty_authz_endpoints)
+    personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
+    # Minimum spacing between requests to the same host (target-side rate-limit
+    # safety). Default 1.0s; unit tests pass 0.0 to keep the suite fast.
+    min_request_interval_seconds: float = 1.0
