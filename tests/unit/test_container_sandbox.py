@@ -132,6 +132,47 @@ class TestContainerSandboxProtocol:
 
 
 # ---------------------------------------------------------------------------
+# Canary containment: NET_RAW drop
+# ---------------------------------------------------------------------------
+
+
+class TestContainerSandboxCanaryCapDrop:
+    def test_canary_active_drops_net_raw_and_net_admin(self, tmp_path: Path) -> None:
+        """While a canary is active the sandbox must not forge the target source IP."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(
+                spec,
+                work_dir=tmp_path,
+                resolved_env={},
+                egress_policy=None,
+                canary_active=True,
+            )
+
+        docker_args = _docker_run_call(mock_run)
+        drops = [
+            docker_args[idx + 1]
+            for idx, part in enumerate(docker_args)
+            if part == "--cap-drop" and idx + 1 < len(docker_args)
+        ]
+        assert "NET_RAW" in drops
+        assert "NET_ADMIN" in drops
+
+    def test_no_canary_keeps_raw_sockets(self, tmp_path: Path) -> None:
+        """Ping-based proofs without a canary keep NET_RAW (default rationale)."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert "NET_RAW" not in docker_args
+
+
+# ---------------------------------------------------------------------------
 # Network isolation
 # ---------------------------------------------------------------------------
 

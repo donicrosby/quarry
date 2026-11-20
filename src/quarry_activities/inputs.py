@@ -242,6 +242,12 @@ class SandboxExecActivityInput(BaseModel):
     candidate_finding_id: str
     auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
     prove_corpus_json: str | None = None  # ProveCorpus serialized; None = HTTP prove
+    # Deterministic canary token (SHA-256 of finding id + attempt index).  When
+    # set, sandbox-exec starts an SSRF/XXE canary listener, sets QUARRY_CANARY_URL
+    # in the sandbox environment, and returns the observed callbacks.  None = no
+    # canary (the sole activation signal; build_prove_sandbox_policy's needs_canary
+    # is an inert wanted-set marker).
+    canary_token: str | None = None
 
 
 class FuzzSpec(BaseModel):

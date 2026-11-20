@@ -45,6 +45,7 @@ class ScriptedSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         self.invocations.append(spec)
         return self._results.pop(0)
@@ -60,6 +61,7 @@ class _RefusingSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         msg = "Command 'target' is not on the sandbox allowlist"
         raise ToolSecurityError(msg)

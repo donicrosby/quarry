@@ -114,6 +114,7 @@ class SandboxBackend(Protocol):
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult: ...
 
 
@@ -324,8 +325,14 @@ class LocalSubprocessSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
-        """Execute spec.command inside work_dir and return captured output."""
+        """Execute spec.command inside work_dir and return captured output.
+
+        ``canary_active`` is accepted for Protocol conformance and ignored: Tier 1
+        has no container capabilities to drop (it is CLI-only, no kernel-enforced
+        egress — see the class docstring).
+        """
         if egress_policy is not None and not egress_policy.is_empty():
             msg = (
                 "LocalSubprocessSandbox (Tier 1) cannot enforce a destination-set "
@@ -526,6 +533,7 @@ class ContainerSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         """Execute *spec* inside a throwaway Docker container."""
         _validate_args(spec.args)
@@ -549,6 +557,7 @@ class ContainerSandbox:
             egress_policy=egress_policy,
             network=network,
             container_name=container_name,
+            canary_active=canary_active,
         )
 
         start = time.monotonic()
@@ -645,8 +654,16 @@ class ContainerSandbox:
         egress_policy: ResolvedEgressPolicy | None,
         network: str | None,
         container_name: str,
+        canary_active: bool = False,
     ) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", container_name]
+
+        # While a canary is active the sandbox must not be able to raw-craft a
+        # spoofed source IP toward the canary (the source-IP filter is the
+        # containment invariant, so spoofing it would forge corroboration).
+        # Ping-based proofs without a canary keep their raw sockets.
+        if canary_active:
+            cmd += ["--cap-drop", "NET_RAW", "--cap-drop", "NET_ADMIN"]
 
         if network is None:
             # No egress: kernel-enforced network namespace with no routes.
@@ -735,6 +752,7 @@ class K8sJobSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         raise NotImplementedError(
             "K8sJobSandbox is deferred to the CLI hunting follow-on. "

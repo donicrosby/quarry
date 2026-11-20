@@ -1547,6 +1547,7 @@ def _instrumented_prove_activity(
     scan_seed: int | None = None,
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
+    canary_token: str | None = None,
 ) -> dict[str, object]:
     """Fake prove activity: no specs proposed, optional fail/stagger per id.
 
