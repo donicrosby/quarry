@@ -61,6 +61,7 @@ PROOF_ARTIFACT_KINDS: frozenset[ArtifactKind] = frozenset(
         ArtifactKind.TOOL_STDOUT,
         ArtifactKind.TOOL_STDERR,
         ArtifactKind.HTTP_RESPONSE,
+        ArtifactKind.EVIDENCE,
     }
 )
 

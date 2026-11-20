@@ -11,7 +11,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import AuthzMatrixEndpoint, AuthzMatrixPersona, BuildCommand, ChangedFile
+from quarry.schemas import (
+    AuthzMatrixEndpoint,
+    AuthzMatrixPersona,
+    BuildCommand,
+    CanaryCallback,
+    ChangedFile,
+)
 
 
 class CreateSnapshotInput(BaseModel):
@@ -458,3 +464,18 @@ class AuthzMatrixActivityInput(BaseModel):
     # Minimum spacing between requests to the same host (target-side rate-limit
     # safety). Default 1.0s; unit tests pass 0.0 to keep the suite fast.
     min_request_interval_seconds: float = 1.0
+
+
+class IngestCanaryCallbacksInput(BaseModel):
+    """Input payload for the worker-side canary-callback capture-index consumer.
+
+    The B10 per-exec listener returns safe-field callbacks in memory on
+    ``SandboxExecCapture.canary_callbacks``; the workflow forwards them here and
+    the activity writes each one into the capture index with its originating
+    hunt task id. The capture root is resolved worker-side from settings.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    callbacks: tuple[CanaryCallback, ...] = ()
+    hunt_task_id: str = ""

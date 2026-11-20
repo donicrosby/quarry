@@ -219,6 +219,9 @@ class ArtifactKind(StrEnum):
     # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
     ARCHITECTURE_DOC = "architecture_doc"
     HUNT_HANDOFF = "hunt_handoff"
+    # traffic-capture-verified-evidence: redacted, hash-verified evidence blob
+    # snapshotted from a capture exchange. Quarantined proof content.
+    EVIDENCE = "evidence"
     # per-agent-durable-logs: append-only per-agent execution log (JSONL).
     AGENT_LOG = "agent_log"
     # Multi-persona authorization matrix: endpoint × persona status/hash grid.
@@ -2383,6 +2386,8 @@ class SandboxExecCapture(BaseModel):
     # field existed (legacy/replay payloads) — the workflow then reconstructs
     # id-only refs.
     artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
+    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
 
 
 class ProveCorpus(BaseModel):

@@ -745,9 +745,9 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
         scrubber_hits=scrubber_hits,
         redaction_status=redaction_status,
         timed_out=result.timed_out,
+        artifact_refs=[stdout_ref, stderr_ref],
         canary_callbacks=canary_callbacks,
         resolved_target_ips=resolved_target_ips,
-        artifact_refs=[stdout_ref, stderr_ref],
     )
 
 
