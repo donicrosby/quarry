@@ -13,16 +13,23 @@ worker image) and owns the whole session lifecycle:
 - The agent receives only session-scoped action results.  The browser process,
   storage state, cookie values, and session secrets stay worker-side: cookie
   values are registered in the per-run ``Scrubber`` so they are redacted from any
-  DOM/JS/HAR/screenshot output.
+  DOM/JS/HAR/screenshot output (``get_dom`` and ``execute_js`` scrub before return).
+- Each session's browser is pinned to one owned driver thread.  Playwright's sync
+  API is thread-affine, so a session created in one Temporal activity invocation
+  (one thread-pool thread) is still drivable from the next invocation's thread.
 
 Containment (spec ``execute_js`` requirement): agent-supplied JavaScript runs
-under a hard timeout (default 5 s, max 30 s), its return value is JSON-serialized
-and capped at 100 KB, non-serializable values produce an error, and the value
-passes through the ``Scrubber`` before it is returned.
+under a hard timeout (default 5 s, max 30 s) enforced by the session driver
+thread (``Page.evaluate`` has no native timeout), its return value is
+JSON-serialized and capped at 100 KB, non-serializable values produce an error,
+and the value passes through the ``Scrubber`` before it is returned.
 
 HAR capture (spec HAR requirement): opt-in via ``capture_har`` on ``open_url``;
 on an explicit ``stop_har`` (or session expiry) the recorded traffic is scrubbed
-through the ``Scrubber`` and stored as an ``ArtifactRef(kind=har)``.
+through the ``Scrubber`` and stored as an ``ArtifactRef(kind=har)``. Credentials
+minted *after* ``open_url`` (login ``Set-Cookie``, token refresh) are re-registered
+into the scrubber at finalize time, and ``HarRecorder`` redacts credential-header
+values at the capture boundary.
 """
 
 from __future__ import annotations
@@ -31,9 +38,11 @@ import json
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -41,6 +50,7 @@ from temporalio import activity
 
 from quarry_activities.inputs import BrowserSessionActivityInput
 from quarry_activities.playwright_driver import (
+    DEFAULT_ACTION_TIMEOUT_MS,
     BrowserActionTimeoutError,
     store_har,
     store_screenshot,
@@ -56,6 +66,12 @@ MAX_JS_TIMEOUT_MS = 30_000
 MAX_JS_OUTPUT_BYTES = 100_000
 DEFAULT_SESSION_TTL_SECONDS = 300
 
+#: Slack added to a driver-call deadline so a Playwright-level per-action timeout
+#: (which carries the actionable message) normally fires first; the deadline only
+#: catches a driver thread left busy by an operation Playwright cannot time out
+#: (``Page.evaluate``), so a wedged session never hangs a caller forever.
+_DRIVER_CALL_DEADLINE_SLACK_S = 5.0
+
 
 class BrowserSessionError(RuntimeError):
     """Base error for browser-session lifecycle failures."""
@@ -69,18 +85,157 @@ class BrowserSessionExpiredError(BrowserSessionError):
     """Raised when an action references a ``session_id`` whose TTL has elapsed."""
 
 
+class _SessionDriver:
+    """One dedicated thread per session; every Playwright call is queued onto it.
+
+    Playwright's sync API is thread-affine: a browser built on one thread raises
+    ``greenlet.error`` ("cannot switch to a different thread") when driven from
+    another, and Temporal activities run on an unpinned thread pool — the same
+    session handle is reached from a different worker thread on each invocation.
+    Pinning each session's browser to a single owned thread (and funneling every
+    call through it) keeps the session-handle model working across invocations,
+    and is also where ``execute_js``'s hard bound is enforced.
+    """
+
+    def __init__(self) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="quarry-browser-session"
+        )
+
+    def run(self, fn: Any, *, timeout: float | None = None) -> Any:
+        """Run *fn* on the session thread, joining with an optional deadline."""
+        future = self._executor.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError as exc:
+            msg = "browser driver call exceeded its deadline"
+            raise BrowserActionTimeoutError(msg) from exc
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+class _ThreadedBrowser:
+    """A ``BrowserSession`` whose every method runs on its session's driver thread.
+
+    The wrapped browser is built *on* the driver thread (see ``_open_url``), so
+    Playwright's thread affinity holds no matter which activity thread calls in.
+    Non-``execute_js`` calls carry a backstop deadline (per-action timeout plus
+    slack) so a driver thread left busy by an unbounded operation cannot hang a
+    caller forever; ``execute_js`` carries the caller's own hard bound.
+    """
+
+    def __init__(self, inner: Any, driver: _SessionDriver) -> None:
+        self._inner = inner
+        self._driver = driver
+        inner_timeout_ms = int(getattr(inner, "action_timeout_ms", DEFAULT_ACTION_TIMEOUT_MS))
+        self._deadline_s = inner_timeout_ms / 1000.0 + _DRIVER_CALL_DEADLINE_SLACK_S
+
+    @property
+    def blocked_requests(self) -> list[str]:
+        return list(getattr(self._inner, "blocked_requests", []))
+
+    def navigate(self, url: str) -> None:
+        self._driver.run(lambda: self._inner.navigate(url), timeout=self._deadline_s)
+
+    def fill(self, selector: str, value: str) -> None:
+        self._driver.run(lambda: self._inner.fill(selector, value), timeout=self._deadline_s)
+
+    def click(self, selector: str) -> None:
+        self._driver.run(lambda: self._inner.click(selector), timeout=self._deadline_s)
+
+    def wait_for(self, selector: str) -> None:
+        self._driver.run(lambda: self._inner.wait_for(selector), timeout=self._deadline_s)
+
+    def current_url(self) -> str:
+        return str(self._driver.run(self._inner.current_url, timeout=self._deadline_s))
+
+    def has_selector(self, selector: str) -> bool:
+        return bool(
+            self._driver.run(lambda: self._inner.has_selector(selector), timeout=self._deadline_s)
+        )
+
+    def has_text(self, text: str) -> bool:
+        return bool(self._driver.run(lambda: self._inner.has_text(text), timeout=self._deadline_s))
+
+    def get_dom(self, text_cap: int = 100_000) -> str:
+        return str(
+            self._driver.run(
+                lambda: self._inner.get_dom(text_cap=text_cap), timeout=self._deadline_s
+            )
+        )
+
+    def get_cookies(self) -> list[dict[str, Any]]:
+        return cast(
+            "list[dict[str, Any]]",
+            self._driver.run(self._inner.get_cookies, timeout=self._deadline_s),
+        )
+
+    def execute_js(self, script: str, timeout_ms: int = 5_000) -> Any:
+        """Evaluate *script*, enforcing its hard bound by joining with a deadline.
+
+        ``Page.evaluate`` has no native timeout, so the session driver thread is
+        the enforcement point (spec Requirement 5).
+        """
+        return self._driver.run(
+            lambda: self._inner.execute_js(script, timeout_ms=timeout_ms),
+            timeout=timeout_ms / 1000.0,
+        )
+
+    def start_har(self) -> None:
+        self._driver.run(self._inner.start_har, timeout=self._deadline_s)
+
+    def stop_har(self) -> bytes:
+        return cast("bytes", self._driver.run(self._inner.stop_har, timeout=self._deadline_s))
+
+    def storage_state(self) -> dict[str, Any]:
+        return cast(
+            "dict[str, Any]",
+            self._driver.run(self._inner.storage_state, timeout=self._deadline_s),
+        )
+
+    def screenshot(self) -> bytes:
+        return cast("bytes", self._driver.run(self._inner.screenshot, timeout=self._deadline_s))
+
+    def close(self) -> None:
+        try:
+            self._driver.run(self._inner.close, timeout=self._deadline_s)
+        except Exception:  # noqa: BLE001 - teardown is best-effort
+            return
+
+
 @dataclass
 class _LiveSession:
     """Worker-side handle for one live browser session (never agent-visible)."""
 
     session_id: str
-    browser: Any
+    browser: _ThreadedBrowser
     scrubber: Scrubber
     store: LocalArtifactStore
     scan_id: str
     ttl_seconds: float
     created_at: float
     capture_har: bool
+    driver: _SessionDriver
+
+    def close(self) -> None:
+        """Finalize any pending HAR capture and release the Chromium process.
+
+        Idempotent enough for the expiry/sweep/clear paths: the HAR finalize is a
+        no-op once ``capture_har`` is cleared, and ``browser.close``/``driver.close``
+        are safe to call more than once.
+        """
+        try:
+            _finalize_har(self)
+        finally:
+            try:
+                self.browser.close()
+            finally:
+                self.driver.close()
+
+
+def _is_expired(session: _LiveSession) -> bool:
+    return time.monotonic() - session.created_at > session.ttl_seconds
 
 
 class _SessionStore:
@@ -91,31 +246,41 @@ class _SessionStore:
         self._lock = threading.Lock()
 
     def put(self, session: _LiveSession) -> None:
+        """Register *session*, sweeping (and closing) any expired sessions first."""
         with self._lock:
+            expired = [s for s in self._sessions.values() if _is_expired(s)]
+            for stale in expired:
+                del self._sessions[stale.session_id]
             self._sessions[session.session_id] = session
+        for stale in expired:
+            stale.close()
 
     def get(self, session_id: str) -> _LiveSession:
         """Return the live session, or raise a named error.
 
-        Expired sessions are evicted (finalizing any pending HAR capture) and
-        refused — never silently recreated.
+        Expired sessions are evicted (finalizing any pending HAR capture, then
+        closing Chromium) and refused — never silently recreated.
         """
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 raise BrowserSessionNotFoundError(f"browser session '{session_id}' not found")
-            if time.monotonic() - session.created_at > session.ttl_seconds:
+            if _is_expired(session):
                 del self._sessions[session_id]
                 expired = session
             else:
                 return session
-        _finalize_har(expired)
+        expired.close()
         msg = f"browser session '{session_id}' expired after {expired.ttl_seconds:.0f}s"
         raise BrowserSessionExpiredError(msg)
 
     def clear(self) -> None:
+        """Drop every session, closing each browser (used by tests and shutdown)."""
         with self._lock:
+            sessions = list(self._sessions.values())
             self._sessions.clear()
+        for session in sessions:
+            session.close()
 
 
 _STORE = _SessionStore()
@@ -152,10 +317,17 @@ def _register_session_secrets(browser: Any, scrubber: Scrubber) -> None:
 
 
 def _finalize_har(session: _LiveSession) -> dict[str, Any] | None:
-    """Stop HAR recording, scrub it, and store it as an ``ArtifactRef(kind=har)``."""
+    """Stop HAR recording, scrub it, and store it as an ``ArtifactRef(kind=har)``.
+
+    Session secrets are re-registered here — immediately before the capture is
+    stopped — so credentials minted *after* ``open_url`` (a login flow's
+    ``Set-Cookie``, a token refresh, a ``?sid=`` parameter) are denylisted and
+    scrubbed from the stored HAR just like the open_url-time cookies.
+    """
     if not session.capture_har:
         return None
     session.capture_har = False
+    _register_session_secrets(session.browser, session.scrubber)
     try:
         data = session.browser.stop_har()
     except Exception:  # noqa: BLE001 - best-effort finalize
@@ -193,7 +365,12 @@ def _resolve_url(inp: BrowserSessionActivityInput) -> str | None:
 
 
 def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
-    """Launch a real browser session — host-checked before any process starts."""
+    """Launch a real browser session — host-checked before any process starts.
+
+    The browser is built *on* the session's dedicated driver thread so Playwright's
+    sync-API thread affinity holds for every later action, regardless of which
+    activity thread dispatches it.
+    """
     resolved = _resolve_url(inp)
     if resolved is None:
         return {"error": "missing_url"}
@@ -206,11 +383,19 @@ def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
         }
 
     scrubber = Scrubber()
-    browser = _build_browser_session(
-        allowed_hosts=inp.allowed_hosts,
-        target_host=inp.target_host,
-        target_port=inp.target_port,
-    )
+    driver = _SessionDriver()
+    try:
+        inner = driver.run(
+            lambda: _build_browser_session(
+                allowed_hosts=inp.allowed_hosts,
+                target_host=inp.target_host,
+                target_port=inp.target_port,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - named error, never leak the driver
+        driver.close()
+        return {"error": "open_url_failed", "message": str(exc)}
+    browser = _ThreadedBrowser(inner, driver)
     try:
         if inp.capture_har:
             browser.start_har()
@@ -218,6 +403,7 @@ def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
         _register_session_secrets(browser, scrubber)
     except Exception as exc:  # noqa: BLE001 - named error, never leak the browser
         browser.close()
+        driver.close()
         return {"error": "open_url_failed", "message": str(exc)}
 
     session = _LiveSession(
@@ -229,9 +415,9 @@ def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
         ttl_seconds=float(inp.ttl_seconds or DEFAULT_SESSION_TTL_SECONDS),
         created_at=time.monotonic(),
         capture_har=inp.capture_har,
+        driver=driver,
     )
     _STORE.put(session)
-    blocked = list(getattr(browser, "blocked_requests", []))
     return {
         "status": "ok",
         "session_id": session.session_id,
@@ -239,15 +425,22 @@ def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
         "final_url": browser.current_url(),
         # Evidence the request-level host guard is active: requests the page tried
         # to make to a host outside allowed_hosts (redirects/beacons/subresources).
-        "blocked_requests": len(blocked),
+        "blocked_requests": len(browser.blocked_requests),
     }
 
 
 def _get_dom(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str, Any]:
     cap = min(max(inp.text_cap, 1), MAX_TEXT_CAP)
-    raw = str(session.browser.get_dom(text_cap=cap + 1))
+    try:
+        raw = str(session.browser.get_dom(text_cap=cap + 1))
+    except BrowserActionTimeoutError as exc:
+        return {"error": "action_timeout", "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
+        return {"error": "action_failed", "message": str(exc)}
     truncated = len(raw) > cap
-    text = raw[:cap]
+    # Scrub before return (mirroring execute_js) so a page displaying a token/PII
+    # never hands it to the agent.
+    text = session.scrubber.scrub(raw[:cap]).text
     return {"text": text, "truncated": truncated, "length": len(text)}
 
 

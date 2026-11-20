@@ -178,6 +178,72 @@ class TestDefaultImageUnchanged:
 
 
 # ---------------------------------------------------------------------------
+# Browser-independent: HAR structural redaction (spec HAR requirement, F2)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRequest:
+    def __init__(self, method: str, url: str, headers: dict[str, str]) -> None:
+        self.method = method
+        self.url = url
+        self.headers = headers
+
+
+class _FakeResponse:
+    def __init__(self, status: int, headers: dict[str, str]) -> None:
+        self.status = status
+        self.headers = headers
+
+
+class TestHarRecorderStructuralRedaction:
+    def test_credential_header_values_are_redacted_at_record_time(self) -> None:
+        """A HAR entry must never carry a credential-header value (F2, capture boundary)."""
+        from quarry_activities.playwright_driver import HarRecorder
+
+        late_token = "LATE-LOGIN-SESSION-TOKEN-a1b2c3d4e5"
+        recorder = HarRecorder()
+        recorder.record(
+            _FakeRequest(
+                "GET",
+                "http://localhost/x",
+                {
+                    "Authorization": f"Bearer {late_token}",
+                    "Accept": "application/json",
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "Set-Cookie": f"sid={late_token}; Path=/",
+                    "Content-Type": "text/html; charset=utf-8",
+                },
+            ),
+        )
+        blob = recorder.to_json_bytes().decode("utf-8")
+        assert late_token not in blob
+        assert "REDACTED_CREDENTIAL" in blob
+        # Non-credential header values survive (route discovery needs them).
+        assert "application/json" in blob
+        assert "text/html" in blob
+
+    def test_proxy_authorization_and_cookie_are_redacted(self) -> None:
+        from quarry_activities.playwright_driver import HarRecorder
+
+        recorder = HarRecorder()
+        recorder.record(
+            _FakeRequest(
+                "GET",
+                "http://localhost/x",
+                {"Cookie": "session=opaque-xyz-9", "Proxy-Authorization": "Basic abc12345"},
+            ),
+            None,
+        )
+        blob = recorder.to_json_bytes().decode("utf-8")
+        assert "opaque-xyz-9" not in blob
+        assert "abc12345" not in blob
+
+
+# ---------------------------------------------------------------------------
 # Browser-dependent: real Chromium driver (spec Requirement 2 + 5)
 # ---------------------------------------------------------------------------
 

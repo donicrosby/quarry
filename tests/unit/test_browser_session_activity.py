@@ -353,3 +353,102 @@ class TestHarCapture:
         )
         assert result["artifact"] is None
         assert browser.har_started is False
+
+
+class _LateCookieBrowser(_FakeBrowser):
+    """A browser whose session cookie is minted *after* ``open_url`` (F2).
+
+    ``storage_state`` is empty on its first read (the open_url-time registration)
+    and exposes the late cookie on the second (the finalize-time re-read). Its HAR
+    carries that cookie only as a ``?sid=`` URL parameter and a ``Cookie`` header —
+    a shape no built-in scrub pattern matches, so only the denylist can catch it.
+    """
+
+    def __init__(self, late_value: str) -> None:
+        super().__init__()
+        self.late_value = late_value
+        self._state_reads = 0
+
+    def storage_state(self) -> dict[str, Any]:
+        self._state_reads += 1
+        if self._state_reads < 2:
+            return {"cookies": []}
+        return {"cookies": [{"name": "sid", "value": self.late_value}]}
+
+    def stop_har(self) -> bytes:
+        har = {
+            "log": {
+                "version": "1.2",
+                "entries": [
+                    {
+                        "request": {
+                            "method": "GET",
+                            "url": f"http://localhost/dashboard?sid={self.late_value}",
+                            "headers": [{"name": "Cookie", "value": f"sid={self.late_value}"}],
+                        }
+                    }
+                ],
+            }
+        }
+        return json.dumps(har).encode("utf-8")
+
+
+class TestLateCredentialRedaction:
+    """F2: credentials minted after open_url must not reach the stored HAR."""
+
+    def test_late_cookie_is_redacted_from_stored_har(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        late = "LATE-LOGIN-SESSION-TOKEN-a1b2c3d4e5"
+        browser = _LateCookieBrowser(late)
+        opened = _open(tmp_path, monkeypatch, browser, capture_har=True)
+        result = browser_session_impl(
+            BrowserSessionActivityInput(action="stop_har", session_id=opened["session_id"])
+        )
+        artifact = result["artifact"]
+        assert artifact is not None
+        assert artifact["redaction_status"] == RedactionStatus.REDACTED.value
+        stored = Path(artifact["uri"].removeprefix("file://")).read_bytes()
+        assert late.encode() not in stored
+        assert b"REDACTED" in stored
+
+
+class TestGetDomScrubbing:
+    """F5: get_dom is a text channel and must scrub like every sibling channel."""
+
+    def test_registered_secret_in_page_text_is_redacted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _FakeBrowser(dom=f"token={_COOKIE_SECRET} trailing")
+        opened = _open(tmp_path, monkeypatch, browser)
+        result = browser_session_impl(
+            BrowserSessionActivityInput(action="get_dom", session_id=opened["session_id"])
+        )
+        assert _COOKIE_SECRET not in json.dumps(result)
+        assert "REDACTED" in result["text"]
+
+
+class TestSessionReclamation:
+    """F4: expired/abandoned sessions must close their Chromium."""
+
+    def test_expired_session_closes_browser(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _FakeBrowser()
+        opened = _open(tmp_path, monkeypatch, browser)
+        sid = opened["session_id"]
+        bs._STORE._sessions[sid].created_at = time.monotonic() - 10_000  # pyright: ignore[reportPrivateUsage]
+        result = browser_session_impl(BrowserSessionActivityInput(action="get_dom", session_id=sid))
+        assert result["error"] == "session_expired"
+        assert browser.closed is True
+
+    def test_put_sweeps_and_closes_expired_sessions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stale = _FakeBrowser()
+        first = _open(tmp_path, monkeypatch, stale)
+        bs._STORE._sessions[first["session_id"]].created_at = time.monotonic() - 10_000  # pyright: ignore[reportPrivateUsage]
+        fresh = _FakeBrowser()
+        _open(tmp_path, monkeypatch, fresh)
+        assert stale.closed is True
+        assert fresh.closed is False

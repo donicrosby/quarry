@@ -45,9 +45,16 @@ other action references it.
 - `open_url` launches a headless Chromium page and returns `session_id`.
 - A session expires after a TTL (default 300 s). An expired or unknown session is
   refused with a named error (`session_expired` / `session_not_found`) and is
-  never silently recreated.
+  never silently recreated. Expiry (and a new `open_url`) closes the session's
+  Chromium process.
+- Each session's browser is pinned to a dedicated driver thread. Temporal
+  activities run on an unpinned thread pool, so the handle returned by `open_url`
+  is driven from a different thread on each subsequent invocation; the driver
+  thread keeps Playwright's sync-API thread affinity intact across invocations.
 - Captured cookie values are registered in the per-run `Scrubber`, so they are
-  redacted from every subsequent DOM/JS/HAR/screenshot output.
+  redacted from every subsequent DOM/JS/HAR/screenshot output — including
+  credentials minted mid-session (a login flow's `Set-Cookie`), which are
+  re-registered when the HAR is finalized.
 
 ## Outputs
 

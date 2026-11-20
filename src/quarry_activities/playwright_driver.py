@@ -104,7 +104,50 @@ def _validate_host(url: str, allowed_hosts: tuple[str, ...]) -> None:
 #: unless the browser writes its shared memory to ``/tmp`` instead. The
 #: ``quarry-dynamic`` worker image does not override ``--shm-size``, so this flag
 #: is required for the shipped image to render hostile pages at all.
-CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = ("--disable-dev-shm-usage",)
+#:
+#: ``--no-zygote`` disables the zygote process-reuse optimisation: in a
+#: seccomp-restricted container that also repoints ``$TMPDIR`` at the overlay
+#: filesystem (e.g. a worker image where ``/tmp`` is ``noexec`` and the harness
+#: redirects temp to the repo mount), the zygote dies with SIGTRAP and every
+#: renderer request — including ``get_dom`` — fails with "Target crashed". The
+#: renderer sandbox is unaffected (renderers are still forked and jailed); only
+#: the fork-server shortcut is skipped. Verified against real Chromium in the
+#: sandboxed worker environment: without it ``Page.evaluate``/``fill`` crash,
+#: with it the whole browser suite passes.
+CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = ("--disable-dev-shm-usage", "--no-zygote")
+
+
+#: Request/response headers whose values are credentials or session material.
+#: Their values are replaced at *record* time — the capture boundary — so a stored
+#: HAR artifact can never carry a live session token, even one minted mid-session
+#: that the ``Scrubber`` denylist never saw (e.g. a ``Set-Cookie`` produced by a
+#: login flow after ``open_url``). Route discovery needs the header *name*, not
+#: its value.
+_CREDENTIAL_HEADERS: frozenset[str] = frozenset(
+    {"cookie", "set-cookie", "authorization", "proxy-authorization"}
+)
+
+#: Placeholder written in place of every credential-header value.
+_CREDENTIAL_PLACEHOLDER = "[REDACTED_CREDENTIAL]"
+
+
+def _record_headers(header_map: Any) -> list[dict[str, str]]:
+    """Serialize headers for the HAR, redacting credential-bearing values.
+
+    Credential headers (cookie/set-cookie/authorization/proxy-authorization) have
+    their values replaced with ``[REDACTED_CREDENTIAL]`` at capture time; every
+    other header keeps its value (route discovery needs method/URL/content-type,
+    not secrets).
+    """
+    headers = cast("dict[str, Any]", header_map or {})
+    recorded: list[dict[str, str]] = []
+    for name, value in headers.items():
+        key = str(name)
+        if key.lower() in _CREDENTIAL_HEADERS:
+            recorded.append({"name": key, "value": _CREDENTIAL_PLACEHOLDER})
+        else:
+            recorded.append({"name": key, "value": str(value)})
+    return recorded
 
 
 class HarRecorder:
@@ -113,9 +156,10 @@ class HarRecorder:
     Records request/response *metadata* only — method, URL, headers, status,
     content type. Response bodies are deliberately never captured: they are
     attacker-controlled, potentially huge, and unnecessary for route discovery,
-    which is what the browser tool exists to support. The recorded structure is
-    plain JSON so the worker can scrub it through the ``Scrubber`` (which
-    redacts credential headers/URLs) before it becomes an artifact.
+    which is what the browser tool exists to support. Credential-bearing header
+    values (cookie/set-cookie/authorization/proxy-authorization) are replaced at
+    record time, so a live session token cannot reach stored evidence even before
+    the ``Scrubber`` pass runs.
     """
 
     def __init__(self) -> None:
@@ -123,23 +167,17 @@ class HarRecorder:
 
     def record(self, request: Any, response: Any | None) -> None:
         """Append one HAR entry for *request* (and *response* when available)."""
-        request_headers = cast("dict[str, Any]", request.headers or {})
         request_entry: dict[str, Any] = {
             "method": str(request.method),
             "url": str(request.url),
-            "headers": [
-                {"name": str(name), "value": str(value)} for name, value in request_headers.items()
-            ],
+            "headers": _record_headers(request.headers),
         }
         entry: dict[str, Any] = {"request": request_entry}
         if response is not None:
             response_headers = cast("dict[str, Any]", response.headers or {})
             entry["response"] = {
                 "status": int(getattr(response, "status", 0) or 0),
-                "headers": [
-                    {"name": str(name), "value": str(value)}
-                    for name, value in response_headers.items()
-                ],
+                "headers": _record_headers(response_headers),
                 "content": {"mimeType": str(response_headers.get("content-type", ""))},
             }
         self.entries.append(entry)
@@ -244,10 +282,12 @@ class PlaywrightBrowserSession:
         return text in str(self._page.content())
 
     def get_dom(self, text_cap: int = 100_000) -> str:
-        """Return the page's visible text (``document.body.innerText``), capped."""
-        text = self._page_op(
-            self._page.evaluate, "() => (document.body ? document.body.innerText : '')"
-        )
+        """Return the page's visible text (``document.body.innerText``), capped.
+
+        ``Page.evaluate`` takes no ``timeout`` keyword (unlike ``goto``/``fill``/
+        ``click``), so it is called directly rather than through ``_page_op``.
+        """
+        text = self._page.evaluate("() => (document.body ? document.body.innerText : '')")
         return str(text)[:text_cap]
 
     def get_cookies(self) -> list[dict[str, Any]]:
@@ -258,12 +298,15 @@ class PlaywrightBrowserSession:
         ]
 
     def execute_js(self, script: str, timeout_ms: int = 5_000) -> Any:
-        """Evaluate agent-supplied JS under a hard timeout, returning its value."""
-        try:
-            return self._page.evaluate(script, timeout=timeout_ms)
-        except self._sync_api.TimeoutError as exc:
-            msg = f"execute_js timed out after {timeout_ms} ms."
-            raise BrowserActionTimeoutError(msg) from exc
+        """Evaluate agent-supplied JS, returning its value.
+
+        ``Page.evaluate`` has no native timeout, so the hard bound is *not*
+        enforced here: the session-owned driver thread (see
+        ``browser_session._SessionDriver``) enforces it by joining with a
+        deadline. The ``timeout_ms`` argument is retained for the protocol and for
+        that caller-side bound.
+        """
+        return self._page.evaluate(script)
 
     def start_har(self) -> None:
         """Begin recording HTTP Archive entries for subsequent requests."""
@@ -283,6 +326,11 @@ class PlaywrightBrowserSession:
 
     def screenshot(self) -> bytes:
         return self._page.screenshot()
+
+    @property
+    def action_timeout_ms(self) -> int:
+        """The per-action ceiling this session applies to Playwright operations."""
+        return self._timeout_ms
 
     def close(self) -> None:
         if self._closed:

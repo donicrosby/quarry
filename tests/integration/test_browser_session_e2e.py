@@ -1,10 +1,14 @@
 """End-to-end browser_session activity against a local SPA-like target (W1).
 
-Gated twice so CI without a browser skips cleanly:
+Real-browser tests are gated twice so CI without a browser skips cleanly:
 
 1. ``pytest.importorskip("playwright.sync_api")`` — skips when the optional
    ``quarry[browser]`` extra is not installed.
 2. ``QUARRY_BROWSER_TESTS=1`` — opt-in because the test launches real Chromium.
+
+The gate is applied *per test* (via ``_require_browser``), not at module level, so
+the no-browser tests (e.g. a disallowed host refused before any launch) still run
+in the default suite.
 
 Manual invocation:
 
@@ -35,13 +39,16 @@ from quarry_activities.browser_session import (
     browser_session_impl,
 )
 
-pytest.importorskip("playwright.sync_api")
+#: Opt-in gate: real Chromium is launched, so real-browser tests only run when asked.
+_BROWSER_TESTS_ENABLED = os.environ.get("QUARRY_BROWSER_TESTS") == "1"
 
-#: Opt-in gate: real Chromium is launched, so the test only runs when asked.
-pytestmark = pytest.mark.skipif(
-    os.environ.get("QUARRY_BROWSER_TESTS") != "1",
-    reason="set QUARRY_BROWSER_TESTS=1 to run real-browser tests",
-)
+
+def _require_browser() -> None:
+    """Skip the calling test unless Playwright and the real-browser opt-in are present."""
+    pytest.importorskip("playwright.sync_api")
+    if not _BROWSER_TESTS_ENABLED:
+        pytest.skip("set QUARRY_BROWSER_TESTS=1 to run real-browser tests")
+
 
 #: A tiny "SPA": the home page renders a client-side router's routes into the DOM,
 #: so get_dom proves the browser executed page JavaScript.
@@ -107,6 +114,7 @@ def _open_input(
 
 
 def test_full_spa_cycle_and_har(spa_server: tuple[str, int], tmp_path: Path) -> None:
+    _require_browser()
     host, port = spa_server
     opened = browser_session_impl(_open_input(host, port, tmp_path, capture_har=True))
     assert opened["status"] == "ok"
@@ -164,9 +172,45 @@ def test_disallowed_host_refused_before_launch(tmp_path: Path) -> None:
 
 def test_request_guard_blocks_exfil_beacon(spa_server: tuple[str, int], tmp_path: Path) -> None:
     """The request-level guard aborts a page's fetch() to a disallowed host."""
+    _require_browser()
     host, port = spa_server
     opened = browser_session_impl(
         _open_input(host, port, tmp_path, url=f"http://{host}:{port}/beacon")
     )
     assert opened["status"] == "ok"
     assert opened["blocked_requests"] >= 1
+
+
+def test_session_survives_cross_thread_actions(spa_server: tuple[str, int], tmp_path: Path) -> None:
+    """A session opened on one thread is drivable from another (F3 regression).
+
+    Temporal runs activities on an unpinned thread pool, so the session created in
+    one invocation is driven from a different thread in the next. Playwright's sync
+    API is thread-affine; the session-owned driver thread must absorb that.
+    """
+    _require_browser()
+    host, port = spa_server
+    opened = browser_session_impl(_open_input(host, port, tmp_path))
+    assert opened["status"] == "ok"
+    sid = opened["session_id"]
+
+    results: dict[str, Any] = {}
+
+    def _worker() -> None:
+        results["dom"] = browser_session_impl(
+            BrowserSessionActivityInput(action="get_dom", session_id=sid)
+        )
+        results["js"] = browser_session_impl(
+            BrowserSessionActivityInput(
+                action="execute_js",
+                session_id=sid,
+                script="document.querySelectorAll('.route').length",
+            )
+        )
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    thread.join()
+
+    assert "/dashboard" in results["dom"]["text"]
+    assert results["js"]["result"] == 3

@@ -67,6 +67,12 @@ tasks:
     cmds:
       - uv run python scripts/prompt_lint.py src
 
+  test-browser:
+    desc: Run the gated real-Chromium e2e suite (requires the browser extra + Chromium).
+    cmds:
+      - uv run playwright install chromium
+      - QUARRY_BROWSER_TESTS=1 uv run pytest tests/integration/test_browser_session_e2e.py tests/integration/test_browser_login_e2e.py -v
+
   hadolint:
     desc: Lint the Dockerfile with hadolint (via docker).
     cmds:
