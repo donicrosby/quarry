@@ -37,6 +37,7 @@ from quarry.schemas import (
     EvidencePathElement,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
     utc_now,
 )
 from quarry_activities.inputs import ScanSecretsInput
@@ -324,6 +325,7 @@ def tempfile_match_to_candidate_finding(
         confidence=Confidence.MEDIUM,
         # Deterministic predictable-temp-path scanner — tool-observed.
         grounded=True,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by=created_by,
         created_at=created_at or utc_now(),
         metadata={

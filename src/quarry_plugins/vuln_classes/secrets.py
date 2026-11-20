@@ -25,6 +25,7 @@ from quarry.schemas import (
     EvidencePathElement,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
     utc_now,
 )
 from quarry_activities.inputs import ScanSecretsInput
@@ -190,6 +191,7 @@ def secret_match_to_candidate_finding(
         confidence=Confidence.MEDIUM,
         # Deterministic regex match on a source line — tool-observed.
         grounded=True,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by=created_by,
         created_at=created_at or utc_now(),
         metadata={

@@ -55,7 +55,9 @@ from quarry_activities.verdict_evaluators import (
     LiveProbeEvidence,
     evaluate_live_verdict_with_source,
 )
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.checklist import enforce_checklist_invariants
 from quarry_models.credibility import compute_credibility, credibility_prior_for
 from quarry_models.factory import build_model_client
@@ -349,6 +351,8 @@ def _run_debater(
     turn_timeout_seconds: int,
     limiter: Any | None,
     checklist_enabled: bool = False,
+    artifact_root: str | None = None,
+    replay_mode: bool = False,
 ) -> tuple[RefuteResponse | None, list[ChecklistItem]]:
     """Run the independent debater's refute loop over the same claim.
 
@@ -402,6 +406,12 @@ def _run_debater(
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        # The debater is a distinct agent instance from the reasoner but shares
+        # the same role/finding, so its log file carries a "-debater" suffix to
+        # avoid interleaving the two loops' lines in one file.
+        agent_instance_id=f"{compute_agent_instance_id('validate', finding.id)}-debater",
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
     final = result.final_answer
     if isinstance(final, ChecklistRefuteResponse):
@@ -466,6 +476,7 @@ def validate_impl(
     checklist_enabled: bool = True,
     credibility_config: CredibilityConfig | None = None,
     db_path: str | None = None,
+    replay_mode: bool = False,
 ) -> ValidationResult:
     """Core validate implementation — callable from the activity and from tests.
 
@@ -540,6 +551,9 @@ def validate_impl(
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        agent_instance_id=compute_agent_instance_id("validate", finding.id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -625,6 +639,8 @@ def validate_impl(
                 turn_timeout_seconds=turn_timeout_seconds,
                 limiter=debater_limiter,
                 checklist_enabled=checklist_enabled,
+                artifact_root=artifact_root,
+                replay_mode=replay_mode,
             )
             recorded_checklist.extend(checklist)
             return None if refute is None else refute.refuted
@@ -721,6 +737,7 @@ def validate_activity(
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
     credibility_config_json: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: adversarial review of a single CandidateFinding.
 
@@ -759,6 +776,7 @@ def validate_activity(
             artifact_root,
             kb_root_index_key,
             credibility_config_json,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -784,6 +802,7 @@ def _validate_activity_impl(
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
     credibility_config_json: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -842,6 +861,7 @@ def _validate_activity_impl(
         checklist_enabled=_checklist_flag(),
         credibility_config=credibility_config,
         db_path=db_path,
+        replay_mode=replay_mode,
     )
 
     # Cascade provenance (credibility-economics task 8.2): record the step that

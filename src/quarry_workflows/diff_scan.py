@@ -27,6 +27,7 @@ from quarry.schemas import (
     VulnerabilityClass,
     WorkflowEvent,
     local_scan_profile,
+    model_omitted_severity_rationale,
 )
 from quarry_activities.diff import git_diff_commits
 from quarry_activities.inputs import (
@@ -376,6 +377,7 @@ def _candidate_from_secret_match(match: SecretMatch, *, scan_id: str) -> Candida
         confidence=Confidence.MEDIUM,
         # Deterministic SecretMatch regex over diff regions — tool-observed.
         grounded=True,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by="secrets-scanner",
         created_at=workflow.now(),
         metadata={
@@ -395,6 +397,7 @@ def _final_from_candidate(candidate: CandidateFinding) -> FinalFinding:
         fingerprint=candidate.id,
         vuln_class=candidate.vuln_class,
         severity=Severity.HIGH,
+        severity_rationale=candidate.severity_rationale,
         title=candidate.title,
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,

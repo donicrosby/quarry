@@ -39,4 +39,8 @@ CLI/TUI → QuarryClient (httpx) → FastAPI server (quarry_server)
 
 - Kubernetes deployment (see `docs/kubernetes-scale-plan.md`).
 - Postgres migration.
-- Signed provenance / SBOM.
+
+Releases are signed and carry an SBOM (see
+[`supply-chain-threat-model.md`](supply-chain-threat-model.md) and
+[`release-verification.md`](release-verification.md)) — this was previously
+listed here as deferred and is now implemented.

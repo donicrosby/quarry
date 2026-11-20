@@ -18,6 +18,7 @@ Locked in here:
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -82,6 +83,9 @@ class _FakeBrowser:
     def storage_state(self) -> dict[str, Any]:
         return {"cookies": [{"name": "session", "value": "sess-token-xyz"}]}
 
+    def screenshot(self) -> bytes:
+        return b"\x89PNG\r\n\x1a\n"
+
     def close(self) -> None:
         self.closed = True
 
@@ -112,6 +116,12 @@ class TestMissingPlaywright:
     ) -> None:
         monkeypatch.setenv(_PASSWORD_ENV, "hunter2")
         monkeypatch.setenv(_TOTP_SEED_ENV, "JBSWY3DPEHPK3PXP")
+        # Simulate Playwright being absent deterministically, independent of
+        # whether this environment happens to have the browser extra installed.
+        # ``None`` in ``sys.modules`` makes ``importlib.import_module`` raise
+        # ImportError, exactly as a genuinely-missing package would.
+        monkeypatch.setitem(sys.modules, "playwright", None)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
         resolver = BrowserLoginResolver()  # default factory → real Playwright
         with pytest.raises(BrowserLoginUnavailableError) as exc:
             resolver.resolve(
@@ -122,32 +132,36 @@ class TestMissingPlaywright:
                 target_host="localhost",
                 target_port=8000,
             )
-        # Whether Playwright is importable or not, the in-process driver is
-        # unavailable and the error must be actionable: name playwright and the
-        # browser extra so the user knows what to install.
+        # When Playwright is genuinely absent the error must be actionable: name
+        # playwright and the browser extra so the user knows what to install.
         assert "playwright" in str(exc.value).lower()
         assert "browser" in str(exc.value).lower()  # install-extra hint
 
     def test_playwright_present_but_driver_unavailable_mentions_browser_extra(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
     ) -> None:
-        """When playwright IS importable (e.g. a dev sandbox) but no in-process
-        driver exists, the error must still name the browser extra — not just
-        point at the worker image."""
+        """Branch on the environment once the real driver lands.
+
+        When Playwright is importable but the Chromium binary is not installed
+        (``playwright install chromium`` not run), the factory still raises
+        ``BrowserLoginUnavailableError`` naming the browser extra. When Chromium
+        *is* available the factory returns a real ``BrowserSession``.
+        """
         pytest.importorskip("playwright.sync_api")
-        monkeypatch.setenv(_PASSWORD_ENV, "hunter2")
-        monkeypatch.setenv(_TOTP_SEED_ENV, "JBSWY3DPEHPK3PXP")
-        resolver = BrowserLoginResolver()
-        with pytest.raises(BrowserLoginUnavailableError) as exc:
-            resolver.resolve(
-                _browser_profile(),
-                CredentialCache("s1"),
-                Scrubber(),
-                allowed_hosts=("localhost",),
-                target_host="localhost",
-                target_port=8000,
+        from quarry_activities.browser_login import (
+            BrowserSession,
+            _playwright_browser_factory,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        try:
+            session = _playwright_browser_factory(
+                allowed_hosts=("localhost",), target_host="localhost", target_port=8000
             )
-        assert "browser" in str(exc.value).lower()
+        except BrowserLoginUnavailableError as exc:
+            assert "browser" in str(exc).lower()
+            return
+        assert isinstance(session, BrowserSession)
+        session.close()
 
 
 class TestBrowserLoginResolution:

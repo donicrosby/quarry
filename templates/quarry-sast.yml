@@ -1,0 +1,83 @@
+spec:
+  inputs:
+    quarry_config:
+      description: "Path to the Quarry config file (quarry.toml), relative to the project."
+    severity_threshold:
+      description: "Minimum Quarry severity that fails the job: info|low|medium|high|critical."
+      default: low
+    quarry_version:
+      description: "Quarry git ref to check out and install."
+      default: latest
+---
+
+# Quarry SAST component: scan the project, filter the SARIF 2.1.0 log to
+# `severity_threshold`, and publish it through the dedicated
+# `artifacts:reports:sarif` report type (the legacy `sast` type expects GitLab's
+# own JSON schema, not SARIF). GitLab ingests findings only from a successful
+# job, so the report is published with `when: always` — inspectable even when
+# the gate below fails the job.
+#
+# Exit-code contract (mirrors the GitHub Action):
+#   0 — no proven findings at or above the threshold
+#   1 — findings at or above the threshold
+#   2 — scan error (Quarry did not complete)
+"quarry-sast":
+  stage: test
+  image: python:3.12-slim
+  variables:
+    QUARRY_REPOSITORY: "https://github.com/donicrosby/quarry.git"
+    QUARRY_VERSION: $[[ inputs.quarry_version ]]
+    QUARRY_CONFIG_FILE: $[[ inputs.quarry_config ]]
+    SEVERITY_THRESHOLD: $[[ inputs.severity_threshold ]]
+    # Target repository: the project GitLab checked out for this pipeline.
+    QUARRY_TARGET_REPO: $CI_PROJECT_DIR
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends git jq curl docker.io docker-compose
+    - mkdir -p sarif
+    # Quarry is not published to PyPI (`pip install quarry` resolves an
+    # unrelated package), so install from source at the requested ref.
+    - git clone --depth 1 --branch "$QUARRY_VERSION" "$QUARRY_REPOSITORY" .quarry-tool || git clone --depth 1 "$QUARRY_REPOSITORY" .quarry-tool
+    - python -m pip install --quiet ./.quarry-tool
+  script:
+    - docker compose -f .quarry-tool/docker-compose.yml up -d temporal
+    - nohup quarry server > quarry-server.log 2>&1 &
+    - |
+      for _ in $(seq 1 60); do
+        if curl -fsS http://localhost:8000/healthz >/dev/null; then break; fi
+        sleep 2
+      done
+      if ! curl -fsS http://localhost:8000/healthz >/dev/null; then
+        echo "Quarry server did not become healthy"
+        cat quarry-server.log || true
+        exit 2   # exit-code contract: 2 = scan error
+      fi
+    - |
+      set +e
+      quarry scan run --repo "$QUARRY_TARGET_REPO"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "Quarry scan failed (exit $rc)"
+        exit 2   # exit-code contract: 2 = scan error
+      fi
+    - |
+      for log in "$QUARRY_TARGET_REPO"/.quarry/artifacts/sarif/*.sarif.json; do
+        [ -e "$log" ] || { echo "the Quarry scan produced no SARIF log"; exit 2; }
+        jq --arg threshold "$SEVERITY_THRESHOLD" \
+          -f .quarry-tool/ci/sarif_severity_filter.jq \
+          "$log" > "sarif/$(basename "$log")"
+      done
+    - |
+      total=0
+      for log in sarif/*.sarif.json; do
+        count=$(jq '[.runs[0].results[]] | length' "$log")
+        total=$((total + count))
+      done
+      echo "findings at or above '$SEVERITY_THRESHOLD': $total"
+      if [ "$total" -gt 0 ]; then
+        exit 1   # exit-code contract: 1 = findings above threshold
+      fi
+  artifacts:
+    when: always
+    reports:
+      sarif: sarif/*.sarif.json

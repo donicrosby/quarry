@@ -12,6 +12,25 @@ Three tiers are defined here; only Tier 1 runs in-process today:
 it reaches a tier, so no tier ever re-resolves a destination (DNS-rebinding guard,
 see :mod:`quarry.egress`).
 
+**Tiered confinement model:**
+
+  Tier 1  ``LocalSubprocessSandbox`` provides *resource* containment (RLIMIT_CPU /
+          RLIMIT_AS / RLIMIT_NPROC) plus defense-in-depth via the command
+          allowlist (``_COMMAND_ALLOWLIST``) and the workdir restriction
+          (``_resolve_sandbox_cwd`` / ``_stage_input_files``).  It does NOT
+          provide a kernel-enforced network namespace on macOS/Colima: the
+          sandbox shares the host kernel, filesystem, and network stack.  Use it
+          for wiring/correctness tests only.
+  Tier 2+ ``ContainerSandbox`` (``--network none`` when no egress policy is set) and
+          ``K8sJobSandbox`` (Job + NetworkPolicy) provide kernel-enforced
+          isolation: host processes, filesystem, and network interfaces are not
+          reachable targets from inside the sandbox.  Production network
+          containment is one of these tiers.
+
+**The host is never in scope.**  The machine running the sandbox is NEVER a
+testing target.  Privilege-escalation checks execute *inside* the sandbox only —
+never against the host kernel or host processes — regardless of tier.
+
 **Isolation caveat (Tier 1):** LocalSubprocessSandbox provides *resource*
 containment (RLIMIT_CPU / RLIMIT_AS / RLIMIT_NPROC) and no-network-by-convention,
 but it does NOT provide a kernel-enforced network namespace on macOS/Colima
@@ -29,6 +48,7 @@ import contextlib
 import hashlib
 import ipaddress
 import json
+import re
 import subprocess
 import time
 import uuid
@@ -94,6 +114,7 @@ class SandboxBackend(Protocol):
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult: ...
 
 
@@ -137,6 +158,56 @@ BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
     "FTP_PROXY",
     "ftp_proxy",
 )
+
+# Leading args matching a NAME=VALUE prefix are the `NAME=VALUE command` /
+# `env NAME=VALUE command` env-setting idiom.  Rejected as defense-in-depth
+# (ADR-017 §5): shell `-c` payloads and inline code can still set environment at
+# runtime, so the primary defense remains the empty base environment, the
+# credential scrubber, and egress gating.
+_REJECTED_ARG_PREFIX_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# Content-keyed environment-dump detection: stdout where KEY=VALUE lines are
+# both numerous (>= 2) and dominant (>= half of all non-empty lines) is treated
+# as an environment dump and redacted to a variable-count line.
+_ENV_DUMP_LINE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_DUMP_MIN_LINES: int = 2
+
+
+def _validate_args(args: list[str]) -> None:
+    """Reject LEADING ``NAME=VALUE`` args before execution.
+
+    Only the leading run of ``NAME=VALUE`` args is inspected (scan from
+    ``args[0]`` until the first non-matching arg) — the ``NAME=VALUE command``
+    and ``env NAME=VALUE command`` idioms.  ``-e`` / ``--env`` flags and
+    non-leading matches (e.g. a ``sh -c "x=1; echo"`` payload) are permitted.
+    Shared by all sandbox tiers.
+    """
+    for arg in args:
+        if not _REJECTED_ARG_PREFIX_PATTERN.match(arg):
+            break
+        msg = (
+            f"Sandbox arg '{arg}' sets an environment variable (leading NAME=VALUE). "
+            "Use the allowlisted SandboxExecSpec 'env' field instead of the arg idiom."
+        )
+        raise ToolSecurityError(msg)
+
+
+def _redact_env_dump_output(raw_stdout: str) -> str:
+    """Return *raw_stdout*, or a variable-count line when it is an env dump.
+
+    Content-keyed (not command-keyed): when at least two non-empty stdout lines
+    match ``^[A-Za-z_][A-Za-z0-9_]*=`` and those matching lines comprise at least
+    half of all non-empty lines, stdout is replaced with
+    ``"<N> environment variables present (redacted)"`` (N = matching-line count).
+    Otherwise stdout is returned unchanged.  Exit codes are never touched.
+    """
+    lines = [line for line in raw_stdout.splitlines() if line.strip()]
+    if len(lines) < _ENV_DUMP_MIN_LINES:
+        return raw_stdout
+    matching = sum(1 for line in lines if _ENV_DUMP_LINE_PATTERN.match(line))
+    if matching < _ENV_DUMP_MIN_LINES or matching * 2 < len(lines):
+        return raw_stdout
+    return f"{matching} environment variables present (redacted)"
 
 
 def _set_rlimits() -> None:
@@ -204,19 +275,27 @@ def _stage_input_files(input_files: dict[str, str], work_dir: Path) -> None:
         resolved.write_text(content, encoding="utf-8")
 
 
-def _build_safe_env(resolved_env: dict[str, str]) -> dict[str, str]:
-    """Build a minimal, safe environment dict from *resolved_env*.
+def _build_safe_env(
+    resolved_env: dict[str, str],
+    injected_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a minimal, safe environment dict from *resolved_env* and *injected_env*.
 
-    Inherits nothing from the parent process.  Only resolved_env values
-    (QUARRY_INJECTED_CRED_* and similar) are forwarded.  Proxy vars are
-    explicitly excluded so the subprocess/container cannot make unintended
-    network calls.  Shared by all sandbox tiers.
+    Inherits nothing from the parent process.  *resolved_env* values
+    (QUARRY_INJECTED_CRED_* and similar) and the schema-allowlisted
+    ``SandboxExecSpec.env`` entries are forwarded.  Proxy vars are explicitly
+    excluded so the subprocess/container cannot make unintended network calls.
+    *injected_env* is merged AFTER proxy-var blocking and is applied to the target
+    subprocess only (the sandbox runtime process never inherits it).  Shared by
+    all sandbox tiers.
     """
     env: dict[str, str] = {}
     env.update(resolved_env)
     for key in list(env):
         if any(key.startswith(prefix) or key == prefix for prefix in BLOCKED_ENV_PREFIXES):
             del env[key]
+    if injected_env:
+        env.update(injected_env)
     return env
 
 
@@ -246,8 +325,14 @@ class LocalSubprocessSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
-        """Execute spec.command inside work_dir and return captured output."""
+        """Execute spec.command inside work_dir and return captured output.
+
+        ``canary_active`` is accepted for Protocol conformance and ignored: Tier 1
+        has no container capabilities to drop (it is CLI-only, no kernel-enforced
+        egress — see the class docstring).
+        """
         if egress_policy is not None and not egress_policy.is_empty():
             msg = (
                 "LocalSubprocessSandbox (Tier 1) cannot enforce a destination-set "
@@ -259,9 +344,10 @@ class LocalSubprocessSandbox:
             raise EgressPolicyError(msg)
 
         self._validate_command(spec.command)
+        _validate_args(spec.args)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
         _stage_input_files(spec.input_files, work_dir)
-        env = _build_safe_env(resolved_env)
+        env = _build_safe_env(resolved_env, spec.env)
         timeout = min(spec.timeout_seconds, HARD_TIMEOUT_SECONDS)
 
         cmd = [spec.command, *spec.args]
@@ -289,7 +375,9 @@ class LocalSubprocessSandbox:
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        # Cap output before it leaves the sandbox layer.
+        # Redact a content-keyed environment dump, then cap before output leaves
+        # the sandbox layer.
+        stdout = _redact_env_dump_output(stdout)
         stdout = _cap_bytes(stdout, MAX_OUTPUT_BYTES)
         stderr = _cap_bytes(stderr, MAX_OUTPUT_BYTES)
 
@@ -320,6 +408,15 @@ EGRESS_ALLOWED_IPS_ENV = "QUARRY_EGRESS_ALLOWED_IPS"
 
 #: Prefix of the per-policy restricted Docker network name.
 EGRESS_NETWORK_PREFIX = "quarry-egress-"
+
+#: Default per-container memory cap for the Tier-2 sandbox (a Docker ``--memory``
+#: value).  A browser-capable container (``quarry:dynamic``) executing untrusted
+#: target JavaScript can grow without bound; capping memory at the container
+#: level lets the kernel OOM-killer terminate a runaway Chromium instead of
+#: starving the worker host (browser-worker-playwright tasks.md 5.2).  Override
+#: per instance via the ``memory_limit`` constructor argument; pass ``""`` to opt
+#: out of a cap entirely.
+DEFAULT_MEMORY_LIMIT: str = "2g"
 
 
 def egress_network_name(egress_policy: ResolvedEgressPolicy | None) -> str | None:
@@ -416,12 +513,17 @@ class ContainerSandbox:
            ``QUARRY_EGRESS_ALLOWED_IPS`` for audit.
          - *work_dir* bind-mounted to the same path inside the container.
          - Only cleaned ``resolved_env`` forwarded (no proxy vars).
+         - ``--memory``/``--memory-swap`` set to the container memory cap (see
+           :data:`DEFAULT_MEMORY_LIMIT`), so a runaway process inside the
+           sandbox is OOM-killed by the kernel rather than the worker host.
       3. Runs with a hard timeout cap and captures stdout/stderr.
       4. On timeout: kills the container then returns ``timed_out=True``.
       5. Caps and returns output as a :class:`SandboxResult`.
 
     ``image`` defaults to ``python:3.12-slim``; override via constructor for
-    language-specific minimal runtime images (ADR-024 §A).
+    language-specific minimal runtime images (ADR-024 §A).  ``memory_limit``
+    sets the container memory cap (default :data:`DEFAULT_MEMORY_LIMIT`); pass
+    ``""`` to opt out.
 
     Known residual (accepted): the restricted network is content-addressed per
     policy, so concurrent sandboxes with the *same* pinned ip-union share one
@@ -435,8 +537,14 @@ class ContainerSandbox:
     # Default runtime image — minimal, no build toolchain.
     DEFAULT_IMAGE: str = "python:3.12-slim"
 
-    def __init__(self, image: str = DEFAULT_IMAGE) -> None:
+    def __init__(self, image: str = DEFAULT_IMAGE, *, memory_limit: str | None = None) -> None:
+        """Configure the sandbox image and container memory cap.
+
+        *memory_limit* is a Docker ``--memory`` value (e.g. ``"2g"``).  ``None``
+        uses :data:`DEFAULT_MEMORY_LIMIT`; pass ``""`` to run without a cap.
+        """
         self._image = image
+        self._memory_limit = DEFAULT_MEMORY_LIMIT if memory_limit is None else memory_limit
 
     def run(
         self,
@@ -445,11 +553,13 @@ class ContainerSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         """Execute *spec* inside a throwaway Docker container."""
+        _validate_args(spec.args)
         _stage_input_files(spec.input_files, work_dir)
         resolved_cwd = _resolve_sandbox_cwd(spec.cwd, work_dir)
-        env = _build_safe_env(resolved_env)
+        env = _build_safe_env(resolved_env, spec.env)
         timeout = min(spec.timeout_seconds, HARD_TIMEOUT_SECONDS)
 
         # Materialize the restricted network (if any) before the container runs.
@@ -467,6 +577,7 @@ class ContainerSandbox:
             egress_policy=egress_policy,
             network=network,
             container_name=container_name,
+            canary_active=canary_active,
         )
 
         start = time.monotonic()
@@ -490,6 +601,7 @@ class ContainerSandbox:
             _kill_container(container_name)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        stdout = _redact_env_dump_output(stdout)
         stdout = _cap_bytes(stdout, MAX_OUTPUT_BYTES)
         stderr = _cap_bytes(stderr, MAX_OUTPUT_BYTES)
 
@@ -562,8 +674,22 @@ class ContainerSandbox:
         egress_policy: ResolvedEgressPolicy | None,
         network: str | None,
         container_name: str,
+        canary_active: bool = False,
     ) -> list[str]:
         cmd = ["docker", "run", "--rm", "--name", container_name]
+
+        # While a canary is active the sandbox must not be able to raw-craft a
+        # spoofed source IP toward the canary (the source-IP filter is the
+        # containment invariant, so spoofing it would forge corroboration).
+        # Ping-based proofs without a canary keep their raw sockets.
+        if canary_active:
+            cmd += ["--cap-drop", "NET_RAW", "--cap-drop", "NET_ADMIN"]
+        # Container memory cap.  --memory-swap is pinned equal to --memory so the
+        # container cannot exceed the cap via swap; a runaway browser/JS process
+        # is OOM-killed instead of starving the worker host.  Omitted when the
+        # limit is empty (explicit opt-out).
+        if self._memory_limit:
+            cmd += ["--memory", self._memory_limit, "--memory-swap", self._memory_limit]
 
         if network is None:
             # No egress: kernel-enforced network namespace with no routes.
@@ -652,6 +778,7 @@ class K8sJobSandbox:
         work_dir: Path,
         resolved_env: dict[str, str],
         egress_policy: ResolvedEgressPolicy | None,
+        canary_active: bool = False,
     ) -> SandboxResult:
         raise NotImplementedError(
             "K8sJobSandbox is deferred to the CLI hunting follow-on. "

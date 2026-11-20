@@ -14,6 +14,13 @@ from quarry_artifacts.store import ArtifactStore
 # Maximum response body size to store (10KB)
 MAX_RESPONSE_BODY_SIZE = 10 * 1024
 
+# Headers whose values never reach a stored request artifact; maps the lowercase
+# header name to the canonical casing used in the artifact.
+_REDACTED_HEADER_NAMES = {
+    "authorization": "Authorization",
+    "cookie": "Cookie",
+}
+
 
 def _key_digest(*parts: str) -> str:
     """Short stable digest so artifacts for different requests don't collide."""
@@ -36,13 +43,14 @@ def response_artifact_key(response: httpx.Response) -> str:
 def _redact_headers(headers: httpx.Headers) -> dict[str, str | list[str]]:
     """Redact sensitive header values before storing.
 
-    Authorization header values are replaced with 'REDACTED'.
+    Authorization and Cookie header values are replaced with 'REDACTED'.
     Other headers are preserved as-is.
     """
     redacted: dict[str, str | list[str]] = {}
     for key, value in headers.multi_items():
-        if key.lower() == "authorization":
-            redacted["Authorization"] = "REDACTED"
+        canonical = _REDACTED_HEADER_NAMES.get(key.lower())
+        if canonical is not None:
+            redacted[canonical] = "REDACTED"
         elif key in redacted:
             # Handle multi-value headers
             existing = redacted[key]

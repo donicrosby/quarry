@@ -42,6 +42,7 @@ from quarry.schemas import (
     SessionTokenAnalysisResult,
     Severity,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
 )
 
 # ---------------------------------------------------------------------------
@@ -578,6 +579,7 @@ def token_finding_to_candidate(
         severity=finding.severity,
         # Deterministic analysis of a captured HTTP response — tool-observed.
         grounded=True,
+        severity_rationale=model_omitted_severity_rationale(),
         created_by="session-analysis",
         created_at=datetime.now(UTC),
         metadata={

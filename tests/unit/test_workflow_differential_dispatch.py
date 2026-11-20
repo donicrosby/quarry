@@ -105,3 +105,55 @@ class TestNestedEvidenceConstruction:
             primary.body_text,
             (),
         )
+
+
+class TestTimingProbeDispatch:
+    """Timing-oracle dispatch wiring (verify-oracle-upgrade tasks 8/9).
+
+    The timing dispatch loop and its sub-budget run under Temporal's sandbox, so
+    — like the differential wiring above — these lock the pure helpers plus the
+    source-level contracts of ``run_scan``.
+    """
+
+    def test_timing_budget_gate_requires_full_ladder_batch(self) -> None:
+        from quarry_workflows.run_scan import timing_ladder_permitted
+
+        assert timing_ladder_permitted(timing_probes_remaining=3)
+        assert timing_ladder_permitted(timing_probes_remaining=4)
+        assert not timing_ladder_permitted(timing_probes_remaining=2)
+        assert not timing_ladder_permitted(timing_probes_remaining=0)
+
+    def test_timing_budget_counter_and_configurable_limit_wired(self) -> None:
+        source = _source()
+        assert "timing_probes_remaining = scan_input.dynamic_timing_probe_limit" in source
+        assert "dynamic_timing_probe_limit: int = 20" in source
+        # One decrement per dispatch site: baseline loop, attack loop, ladder loop.
+        assert source.count("timing_probes_remaining -= 1") >= 3
+
+    def test_timing_budget_exhausted_records_reason(self) -> None:
+        source = _source()
+        assert 'reason="budget_exhausted"' in source, (
+            "a statistical pass without ladder headroom (or a batch cut short) "
+            "must record LIVE_INCONCLUSIVE with reason budget_exhausted"
+        )
+        assert "timing_ladder_permitted(" in source
+        assert "TIMING_STATISTICAL_PASS" in source
+
+    def test_timing_probes_use_the_guarded_egress_funnel(self) -> None:
+        source = _source()
+        assert "async def _dispatch_timing_probe(" in source
+        # Every timing dispatch goes through the single guarded funnel.
+        assert "await _dispatch_dynamic_probe(" in source
+        assert "timing_delay_for_specs(" in source
+
+    def test_timing_dispatch_selector_needs_clean_baseline(self) -> None:
+        from quarry.schemas import HttpRequestSpec, VulnerabilityClass
+        from quarry_workflows.run_scan import timing_delay_for_specs
+
+        attack = HttpRequestSpec(method="GET", path="/items?id=1", injected_delay_ms=800)
+        clean = HttpRequestSpec(method="GET", path="/items?id=1")
+        assert timing_delay_for_specs(VulnerabilityClass.SQL_INJECTION, [attack, clean]) == 800
+        # A delay-annotated spec is never its own baseline.
+        assert timing_delay_for_specs(VulnerabilityClass.SQL_INJECTION, [attack]) is None
+        # A class without the timing profile never takes the timing path.
+        assert timing_delay_for_specs(VulnerabilityClass.SSRF, [attack, clean]) is None
