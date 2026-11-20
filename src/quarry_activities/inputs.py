@@ -479,6 +479,8 @@ class IngestCanaryCallbacksInput(BaseModel):
 
     callbacks: tuple[CanaryCallback, ...] = ()
     hunt_task_id: str = ""
+
+
 class CrawlActivityInput(BaseModel):
     """Input payload for crawl_activity (live-crawl).
 
