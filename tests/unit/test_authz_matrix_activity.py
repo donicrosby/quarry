@@ -20,6 +20,9 @@ import pytest
 
 from quarry.schemas import (
     ArtifactKind,
+    AuthProfile,
+    AuthProfileKind,
+    AuthProfileSet,
     AuthzMatrixEndpoint,
     AuthzMatrixPersona,
     HttpRequestSpec,
@@ -40,10 +43,12 @@ class _FakeHttpRequest:
     def __init__(self, handler: Handler) -> None:
         self._handler = handler
         self.calls: list[HttpRequestSpec] = []
+        self.inputs: list[HttpRequestActivityInput] = []
 
     async def __call__(self, inp: HttpRequestActivityInput) -> HttpResponseCapture:
         spec = HttpRequestSpec.model_validate_json(inp.spec_json)
         self.calls.append(spec)
+        self.inputs.append(inp)
         outcome = self._handler(spec)
         if isinstance(outcome, Exception):
             raise outcome
@@ -277,3 +282,51 @@ def test_activity_is_registered_under_temporal_name() -> None:
     defn = getattr(authz_matrix_activity, "__temporal_activity_definition", None)
     assert defn is not None
     assert defn.name == "authz-matrix"
+
+
+async def test_5xx_does_not_abort_the_matrix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target 5xx on one endpoint is recorded and the matrix continues (G7)."""
+
+    def handler(spec: HttpRequestSpec) -> tuple[int, str] | Exception:
+        if spec.path == "/boom":
+            return (503, "unavailable")
+        return (200, "ok")
+
+    _patch(monkeypatch, handler)
+    inp = _input(
+        tmp_path,
+        [_endpoint("GET", "/boom"), _endpoint("GET", "/fine")],
+        [_persona("user", "user-token")],
+    )
+
+    result = await authz_matrix_activity(inp)
+
+    by_path = {row.endpoint_path: row.cells[0] for row in result.rows}
+    assert by_path["/boom"].status_code == 503
+    assert by_path["/fine"].status_code == 200
+
+
+async def test_login_flow_persona_delegates_credential_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A login-flow persona's ``profile_ref`` is forwarded to the shared egress path.
+
+    The matrix owns no credential handling (B3): it dispatches the persona's
+    explicit ``auth_profile`` plus the serialized ``AuthProfileSet`` through
+    ``http_request_activity``, so login-flow resolution and its per-profile TTL
+    caching stay owned by the shared path.
+    """
+    profile_set = AuthProfileSet(
+        profiles=[AuthProfile(name="login-token", kind=AuthProfileKind.LOGIN_FLOW)]
+    )
+    fake = _patch(monkeypatch, lambda spec: (200, "ok"))
+    inp = _input(
+        tmp_path, [_endpoint("GET", "/dash")], [_persona("user", "login-token")]
+    ).model_copy(update={"auth_profile_set_json": profile_set.model_dump_json()})
+
+    await authz_matrix_activity(inp)
+
+    assert fake.calls[0].auth_profile == "login-token"
+    assert fake.inputs[0].auth_profile_set_json == profile_set.model_dump_json()

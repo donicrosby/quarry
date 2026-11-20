@@ -896,7 +896,7 @@ class AgentTask(BaseModel):
     # consuming activity resolves it via the kb_context injector at execution
     # time — the task itself carries only the reference, never the content.
     kb_root_index_key: str | None = None
-    source: Literal["recon", "gapfill", "feedback"] = "recon"
+    source: Literal["recon", "gapfill", "feedback", "authz-matrix"] = "recon"
     gapfill_pass: int = 0
     # The iterative-coverage-loop round (0-based) in which this task is hunted
     # (ADR-022). round_index=0 for recon-derived tasks; gapfill/feedback tasks

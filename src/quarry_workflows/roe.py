@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from fnmatch import fnmatch
 
-from quarry.schemas import PersonaScope, TargetAuthorization
+from quarry.schemas import AuthProfileSet, PersonaScope, TargetAuthorization
 
 
 def authorization_active(
@@ -81,3 +81,49 @@ def persona_for_request(
             continue
         return persona
     return None
+
+
+def persona_profile_errors(
+    authorization: TargetAuthorization,
+    auth_profile_set: AuthProfileSet | None,
+) -> list[str]:
+    """Return one message per persona whose non-null ``profile_ref`` is dangling.
+
+    Fail-closed startup validation (spec "Persona validation at startup"): every
+    persona's non-null ``profile_ref`` must resolve to a name in the scan's
+    ``AuthProfileSet`` before any scan activity starts. A dangling reference is a
+    hard error — dispatching it would otherwise reach ``dynamic_http``, which
+    skips credential injection for an unresolved profile and sends the request
+    *unauthenticated*. ``None`` refs are the declared unauthenticated persona and
+    always pass. An empty return list means every reference resolves.
+
+    Pure and workflow-side: the caller decides how to fail (the workflow raises
+    before its first activity).
+    """
+    errors: list[str] = []
+    for persona in authorization.personas:
+        if persona.profile_ref is None:
+            continue
+        if auth_profile_set is None or auth_profile_set.get(persona.profile_ref) is None:
+            errors.append(
+                f"persona '{persona.name}' profile_ref '{persona.profile_ref}' "
+                "does not resolve in the AuthProfileSet"
+            )
+    return errors
+
+
+def ensure_persona_profiles_resolve(
+    authorization: TargetAuthorization,
+    auth_profile_set: AuthProfileSet | None,
+) -> None:
+    """Fail-closed startup guard: raise naming every dangling persona ``profile_ref``.
+
+    Called at the top of ``RunScanWorkflow._run``, before the first scan activity.
+    Raising here is the security-relevant part: proceeding would let
+    ``dynamic_http`` skip credential injection for the unresolved profile and send
+    the request **unauthenticated**, with no fail-fast at scan start.
+    """
+    errors = persona_profile_errors(authorization, auth_profile_set)
+    if errors:
+        msg = "persona authorization validation failed: " + "; ".join(errors)
+        raise ValueError(msg)

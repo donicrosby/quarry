@@ -379,7 +379,7 @@ class TestAuthzEmission:
         assert len(tasks) == 2
         assert all(t.scope for t in tasks)
         assert all(t.round_index == 0 for t in tasks)
-        assert all(t.source == "gapfill" for t in tasks)
+        assert all(t.source == "authz-matrix" for t in tasks)
         assert any(artifact.uri in t.task_prompt for t in tasks)
         assert any("/admin/users" in t.task_prompt for t in tasks)
         again = build_authz_hunt_tasks(

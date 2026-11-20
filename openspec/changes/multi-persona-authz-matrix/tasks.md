@@ -43,7 +43,12 @@
   personas.
 - [ ] Add startup validation: every persona's non-null `profile_ref` must
   resolve in the `AuthProfileSet`; fail fast with a clear error if not
-  (extend the existing auth-profile validation seam in `runner.py`).
+  (`ensure_persona_profiles_resolve` in `quarry_workflows/roe.py`, called at the
+  top of `RunScanWorkflow._run` before the first scan activity — the
+  workflow-pure analogue of `ToolRunner._check_auth_profile` in
+  `quarry_tools/runner.py`, which validates per-tool-call inputs inside
+  activities and never sees the scan's persona declarations, and never runs
+  before the scan starts).
 - [ ] Unit test: persona_for_request selects correct persona for matching host+path.
 - [ ] Unit test: persona_for_request returns None when no persona matches.
 - [ ] Unit test: persona_for_request returns None when do_not_test blocks path.
@@ -165,17 +170,46 @@
   a matrix-conditioned task in a coverage round — the flagged endpoint appears
   among a round's hunted tasks.
 
+- NOTE (honest deviation): the full-`RunScanWorkflow`-driving integration tests
+  in this group are delivered at the helper/wiring level
+  (`tests/unit/test_authz_matrix_dispatch_wiring.py` — source-level contract
+  assertions on the workflow body plus pure-helper tests) and the activity level
+  (`tests/integration/test_authz_matrix_stage.py`), because the repo has no e2e
+  fixture that wires a hunt/validate `MockModelClient` into `RunScanWorkflow`
+  (same convention as `test_lifecycle_hooks_e2e.py`). The SF-B `round_tasks`
+  consumption seam — the r2 structural fix — carries both a source-level guard
+  on the workflow's `compose_round_tasks(agent_tasks, matrix_tasks)` call and a
+  behavioural guard on the composer plus the minted task itself
+  (`tests/unit/test_authz_matrix_dispatch_wiring.py`).
+
 ## Group 7: Validation and edge cases
 - [ ] Handle persona with login-flow/browser-login auth: the matrix SHALL
   trigger login once per persona, cache the session credential per the
   profile's TTL (`LoginStep.ttl_seconds`/`BrowserLoginStep.ttl_seconds`,
   `CredentialCache`), and reuse across endpoint requests.
+  - DEVIATION (not implemented; escalated): this task is not implementable as
+    written against the rest of the reviewed change. Each matrix cell dispatches
+    through the shared `http-request` activity, which constructs a fresh
+    `CredentialCache` per call (`dynamic_http.py`), so a matrix-local
+    login-once cache cannot be injected without editing `dynamic_http.py` —
+    which Group 2 pins as do-not-touch — and inline resolved credentials may not
+    travel on `HttpRequestSpec` ("carries no inline secrets"). The ADDED
+    Requirement of record ("Matrix probes every attack-map endpoint as every
+    persona") says only that the cell dispatches `profile_ref` through the
+    `http-request` activity, which the matrix does. A spec decision is required:
+    relax this line to "inherits shared-path credential resolution", or amend
+    the change to pin an injection seam in `dynamic_http.py`. Escalated to the
+    planner; not silently dropped.
 - [ ] Handle HTTP errors during matrix collection: a 5xx or transport error on
   one endpoint SHALL NOT abort the matrix; record in the cell and continue.
 - [ ] Request rate limiting: space persona requests per endpoint to avoid
   triggering target-side rate limits (minimum 1s between requests to the same
   host).
 - [ ] Unit test: login-flow persona reuses cached credential across matrix rows.
+  - DEVIATION: blocked on the same contradiction above; the delivered test
+    asserts the matrix forwards the persona's `profile_ref` + `AuthProfileSet`
+    to the shared egress path, which owns credential resolution and caching
+    (`tests/unit/test_authz_matrix_activity.py::test_login_flow_persona_delegates_credential_resolution`).
 - [ ] Unit test: target 5xx on one endpoint doesn't abort the matrix for
   remaining endpoints.
 

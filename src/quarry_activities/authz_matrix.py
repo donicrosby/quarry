@@ -30,6 +30,7 @@ never trigger a finding, and error/5xx cells are inconclusive.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from contextlib import suppress
@@ -119,7 +120,7 @@ async def authz_matrix_activity(inp: AuthzMatrixActivityInput) -> AuthzMatrixRes
             rows.append(AuthzMatrixRow(endpoint_path=ep.path, endpoint_method=ep.method))
             continue
         for persona in inp.personas:
-            last_request_at = _pace(last_request_at, inp.min_request_interval_seconds)
+            last_request_at = await _pace(last_request_at, inp.min_request_interval_seconds)
             with suppress(RuntimeError):
                 activity.heartbeat()
             cells.append(await _probe_cell(inp, endpoint, ep, persona, store))
@@ -139,8 +140,11 @@ async def authz_matrix_activity(inp: AuthzMatrixActivityInput) -> AuthzMatrixRes
     return result.model_copy(update={"artifact_ref": artifact_ref})
 
 
-def _pace(last_request_at: float | None, min_interval: float) -> float:
+async def _pace(last_request_at: float | None, min_interval: float) -> float:
     """Sleep so consecutive requests to one host are at least *min_interval* apart.
+
+    ``await asyncio.sleep`` (not blocking ``time.sleep``) so a co-hosted activity
+    does not stall the worker event loop for up to ``min_interval`` per cell.
 
     Returns the monotonic timestamp after the (possible) sleep.
     """
@@ -148,7 +152,7 @@ def _pace(last_request_at: float | None, min_interval: float) -> float:
     if last_request_at is not None and min_interval > 0:
         remaining = min_interval - (now - last_request_at)
         if remaining > 0:
-            time.sleep(remaining)
+            await asyncio.sleep(remaining)
             now = time.monotonic()
     return now
 
@@ -168,7 +172,20 @@ async def _probe_cell(
     ``http_request_activity`` is imported locally: it is the sole egress code
     path, and importing it at module scope would re-expose the decorated
     function to the activity registry (duplicate ``http-request`` name).
+
+    Only *expected* transport/policy failures become inconclusive cells
+    (``httpx.HTTPError`` — the request never completed; ``OSError`` — connection
+    refused/reset; ``ValueError`` — refused dispatch, e.g. the worker-side
+    allowed-hosts guard). Anything else is a coding bug and must propagate
+    rather than be laundered into a silent "inconclusive" cell.
     """
+    # Imported locally for the same reason as ``http_request_activity``: a
+    # module-level ``import httpx`` executes httpx's typing/``urllib.request``
+    # module code at load time, which the Temporal workflow sandbox rejects
+    # (``RestrictedWorkflowAccessError`` on ``urllib.request.Request``) because
+    # ``quarry_workflows.run_scan`` imports this module's pure builders.
+    import httpx
+
     from quarry_activities.dynamic_http import http_request_activity
 
     spec = HttpRequestSpec(
@@ -187,7 +204,8 @@ async def _probe_cell(
     )
     try:
         capture = await http_request_activity(request_input)
-    except Exception as exc:  # transport failure / refused dispatch — record, continue
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        # Transport failure / refused dispatch — record the cell, keep going.
         return AuthzMatrixCell(persona=persona.name, error=f"{type(exc).__name__}: {exc}")
 
     return AuthzMatrixCell(
@@ -443,8 +461,10 @@ def build_authz_hunt_tasks(
     """Create one hunt ``AgentTask`` per flagged endpoint (gapfill/feedback shape).
 
     Pure: ids derive deterministically from the endpoint, so replay mints the
-    same tasks. Deduplication against hunted cells happens caller-side via
-    ``dedup_new_tasks`` (``cell_key`` = ``(scope, vuln_class, source)``).
+    same tasks. ``source`` is ``"authz-matrix"`` — a distinct ``cell_key``
+    namespace ``(scope, vuln_class, source)`` so matrix cells never collide with
+    gapfill cells. Deduplication against hunted cells happens caller-side via
+    ``dedup_new_tasks``.
     """
     artifact_uri = matrix.artifact_ref.uri if matrix.artifact_ref is not None else "(none)"
     tasks: list[AgentTask] = []
@@ -475,7 +495,11 @@ def build_authz_hunt_tasks(
                 ),
                 vuln_class=vuln_class,
                 scope=violation.endpoint_path,
-                source="gapfill",
+                # A distinct source keeps matrix cells out of the gapfill dedup
+                # namespace: ``cell_key`` is ``(scope, vuln_class, source)``, so a
+                # later genuine gapfill task for the same cell is not deduped away
+                # by the matrix task (nit N2).
+                source="authz-matrix",
                 round_index=round_index,
                 status="pending",
                 created_at=created_at,

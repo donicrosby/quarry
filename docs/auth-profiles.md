@@ -12,7 +12,7 @@ preserves the historical single-authorization behavior exactly.
 ```toml
 # auth-profiles.toml (or inline on the TargetAuthorization)
 [personas.anon]
-profile_ref = ""            # empty/absent = unauthenticated, no credential
+# profile_ref omitted → None = unauthenticated (no credential injection)
 allowed_hosts = ["app.example.com"]
 allowed_paths = ["/"]
 privilege_level = "unauthenticated"
@@ -55,6 +55,17 @@ persona whose host+path scope covers the request (`persona_for_request` in
 declared and none matches, the request is refused before egress. Persona
 selection only *refines* the top-level authorization scope — it never widens it.
 The `http-request` activity itself never selects a persona.
+
+## Persona validation at startup
+
+Every persona's non-null `profile_ref` must resolve to a name in the scan's
+`AuthProfileSet` before any scan activity starts. A dangling reference (a typo,
+or a profile the scan did not load) **fails the scan closed** at startup instead
+of dispatching the request unauthenticated: the `http-request` activity skips
+credential injection when a named profile does not resolve, so an unvalidated ref
+would silently send live traffic *without credentials*. `profile_ref = None` (the
+unauthenticated persona) always passes, and a persona with empty `allowed_hosts`
+matches no request (fail-closed).
 
 ## The authorization matrix
 

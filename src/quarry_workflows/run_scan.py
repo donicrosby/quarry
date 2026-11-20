@@ -27,6 +27,7 @@ from quarry.schemas import (
     ArchitectureDoc,
     ArtifactKind,
     ArtifactRef,
+    AuthProfileSet,
     AuthzMatrixEndpoint,
     AuthzMatrixPersona,
     AuthzMatrixResult,
@@ -130,6 +131,7 @@ from quarry_workflows.candidate_sources import (  # noqa: F401
 from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
     cell_key,
+    compose_round_tasks,
     dedup_new_tasks,
     exploratory_gap_paths,
     loop_stop_reason,
@@ -193,7 +195,12 @@ from quarry_workflows.prove_stage import (
     prioritize_by_live_verdict,
     prove_outcome_from_captures,
 )
-from quarry_workflows.roe import authorization_active, persona_for_request, request_in_scope
+from quarry_workflows.roe import (
+    authorization_active,
+    ensure_persona_profiles_resolve,
+    persona_for_request,
+    request_in_scope,
+)
 from quarry_workflows.tracer_stage import (
     apply_trace_severity_reranking,
     sync_final_finding_trace,
@@ -491,6 +498,25 @@ class RunScanWorkflow:
         created_at = workflow.now()
         artifact_root = _join_path(scan_input.output_dir, "artifacts")
         report_path = _join_path(scan_input.output_dir, "reports", f"{scan_id}.md")
+
+        # ── Persona authorization validation (W14) ───────────────────────────
+        # Fail-closed, before the first scan activity: every declared persona's
+        # non-null ``profile_ref`` must resolve in the scan's ``AuthProfileSet``
+        # (spec "Persona validation at startup"). ``dynamic_http`` silently skips
+        # credential injection for an unresolved profile and sends the request
+        # UNAUTHENTICATED, so a typo'd ref would otherwise produce unauthenticated
+        # egress under persona dispatch with no fail-fast at scan start. Zero
+        # personas is a no-op (backward compatibility).
+        if scan_input.authorization_json:
+            ensure_persona_profiles_resolve(
+                TargetAuthorization.model_validate_json(scan_input.authorization_json),
+                (
+                    AuthProfileSet.model_validate_json(scan_input.auth_profiles_json)
+                    if scan_input.auth_profiles_json
+                    else None
+                ),
+            )
+
         persisted_scan = (
             await _load_scan(scan_input.db_path, scan_id) if scan_input.resume else None
         )
@@ -910,7 +936,7 @@ class RunScanWorkflow:
             # gapfill ledger and the coverage loop see them.
             all_agent_tasks.extend(matrix_tasks)
 
-        round_tasks: list[AgentTask] = [*agent_tasks, *matrix_tasks]
+        round_tasks: list[AgentTask] = compose_round_tasks(agent_tasks, matrix_tasks)
         # Why the coverage loop ended: "budget" | "convergence" | "finding_plateau" |
         # "round_cap". Stays None only if the loop body never ran (no tasks).
         loop_stop_reason_final: str | None = None
@@ -1468,12 +1494,18 @@ class RunScanWorkflow:
 
         Runs only when the live track is active (the caller already enforced the
         fail-closed gate) AND ``personas`` is non-empty — a zero-persona
-        authorization dispatches nothing and produces no artifact. Probes are
-        governed by the top-level ``request_in_scope`` only: persona scope
+        authorization dispatches nothing and produces no artifact. The
+        :func:`authz_matrix_active` gate is deliberately NOT keyed on
+        ``dynamic_validation_enabled`` (that flag gates VALIDATION egress). Probes
+        are governed by the top-level ``request_in_scope`` only: persona scope
         narrows agent-initiated dispatch, not matrix measurement. Best-effort —
         a failed matrix is logged and never aborts the scan.
         """
-        if not authorization.personas:
+        if not authz_matrix_active(
+            enabled=scan_input.live_exploit_enabled,
+            target_url=scan_input.target_url,
+            authorization=authorization,
+        ):
             return []
 
         endpoints = build_authz_matrix_endpoints(attack_map, authorization, host=target_ep.host)
@@ -1587,6 +1619,12 @@ class RunScanWorkflow:
                 "endpoint_count": str(len(endpoints)),
                 "persona_count": str(len(personas)),
                 "violation_count": str(len(violations)),
+                # Surfaces an all-error matrix (zero violations + zero signal) so
+                # post-run audits can tell "no authZ issues" from "every probe
+                # failed at the transport layer" (SF2).
+                "error_cell_count": str(
+                    sum(1 for row in matrix.rows for cell in row.cells if cell.error is not None)
+                ),
             },
         )
         return matrix_tasks
@@ -1681,24 +1719,25 @@ class RunScanWorkflow:
                 continue
 
             # Persona-scoped dispatch (W14) — workflow-side, immediately after the
-            # request_in_scope check (D4 precedent). An explicit auth_profile
-            # bypasses selection; with personas declared and no match, the request
-            # is refused before egress (fail-closed, same refusal shape).
-            if spec.auth_profile is None and authorization.personas:
-                persona = persona_for_request(authorization, host=target_ep.host, path=spec.path)
-                if persona is None:
-                    steps.append(
-                        ExploitStep(
-                            order=len(steps),
-                            intent=intent,
-                            request_spec=spec,
-                            dispatched=False,
-                            confirmed=False,
-                            notes="refused: no persona covers request",
-                        )
+            # request_in_scope check (D4 precedent). Pure helper: an explicit
+            # auth_profile bypasses selection; with personas declared and no match
+            # the request is refused before egress (fail-closed, same refusal
+            # shape).
+            spec, persona_refusal = plan_persona_dispatch(
+                spec, authorization, host=target_ep.host, path=spec.path
+            )
+            if persona_refusal is not None:
+                steps.append(
+                    ExploitStep(
+                        order=len(steps),
+                        intent=intent,
+                        request_spec=spec,
+                        dispatched=False,
+                        confirmed=False,
+                        notes=persona_refusal,
                     )
-                    continue
-                spec = spec.model_copy(update={"auth_profile": persona.profile_ref})
+                )
+                continue
 
             inp = HttpRequestActivityInput(
                 spec_json=spec.model_dump_json(),
@@ -3698,6 +3737,61 @@ def live_exploitation_active(
     never flip it on.
     """
     return bool(enabled and target_url and authorization_active(authorization))
+
+
+def authz_matrix_active(
+    *,
+    enabled: bool,
+    target_url: str | None,
+    authorization: TargetAuthorization | None,
+) -> bool:
+    """W14 matrix-stage gate: the live track is active AND personas are declared.
+
+    Deliberately ignores ``dynamic_validation_enabled`` — the matrix is gated by
+    the live-exploitation track, never by the VALIDATION egress flag. Reuses the
+    fail-closed :func:`live_exploitation_active` gate (live opt-in AND resolved
+    target AND active authorization) and adds only the non-empty-personas
+    condition. Zero personas → the stage dispatches nothing.
+    """
+    return (
+        live_exploitation_active(
+            enabled=enabled, target_url=target_url, authorization=authorization
+        )
+        and authorization is not None
+        and bool(authorization.personas)
+    )
+
+
+def plan_persona_dispatch(
+    spec: HttpRequestSpec,
+    authorization: TargetAuthorization,
+    *,
+    host: str,
+    path: str,
+) -> tuple[HttpRequestSpec, str | None]:
+    """Resolve the persona-scoped outbound ``spec`` for the live-exploit chain (pure).
+
+    Workflow-side only (D4 precedent — the ``http-request`` activity never selects
+    personas). Rules, in order:
+
+    - an explicit ``spec.auth_profile`` bypasses persona selection entirely;
+    - with no personas declared the spec is returned unchanged (backward
+      compatibility — no persona refusal is ever emitted);
+    - otherwise the first persona whose host+path scope covers the request
+      supplies its ``profile_ref`` as the explicit ``auth_profile``;
+    - when personas are declared and no persona covers the request, the request
+      must be refused *before* egress: the returned reason mirrors the
+      out-of-scope refusal and is recorded on an ``ExploitStep``.
+
+    Returns ``(spec, None)`` when the request may dispatch, or
+    ``(spec, "<refusal reason>")`` when it must be refused.
+    """
+    if spec.auth_profile is not None or not authorization.personas:
+        return spec, None
+    persona = persona_for_request(authorization, host=host, path=path)
+    if persona is None:
+        return spec, "refused: no persona covers request"
+    return spec.model_copy(update={"auth_profile": persona.profile_ref}), None
 
 
 def build_authz_matrix_endpoints(
