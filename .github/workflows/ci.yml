@@ -160,6 +160,28 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "**/uv.lock"
       - run: uv sync --group dev --frozen
+      # R1 (impl review): mitmproxy is a declared dev dependency again. This
+      # lane's core integration test (test_traffic_capture_proxy.py) does a
+      # module-level `pytest.importorskip("mitmproxy")`, so a missing dep is a
+      # silent green — and `--shard` would bury the skip in a shard summary.
+      # Assert the funnel e2e RUNS (not skipped), independent of pytest's exit
+      # code for an all-skipped module (which would otherwise abort this step
+      # before the grep via the default `-e -o pipefail`).
+      - name: traffic-capture funnel e2e must not skip
+        run: |
+          set +e
+          uv run pytest tests/integration/test_traffic_capture_proxy.py -n 0 -rs -q \
+            | tee /tmp/traffic-capture-e2e.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::traffic-capture funnel e2e failed (pytest exit $rc)" >&2
+            exit "$rc"
+          fi
+          if grep -qE "[0-9]+ skipped" /tmp/traffic-capture-e2e.log; then
+            echo "::error::traffic-capture funnel e2e was skipped — mitmproxy missing from the dev group" >&2
+            exit 1
+          fi
       - name: pytest (integration shard)
         run: >
           uv run pytest tests/integration -n 0

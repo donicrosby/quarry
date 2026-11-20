@@ -52,6 +52,11 @@ artifacts-s3 = ["boto3>=1.35"]
   "pytest-xdist>=3.6.0",
   "redis>=5",
   "boto3>=1.35",
+  # Recording-proxy funnel e2e (tests/integration/test_traffic_capture_proxy.py)
+  # drives `mitmdump`; without this declared the lane's core integration test
+  # skips silently (module-level importorskip) in every clean env. Pin matches
+  # the compose recording sidecar image (docker-compose.yml `proxy.image`).
+  "mitmproxy==12.3.1",
   "ruff>=0.11.12",
 ]
 

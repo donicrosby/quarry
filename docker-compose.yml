@@ -92,7 +92,20 @@ services:
   worker:
     # Same image as the server; built once by the server service.
     image: quarry:local
-    command: ["quarry", "worker"]
+    # Build a combined CA bundle at start (system roots + the recording proxy's
+    # interception CA), then exec the worker. SSL_CERT_FILE / REQUESTS_CA_BUNDLE
+    # REPLACE the trust store rather than extend it — httpx does
+    # `ssl.create_default_context(cafile=SSL_CERT_FILE)`, which loads ONLY that
+    # file — so pointing them at the mitmproxy-CA-only PEM would break TLS to
+    # every NO_PROXY'd provider (api.openai.com, api.anthropic.com, openrouter.ai,
+    # …), the exact direct egress the NO_PROXY funnel protects. Concatenating
+    # keeps both MITM'd proxied hosts and direct provider hosts verifiable.
+    command:
+      - sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /mitmproxy-certs/mitmproxy-ca-cert.pem > /tmp/quarry-ca-bundle.pem
+        exec quarry worker
     environment:
       QUARRY_TEMPORAL_ADDRESS: temporal:7233
       QUARRY_DB_PATH: /data/quarry.db
@@ -106,9 +119,11 @@ services:
       HTTP_PROXY: ${QUARRY_HTTP_PROXY:-http://proxy:8788}
       HTTPS_PROXY: ${QUARRY_HTTPS_PROXY:-http://proxy:8788}
       NO_PROXY: ${QUARRY_NO_PROXY:-localhost,127.0.0.1,::1,temporal,server,host.docker.internal,api.openai.com,api.anthropic.com,openrouter.ai,api.chutes.ai,generativelanguage.googleapis.com}
-      # Trust the proxy's interception CA for proxied HTTPS (mounted read-only).
-      SSL_CERT_FILE: /mitmproxy-certs/mitmproxy-ca-cert.pem
-      REQUESTS_CA_BUNDLE: /mitmproxy-certs/mitmproxy-ca-cert.pem
+      # Trust the proxy's interception CA for proxied HTTPS. Points at the
+      # combined system+proxy bundle the command above builds (NOT the
+      # mitmproxy-CA-only PEM, which would replace the whole trust store).
+      SSL_CERT_FILE: /tmp/quarry-ca-bundle.pem
+      REQUESTS_CA_BUNDLE: /tmp/quarry-ca-bundle.pem
       QUARRY_TRAFFIC_CAPTURE_ROOT: /data/traffic-capture
       QUARRY_EVIDENCE_STORE_ROOT: /data/evidence
     volumes:
