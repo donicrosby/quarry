@@ -100,6 +100,12 @@ class BuildCoverageLedgerInput(BaseModel):
     agent_tasks_scanned: int
     skipped_json: str
     workspace_id: str = "local"
+    # Tier-aware cell coverage (credibility-economics): the hunted tasks and the
+    # candidate findings, serialised, plus whether the scan has a [credibility]
+    # config. Empty tasks means no cells are computed (pre-change behaviour).
+    tasks_json: str = "[]"
+    findings_json: str = "[]"
+    credibility_enabled: bool = False
     # versioned-handoff-artifacts: version stamps carried onto the persisted
     # ledger (ADR-026 rule 6). Default to 1 for callers that predate the stamps.
     scan_ordinal: int = 1

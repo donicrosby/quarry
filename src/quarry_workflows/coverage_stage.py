@@ -198,6 +198,13 @@ async def record_coverage(
             agent_tasks_total=len(agent_tasks),
             agent_tasks_scanned=len(agent_tasks),
             skipped_json=json.dumps(skipped, sort_keys=True),
+            # Tier-aware cell coverage (credibility-economics): the tasks define
+            # the (scope, vuln_class) cells and the findings their occupancy.
+            tasks_json=json.dumps([_model_json_dict(task) for task in agent_tasks], sort_keys=True),
+            findings_json=json.dumps(
+                [_model_json_dict(finding) for finding in candidate_findings], sort_keys=True
+            ),
+            credibility_enabled=scan_input.credibility_config_json is not None,
             scan_ordinal=scan_ordinal,
             artifact_version=round_index + 1,
         ),

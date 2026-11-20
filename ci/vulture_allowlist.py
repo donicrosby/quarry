@@ -343,6 +343,13 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.StepOutcome,
     src.quarry_workflows.roe.repo_path_in_scope,
     src.quarry_workflows.run_scan.select_dynamic_probe_spec,
+    # credibility-economics: pydantic fields set through model_copy / constructors
+    # that vulture's AST walk cannot see.
+    src.quarry.schemas.credibility_discount,
+    src.quarry.schemas.occupant_count,
+    src.quarry.schemas.covered_occupants,
+    src.quarry.schemas.corroboration_promotion,
+    src.quarry_activities.corroborator.skipped_steps,
 ]
 
 _ = _ALLOWLIST  # mark the allowlist itself as used (vulture sees only definitions otherwise)

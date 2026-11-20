@@ -728,6 +728,11 @@ class EnsembleJudgement(BaseModel):
     verdict: JudgementVerdict | str
     refuted: bool | None = None  # set only for debater judgements
     model_invocation_id: str | None = None
+    # The candidate's tier-discounted credibility prior at the time the
+    # judgement was recorded (credibility-economics). Provenance only: the
+    # ordinal ``compute_credibility`` posterior is computed from stances, never
+    # from this number.
+    credibility_prior: float = 1.0
 
     @field_validator("verdict", mode="before")
     @classmethod
@@ -858,6 +863,32 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    # Write-time credibility economics (credibility-economics). ``grounded`` is
+    # provenance, not a score: True when the finding's claim came from a
+    # deterministic tool observation (a parsed HTTP status, a regex/grep match, a
+    # port scan, a proven exploit chain), False when a model produced it from
+    # reasoning. It is set explicitly at every construction site and never
+    # recomputed. Distinct from citation-grounding
+    # (``validate._refute_must_be_grounded``) and knowledge-base grounding
+    # (``kb_recon.py`` grounded entities).
+    grounded: bool = True
+    # The model that produced the finding when it was a model judgment; None for
+    # deterministic tool output. Resolves the reliability tier used to discount
+    # a judgment.
+    originating_model_id: str | None = None
+    # Tier-discounted credibility prior (``base * (1.0 if grounded else
+    # tier_factor)``), derived in ``_derive_credibility_prior`` below. A
+    # cascade/coverage-ledger input only — it never modulates the ordinal
+    # ``compute_credibility`` posterior.
+    credibility_prior: float = 1.0
+    # The tier factor actually applied when the finding was discounted (None when
+    # the finding is tool-grounded). Recorded so the discount is auditable.
+    credibility_discount: float | None = None
+    # Set by the corroboration cascade when the finding was corroborated
+    # (tool-grounded evidence or independent signals); promotes its coverage cell.
+    corroborated: bool = False
+    # The cascade step that resolved the finding, for report provenance.
+    cascade_step: str | None = None
     # Ensemble credibility posterior (MDASH, design D3). ``None`` when the finding
     # was not reviewed by a debater/counterpoint ensemble. ``ensemble`` retains
     # each contributing judgement (provenance-linked) so the report is auditable.
@@ -897,6 +928,30 @@ class CandidateFinding(BaseModel):
         # ``raw_severity`` so the raw value is always exposed.
         if self.raw_severity is None:
             self.raw_severity = self.severity
+        return self
+
+    @model_validator(mode="after")
+    def _derive_credibility_prior(self) -> CandidateFinding:
+        """Derive the tier-discounted credibility prior from the write-time tag.
+
+        ``prior = base * (1.0 if grounded else tier_factor)``; the applied tier
+        factor (when any) is recorded as ``credibility_discount``. Deriving it
+        here makes the invariant hold at every construction site — including the
+        sites that build findings in workflow code — instead of relying on each
+        caller to recompute it. Findings written before this field existed
+        deserialise with ``grounded=True`` (no discount), so their prior is 1.0.
+        """
+        # Local import: ``quarry_models.credibility`` imports ``quarry.schemas``
+        # (and ``quarry.panel_config``, which does too), so a module-level import
+        # here would be circular.
+        from quarry_models.credibility import credibility_prior_for
+
+        prior, discount = credibility_prior_for(
+            grounded=self.grounded,
+            originating_model_id=self.originating_model_id,
+        )
+        self.credibility_prior = prior
+        self.credibility_discount = discount
         return self
 
 
@@ -1057,6 +1112,11 @@ class ValidationResult(BaseModel):
     # The recorded negative-constraint checklist (cpc slice 5). Populated when the
     # debater runs the checklist refute regime; empty for the legacy binary refuter.
     checklist: list[ChecklistItem] = Field(default_factory=_empty_checklist)
+    # Corroboration cascade outcome (credibility-economics): the step that
+    # resolved the finding and whether it was corroborated. Both stay at their
+    # defaults when the scan has no ``[credibility]`` config (legacy path).
+    corroborated: bool = False
+    cascade_step: str | None = None
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -1128,6 +1188,39 @@ class HunterGap(BaseModel):
     vuln_class: VulnerabilityClass | None = None
 
 
+class CoverageCell(BaseModel):
+    """Tier-aware occupancy state of one ``(scope, vuln_class)`` coverage cell.
+
+    A cell is *covered* only when at least one of its occupants is
+    tool-grounded (``grounded=True``), was corroborated by the cascade
+    (``corroborated=True``), or carries a tier-discounted credibility prior at
+    or above the STRONG factor (0.9). A cell whose sole occupants are all
+    discounted stays uncovered and is therefore eligible for one gapfill
+    re-hunt; once that re-hunt produces no new corroborated finding the cell is
+    recorded ``terminal_uncovered`` and permanently excluded from gapfill.
+    """
+
+    vuln_class: VulnerabilityClass
+    scope: str
+    covered: bool
+    terminal_uncovered: bool = False
+    # Occupancy counts, for audit: how many findings landed in the cell, and how
+    # many of them counted toward coverage.
+    occupant_count: int = 0
+    covered_occupants: int = 0
+    # True when coverage came from a cascade corroboration rather than from the
+    # finding's own grounded/tier status.
+    corroboration_promotion: bool = False
+    # The reliability tier of the occupant that decided coverage (audit trail for
+    # the frontier/strong-tier judgment case). None when coverage came from a
+    # tool-grounded or corroborated occupant.
+    tier: str | None = None
+
+
+def _empty_coverage_cells() -> list[CoverageCell]:
+    return []
+
+
 class CoverageLedger(BaseModel):
     id: str
     scan_id: str
@@ -1137,6 +1230,13 @@ class CoverageLedger(BaseModel):
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
+    # Tier-aware ``(scope, vuln_class)`` cell occupancy (credibility-economics).
+    # A cell counts as covered only when it has an occupant that is
+    # tool-grounded, corroborated, or carries a prior at/above ``TIER_THRESHOLD``;
+    # cells left uncovered after a gapfill attempt are recorded
+    # ``terminal_uncovered`` and excluded from further gapfill. Empty for ledgers
+    # built without findings (pre-guarantee behaviour).
+    cells: list[CoverageCell] = Field(default_factory=_empty_coverage_cells)
     # Proactive production-file accounting (candidate-precision-and-calibration).
     # Every first-party file in the snapshot manifest is accounted for exactly
     # once: covered by an investigation, intentionally excluded (with reason),

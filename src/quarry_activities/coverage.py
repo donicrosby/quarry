@@ -16,8 +16,11 @@ from uuid import uuid4
 from temporalio import activity
 
 from quarry.schemas import (
+    AgentTask,
     ArtifactKind,
     ArtifactRef,
+    CandidateFinding,
+    CoverageCell,
     CoverageGap,
     CoverageLedger,
     FileManifestEntry,
@@ -204,6 +207,118 @@ def compute_file_coverage(
     return accounting
 
 
+# ---------------------------------------------------------------------------
+# Tier-aware cell coverage (credibility-economics)
+# ---------------------------------------------------------------------------
+
+
+def finding_counts_toward_coverage(finding: CandidateFinding) -> bool:
+    """Whether *finding* marks its coverage cell covered.
+
+    True when the finding is tool-grounded, was corroborated by the cascade, or
+    carries a tier-discounted credibility prior at/above the STRONG factor
+    (0.9). A low-tier model judgment that nothing corroborated does NOT count —
+    that is the write-time gate's whole point.
+    """
+    from quarry_models.credibility import TIER_THRESHOLD
+
+    return finding.grounded or finding.corroborated or finding.credibility_prior >= TIER_THRESHOLD
+
+
+def _cell_scope_of(finding: CandidateFinding) -> str:
+    """The path component a finding cites, normalised for scope matching."""
+    locator = finding.affected_component or ""
+    if not locator and finding.evidence_path:
+        locator = finding.evidence_path[0].path
+    return locator.replace("\\", "/").split(":", 1)[0].strip().strip("/")
+
+
+def _occupies(scope: str, finding: CandidateFinding) -> bool:
+    """Whether *finding* occupies the cell at *scope*.
+
+    A cell with an empty scope is class-wide (every finding of that class
+    occupies it); otherwise the finding's cited path must sit at or under the
+    scope path.
+    """
+    if not scope:
+        return True
+    path = _cell_scope_of(finding)
+    if not path:
+        return False
+    return path == scope or path.startswith(f"{scope}/")
+
+
+def compute_cell_coverage(
+    tasks: list[AgentTask],
+    findings: list[CandidateFinding],
+    *,
+    credibility_enabled: bool,
+) -> list[CoverageCell]:
+    """Compute ``(scope, vuln_class)`` cell occupancy from tasks and findings.
+
+    Cells come from the hunted tasks (the same ``(scope, vuln_class)`` vocabulary
+    gapfill dedupes on); occupants are the findings whose class matches and whose
+    cited path sits under the cell's scope. With *credibility_enabled* the
+    tier-aware threshold decides coverage and a cell that was already gapfill-
+    hunted but is still uncovered is recorded ``terminal_uncovered`` (it gets no
+    further gapfill rounds). With the feature disabled every occupant counts, so
+    the ledger behaves exactly as it did before this change.
+
+    Deterministic: output is sorted by ``(scope, vuln_class)``.
+    """
+    cells: dict[tuple[str, VulnerabilityClass], CoverageCell] = {}
+    gapfill_hunted: set[tuple[str, VulnerabilityClass]] = set()
+    for task in tasks:
+        if task.vuln_class is None:
+            continue
+        scope = (task.scope or "").replace("\\", "/").strip().strip("/")
+        key = (scope, task.vuln_class)
+        if task.source == "gapfill":
+            gapfill_hunted.add(key)
+        cells.setdefault(
+            key,
+            CoverageCell(vuln_class=task.vuln_class, scope=scope, covered=False),
+        )
+
+    result: list[CoverageCell] = []
+    for key, cell in sorted(cells.items(), key=lambda item: (item[0][0], item[0][1].value)):
+        occupants = [f for f in findings if f.vuln_class == cell.vuln_class]
+        occupants = [f for f in occupants if _occupies(cell.scope, f)]
+        if credibility_enabled:
+            counting = [f for f in occupants if finding_counts_toward_coverage(f)]
+        else:
+            counting = occupants
+        covered = bool(counting)
+        promotion = any(f.corroborated and not f.grounded for f in counting)
+        tier: str | None = None
+        if covered and not promotion:
+            from quarry_models.credibility import resolve_model_tier
+
+            deciding = next(
+                (f for f in counting if f.grounded or f.corroborated),
+                None,
+            )
+            if deciding is None:
+                # Coverage came from the tier-discounted prior: record the tier.
+                prior_decider = max(counting, key=lambda f: f.credibility_prior)
+                tier = resolve_model_tier(prior_decider.originating_model_id).name.lower()
+        result.append(
+            cell.model_copy(
+                update={
+                    "covered": covered,
+                    "terminal_uncovered": (
+                        credibility_enabled and not covered and key in gapfill_hunted
+                    ),
+                    "occupant_count": len(occupants),
+                    "covered_occupants": len(counting),
+                    "corroboration_promotion": promotion,
+                    "tier": tier,
+                }
+            )
+        )
+    return result
+
+
 def build_coverage_ledger(
     *,
     scan_id: str,
@@ -217,6 +332,9 @@ def build_coverage_ledger(
     covered_files: list[str] | None = None,
     scope_excluded_files: list[tuple[str, str]] | None = None,
     finding_file_paths: list[str] | None = None,
+    tasks: list[AgentTask] | None = None,
+    findings: list[CandidateFinding] | None = None,
+    credibility_enabled: bool = False,
     id: str | None = None,
     created_at: Any = None,
     scan_ordinal: int = 1,
@@ -233,6 +351,11 @@ def build_coverage_ledger(
     every first-party file in the snapshot: covered (an investigation or a
     finding touches it), intentionally excluded (production-code boundary or
     scan scope, with reason), or gap. See :func:`compute_file_coverage`.
+
+    When *tasks* is supplied, the ledger additionally records tier-aware
+    ``(scope, vuln_class)`` cell occupancy from *findings* (see
+    :func:`compute_cell_coverage`). Cells are empty for callers that predate the
+    credibility economics.
     """
     file_coverage: list[ProductionFileAccounting] = []
     if file_manifest is not None:
@@ -241,6 +364,13 @@ def build_coverage_ledger(
             covered_files=covered_files,
             scope_excluded_files=scope_excluded_files,
             finding_file_paths=finding_file_paths,
+        )
+    cells: list[CoverageCell] = []
+    if tasks is not None:
+        cells = compute_cell_coverage(
+            tasks,
+            findings or [],
+            credibility_enabled=credibility_enabled,
         )
     return CoverageLedger(
         id=id if id is not None else str(uuid4()),
@@ -251,6 +381,7 @@ def build_coverage_ledger(
         vuln_classes_requested=requested_vuln_classes or [],
         vuln_classes_completed=completed_vuln_classes or [],
         skipped_items=skipped_items or [],
+        cells=cells,
         file_coverage=file_coverage,
         scan_ordinal=scan_ordinal,
         artifact_version=artifact_version,
@@ -293,6 +424,9 @@ def build_coverage_ledger_activity(
         agent_tasks_total=input.agent_tasks_total,
         agent_tasks_scanned=input.agent_tasks_scanned,
         skipped_items=_coverage_gaps_from_json(input.scan_id, input.skipped_json),
+        tasks=_agent_tasks_from_json(input.tasks_json),
+        findings=_candidate_findings_from_json(input.findings_json),
+        credibility_enabled=input.credibility_enabled,
         scan_ordinal=input.scan_ordinal,
         artifact_version=input.artifact_version,
     )
@@ -301,6 +435,41 @@ def build_coverage_ledger_activity(
         ledger_json=ledger.model_dump_json(),
         artifact_ref_json=artifact_ref.model_dump_json(),
     )
+
+
+def _agent_tasks_from_json(payload: str) -> list[AgentTask]:
+    """Parse a serialised AgentTask list, dropping entries that do not validate.
+
+    Model/activity payloads cross the boundary as JSON; a single malformed entry
+    must not fail the whole ledger build (the coverage guarantee is about the
+    tasks we DID hunt, and the drop is visible as a smaller cell set).
+    """
+    raw = json.loads(payload)
+    if not isinstance(raw, list):
+        msg = "tasks_json must encode a JSON array"
+        raise TypeError(msg)
+    tasks: list[AgentTask] = []
+    for entry in cast(list[Any], raw):
+        if not isinstance(entry, dict):
+            continue
+        with suppress(Exception):
+            tasks.append(AgentTask.model_validate(entry))
+    return tasks
+
+
+def _candidate_findings_from_json(payload: str) -> list[CandidateFinding]:
+    """Parse a serialised CandidateFinding list, dropping entries that do not validate."""
+    raw = json.loads(payload)
+    if not isinstance(raw, list):
+        msg = "findings_json must encode a JSON array"
+        raise TypeError(msg)
+    findings: list[CandidateFinding] = []
+    for entry in cast(list[Any], raw):
+        if not isinstance(entry, dict):
+            continue
+        with suppress(Exception):
+            findings.append(CandidateFinding.model_validate(entry))
+    return findings
 
 
 def _coverage_gaps_from_json(scan_id: str, payload: str) -> list[CoverageGap]:
