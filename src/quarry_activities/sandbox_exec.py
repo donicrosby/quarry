@@ -167,7 +167,7 @@ def _resolve_credentials(auth_profile_set_json: str | None) -> dict[str, str]:
     return env
 
 
-def _build_sandbox_backend() -> SandboxBackend:
+def build_sandbox_backend() -> SandboxBackend:
     """Return the configured SandboxBackend.
 
     Reads QUARRY_SANDBOX_BACKEND (via QuarrySettings):
@@ -176,6 +176,8 @@ def _build_sandbox_backend() -> SandboxBackend:
       "k8s_job"         — K8sJobSandbox Tier 3 (deferred; raises NotImplementedError)
 
     QUARRY_SANDBOX_IMAGE overrides the default container image for the container tier.
+    QUARRY_SANDBOX_MEMORY overrides the container memory cap (Docker ``--memory``
+    value, e.g. "2g"); empty => the ``ContainerSandbox`` default.
     """
     settings = QuarrySettings()
     backend = (settings.sandbox_backend or "").lower().strip()
@@ -183,7 +185,8 @@ def _build_sandbox_backend() -> SandboxBackend:
         return LocalSubprocessSandbox()
     if backend == "container":
         image = settings.sandbox_image or ContainerSandbox.DEFAULT_IMAGE
-        return ContainerSandbox(image=image)
+        memory_limit = settings.sandbox_memory or None
+        return ContainerSandbox(image=image, memory_limit=memory_limit)
     if backend == "k8s_job":
         return K8sJobSandbox()
     msg = (
@@ -658,7 +661,7 @@ def sandbox_exec_activity(inp: SandboxExecActivityInput) -> SandboxExecCapture:
     egress_policy = _resolve_policy_json(inp.egress_policy_json)
 
     store = build_artifact_store(inp.artifact_store_path)
-    sandbox = _build_sandbox_backend()
+    sandbox = build_sandbox_backend()
 
     # Tier 1 is CLI-only: it cannot enforce a destination-set policy (no
     # kernel-enforced network namespace), so a live-target dispatch is scoped to

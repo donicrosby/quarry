@@ -16,6 +16,9 @@ symbol, remove its line here in the same PR so the gate keeps tracking zero.
 
 _ALLOWLIST = [
     # --- Pydantic/dataclass fields (set by BaseModel/dataclass __init__ — invisible to vulture) ---
+    # AgentLogEvent is constructed with **fields in the loop, so vulture cannot see
+    # this field's keyword usage; it is set on every per-agent log line.
+    src.quarry_models.agent_log.replay,
     src.quarry.benchmark_artifacts.recall_per_class,
     src.quarry.benchmark_artifacts.fp_rate,
     src.quarry.benchmark_artifacts.models,
@@ -55,6 +58,8 @@ _ALLOWLIST = [
     src.quarry.schemas.trigger_input,
     src.quarry.schemas.triage_notes,
     src.quarry.schemas.triaged_at,
+    src.quarry.schemas.legacy,
+    src.quarry.schemas.model_omitted,
     src.quarry.schemas.duplicate_of,
     src.quarry.schemas.severity_adjusted,
     src.quarry.schemas.attack_surface_item_id,
@@ -128,9 +133,28 @@ _ALLOWLIST = [
     src.quarry.schemas.env_profile,
     src.quarry.schemas.materialize_as,
     src.quarry.schemas.setup_commands,
+    # SARIF v2.1.0 models: fields are set by the constructors and read in tests
+    # (vulture only analyses src/), so the camelCase field names read as unused.
+    src.quarry_integrations.sarif_models.startLine,
+    src.quarry_integrations.sarif_models.endLine,
+    src.quarry_integrations.sarif_models.artifactLocation,
+    src.quarry_integrations.sarif_models.physicalLocation,
+    src.quarry_integrations.sarif_models.shortDescription,
+    src.quarry_integrations.sarif_models.rules,
+    src.quarry_integrations.sarif_models.locations,
+    src.quarry_integrations.sarif_models.properties,
+    src.quarry_integrations.sarif_models.schema_url,
     src.quarry_activities.exploit.proposed_http_spec,
     src.quarry_activities.exploit.done,
     src.quarry_activities.inputs.prove_corpus_json,
+    # fuzzing-harness: FuzzSpec/FuzzCrash/FuzzResult fields whose only reader is
+    # a dict lookup over the serialised Temporal payload (invisible to vulture).
+    src.quarry_activities.inputs.entry_point_function,
+    src.quarry_activities.inputs.stderr_sha256,
+    src.quarry_activities.inputs.runs_executed,
+    src.quarry_activities.inputs.budget_exhausted,
+    src.quarry_activities.inputs.boundary_outcomes,
+    src.quarry_activities.inputs.non_crash_exits,
     src.quarry_activities.live_recon.code_file,
     src.quarry_activities.live_recon.code_function,
     src.quarry_activities.live_recon.auth_required,
@@ -139,6 +163,7 @@ _ALLOWLIST = [
     src.quarry_activities.reporting.calls,
     src.quarry_activities.reporting.total_input_tokens,
     src.quarry_activities.reporting.total_output_tokens,
+    src.quarry_activities.reporting.evidence_links,
     src.quarry_artifacts.http_utils.original_size,
     src.quarry_benchmark.agent.poc_format,
     src.quarry_benchmark.agent.rationale,
@@ -176,6 +201,10 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.session_updates,
     src.quarry_workflows.run_scan.candidate_finding_count,
     src.quarry_workflows.run_scan.final_finding_count,
+    # VerdictReceipt field reached only through dataclasses.asdict() when the
+    # timing receipt is serialized onto finding.dynamic_validated (vulture's AST
+    # walk does not see the keyword-argument name in the receipt constructor).
+    src.quarry_activities.verdict_evaluators.VerdictReceipt.induced_delay_ms,
     # --- Protocol signature params, dunder params, instance attrs ---
     src.quarry_artifacts.s3_store.Body,
     src.quarry_artifacts.s3_store.Bucket,
@@ -278,6 +307,12 @@ _ALLOWLIST = [
     src.quarry.schemas.SENSITIVE_ENV_KEYS,
     src.quarry.schemas.VerdictDefaults.deployment_intent,
     src.quarry.schemas.VerdictDefaults.reverification_outcome,
+    # multi-persona-authz-matrix: pydantic fields set by BaseModel __init__.
+    src.quarry.schemas.PersonaScope.privilege_level,
+    src.quarry.schemas.AuthzMatrixPersona.privilege_level,
+    src.quarry.schemas.AuthzMatrixCell.body_hash,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_path,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_method,
     src.quarry_activities.browser_login.BrowserLoginResolver,
     src.quarry_activities.calibrate.RULE_REDUNDANT_CAPABILITY_DOWNGRADE,
     src.quarry_activities.credentials.CredentialProvider,
@@ -287,6 +322,7 @@ _ALLOWLIST = [
     src.quarry_activities.sandbox_exec.scrub_and_wrap_output,
     src.quarry_integrations.sinks.file_sink.FILE_SINK,
     src.quarry_integrations.sinks.jira_dry_run.JIRA_DRY_RUN_SINK,
+    src.quarry_integrations.sinks.sarif.SARIF_SINK,
     src.quarry_integrations.sinks.slack_dry_run.SLACK_DRY_RUN_SINK,
     src.quarry_models.checklist.discharged_checklist,
     src.quarry_models.client.ModelClient,
@@ -318,6 +354,13 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.StepOutcome,
     src.quarry_workflows.roe.repo_path_in_scope,
     src.quarry_workflows.run_scan.select_dynamic_probe_spec,
+    # credibility-economics: pydantic fields set through model_copy / constructors
+    # that vulture's AST walk cannot see.
+    src.quarry.schemas.credibility_discount,
+    src.quarry.schemas.occupant_count,
+    src.quarry.schemas.covered_occupants,
+    src.quarry.schemas.corroboration_promotion,
+    src.quarry_activities.corroborator.skipped_steps,
 ]
 
 _ = _ALLOWLIST  # mark the allowlist itself as used (vulture sees only definitions otherwise)

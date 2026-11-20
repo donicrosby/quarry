@@ -11,7 +11,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from quarry.schemas import CanaryCallback, ChangedFile
+from quarry.schemas import (
+    AuthzMatrixEndpoint,
+    AuthzMatrixPersona,
+    BuildCommand,
+    CanaryCallback,
+    ChangedFile,
+)
 
 
 class CreateSnapshotInput(BaseModel):
@@ -100,6 +106,12 @@ class BuildCoverageLedgerInput(BaseModel):
     agent_tasks_scanned: int
     skipped_json: str
     workspace_id: str = "local"
+    # Tier-aware cell coverage (credibility-economics): the hunted tasks and the
+    # candidate findings, serialised, plus whether the scan has a [credibility]
+    # config. Empty tasks means no cells are computed (pre-change behaviour).
+    tasks_json: str = "[]"
+    findings_json: str = "[]"
+    credibility_enabled: bool = False
     # versioned-handoff-artifacts: version stamps carried onto the persisted
     # ledger (ADR-026 rule 6). Default to 1 for callers that predate the stamps.
     scan_ordinal: int = 1
@@ -250,6 +262,96 @@ class SandboxExecActivityInput(BaseModel):
     canary_token: str | None = None
 
 
+class FuzzSpec(BaseModel):
+    """Input payload for the ``fuzz`` activity (C5 fuzzing-harness).
+
+    Mirrors :class:`SandboxExecActivityInput`: every value is a JSON-serializable
+    primitive at the Temporal boundary (``BuildCommand`` is a plain Pydantic
+    model; no ``Path`` objects).  The fuzz activity builds the target, mutates
+    the entry point's attacker-controlled ``args`` channel, runs each mutant
+    through a ``SandboxBackend``, classifies crashes, dedups them by output hash
+    and returns one :class:`FuzzCrash` per unique crash.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    workspace_id: str = "local"
+    # Repository the target is built in and the built binary lives under.
+    repo_path: str
+    # Entry-point identity, carried through for candidate attribution.
+    entry_point_file: str = ""
+    entry_point_function: str = ""
+    # Base argv template.  ``invocation[0]`` is the binary path as recon named
+    # it; it is re-staged by basename inside the sandbox.  Mutated inputs are
+    # APPENDED as the final argument.
+    invocation: tuple[str, ...] = ()
+    # Attacker-controlled channel; v1 supports the ``args`` channel only.
+    attacker_controlled_input: str = "args"
+    # The single focused vulnerability class the scan resolved to.
+    vuln_class: str = ""
+    # Base value the mutation engine mutates (the attacker-supplied argument).
+    seed_input: str = ""
+    # Deterministic seed for the mutation RNG (same seed => same run sequence).
+    seed: int = 0
+    # Bounded budget: total runs and per-run wall-clock timeout.
+    run_budget: int = 64
+    timeout_seconds: int = 10
+    # Empty tuple => the activity falls back to its DEFAULT_DICTIONARY.
+    dictionary: tuple[str, ...] = ()
+    # Recon build recipe(s); ``build``/``fuzz`` purpose entries run before fuzzing.
+    build_commands: tuple[BuildCommand, ...] = ()
+    # Relative path (under ``repo_path``) of the built binary to stage and run.
+    binary_path: str = ""
+    # Root the crash stderr/stdout artifacts are stored under.
+    artifact_store_path: str = ""
+
+
+class FuzzCrash(BaseModel):
+    """One unique crash found by a fuzz pass (deduped by crash hash).
+
+    Crash output is never embedded inline: ``stderr``/``stdout`` are stored as
+    TOOL_STDERR/TOOL_STDOUT artifacts and only their refs + hashes travel here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    crash_hash: str
+    exit_code: int
+    timed_out: bool = False
+    kind: str  # "signal" | "sanitizer"
+    signal: str = ""  # e.g. "SIGSEGV"; empty for sanitizer-only crashes
+    signal_number: int | None = None
+    sanitizer: str = ""  # "asan" | "ubsan"; empty for signal-only crashes
+    seed: int = 0
+    run_index: int = 0
+    trigger_input: str = ""
+    component: str = ""
+    stderr_artifact_ref: str = ""
+    stdout_artifact_ref: str = ""
+    stderr_sha256: str = ""
+    stderr_length: int = 0
+
+
+class FuzzResult(BaseModel):
+    """Output payload for the ``fuzz`` activity.
+
+    ``status`` is one of ``ran`` / ``skipped`` / ``refused`` / ``failed``;
+    ``reason`` explains a non-``ran`` outcome (missing invocation, non-args
+    channel, absent build recipe, build/binary failure).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    reason: str = ""
+    runs_executed: int = 0
+    budget_exhausted: bool = False
+    boundary_outcomes: int = 0
+    non_crash_exits: int = 0
+    crashes: tuple[FuzzCrash, ...] = ()
+
+
 class ReconSynthesisOutput(BaseModel):
     """Output payload for recon-synthesis (versioned-handoff-artifacts).
 
@@ -327,6 +429,41 @@ class LoadHandoffArtifactsOutput(BaseModel):
     hunt_handoff_json: str | None = None
     architecture_doc_json: str | None = None
     coverage_ledger_json: str | None = None
+
+
+def _empty_authz_endpoints() -> list[AuthzMatrixEndpoint]:
+    return []
+
+
+def _empty_authz_personas() -> list[AuthzMatrixPersona]:
+    return []
+
+
+class AuthzMatrixActivityInput(BaseModel):
+    """Input payload for the authz-matrix activity (multi-persona authZ matrix).
+
+    All values are JSON-serializable primitives at the Temporal boundary; the
+    workflow pre-resolves each persona's ``profile_ref`` and pre-filters
+    endpoints by top-level ``request_in_scope`` before the call. The activity
+    performs NO persona selection — it probes every supplied (endpoint, persona)
+    pair with that persona's explicit ``profile_ref``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_id: str
+    target_endpoint_json: str  # TargetEndpoint serialized
+    allowed_hosts: tuple[str, ...]  # independent Layer-6 enforcement
+    artifact_store_path: str  # path for LocalArtifactStore
+    auth_profile_set_json: str | None = None  # AuthProfileSet serialized; None = unauthenticated
+    # Top-level do_not_test ceiling: endpoints matching any pattern are never
+    # probed (no cell), regardless of persona.
+    do_not_test: tuple[str, ...] = ()
+    endpoints: list[AuthzMatrixEndpoint] = Field(default_factory=_empty_authz_endpoints)
+    personas: list[AuthzMatrixPersona] = Field(default_factory=_empty_authz_personas)
+    # Minimum spacing between requests to the same host (target-side rate-limit
+    # safety). Default 1.0s; unit tests pass 0.0 to keep the suite fast.
+    min_request_interval_seconds: float = 1.0
 
 
 class IngestCanaryCallbacksInput(BaseModel):

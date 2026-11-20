@@ -83,6 +83,9 @@ async def test_diff_scan_workflow_completes(
 
     assert [candidate.affected_component for candidate in candidates] == ["changed.py"]
     assert "NEW_API_KEY" in candidates[0].title
+    # R1: the diff-scan secrets site sets a canonical root_cause_key (mirrors the
+    # secrets plugin) so the cascade compares keys, never bare component equality.
+    assert candidates[0].root_cause_key == "secrets:changed.py:NEW_API_KEY"
     assert [final.affected_component for final in finals] == ["changed.py"]
 
 

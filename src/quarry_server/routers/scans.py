@@ -98,6 +98,7 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             output_dir=_server_data_dir,
             target_url=body.target_url,
             vuln_classes=list(body.vuln_classes),
+            typosquat_patterns=settings.typosquat_patterns,
             panel_entries=panel_entries,
             activity_max_attempts=quarry_config.retry.max_attempts,
             retry_initial_interval_seconds=quarry_config.retry.initial_interval_seconds,
@@ -105,6 +106,11 @@ async def start_scan(request: Request, body: StartScanRequest) -> ScanResponse:
             retry_maximum_interval_seconds=quarry_config.retry.maximum_interval_seconds,
             retry_jitter_fraction=quarry_config.retry.jitter_fraction,
             calibrate_start_to_close_seconds=(quarry_config.retry.calibrate_start_to_close_seconds),
+            credibility_config_json=(
+                quarry_config.credibility.model_dump_json()
+                if quarry_config.credibility is not None
+                else None
+            ),
             budget_cap_usd=quarry_config.budget.max_cost_per_scan_usd,
             hunt_max_iterations=quarry_config.scan_defaults.hunt_max_iterations,
             hunt_max_concurrent=quarry_config.scan_defaults.hunt_max_concurrent,
@@ -167,12 +173,18 @@ async def resume_scan(scan_id: str, request: Request) -> ScanResponse:
             output_dir=output_dir,
             target_url=target_url,
             resume=True,
+            typosquat_patterns=settings.typosquat_patterns,
             activity_max_attempts=quarry_config.retry.max_attempts,
             retry_initial_interval_seconds=quarry_config.retry.initial_interval_seconds,
             retry_backoff_coefficient=quarry_config.retry.backoff_coefficient,
             retry_maximum_interval_seconds=quarry_config.retry.maximum_interval_seconds,
             retry_jitter_fraction=quarry_config.retry.jitter_fraction,
             calibrate_start_to_close_seconds=(quarry_config.retry.calibrate_start_to_close_seconds),
+            credibility_config_json=(
+                quarry_config.credibility.model_dump_json()
+                if quarry_config.credibility is not None
+                else None
+            ),
         ),
         id=f"{scan_id}-resume-{uuid4()}",
         task_queue=settings.task_queue,

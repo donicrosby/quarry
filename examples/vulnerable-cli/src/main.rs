@@ -8,6 +8,7 @@
 ///    attacker who pre-plants the path wins the race.
 /// 4. Terminal escape injection: --echo-input echoes user input to stdout
 ///    without stripping ANSI/terminal-control sequences.
+/// 5. Env injection: --edit executes the attacker-controlled $EDITOR value.
 ///
 /// DO NOT deploy in any real environment.
 use std::env;
@@ -24,6 +25,7 @@ fn main() {
         eprintln!("  --read-file <path>            Read and print file contents");
         eprintln!("  --write-temp <content>        Write content to a shared temp file (UNSAFE)");
         eprintln!("  --echo-input <value>          Echo a value to stdout (UNSAFE)");
+        eprintln!("  --edit <path>                 Open path with $EDITOR (UNSAFE)");
         exit(1);
     }
 
@@ -57,6 +59,20 @@ fn main() {
                     exit(1);
                 }
             }
+        }
+        "--edit" => {
+            if args.len() < 3 {
+                eprintln!("--edit requires an argument");
+                exit(1);
+            }
+            // VULNERABILITY: attacker-controlled $EDITOR is executed with an
+            // attacker-controlled path (environment-variable injection).
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&args[2])
+                .status()
+                .expect("failed to launch editor");
+            exit(status.code().unwrap_or(1));
         }
         "--write-temp" => {
             if args.len() < 3 {

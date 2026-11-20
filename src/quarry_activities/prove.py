@@ -28,7 +28,9 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
@@ -74,6 +76,7 @@ def prove_impl(
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
     canary_token: str | None = None,
+    replay_mode: bool = False,
 ) -> ProveResponse:
     """Core prove implementation — callable from the activity and from tests.
 
@@ -139,6 +142,9 @@ def prove_impl(
         scan_id=finding.scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        agent_instance_id=compute_agent_instance_id("prove", finding.id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -167,6 +173,7 @@ def prove_activity(
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
     canary_token: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: agentic proof-of-concept generation for a single finding.
 
@@ -205,6 +212,7 @@ def prove_activity(
             prior_attempts,
             artifact_root,
             canary_token,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -223,6 +231,7 @@ def _prove_activity_impl(
     prior_attempts: list[dict[str, Any]] | None = None,
     artifact_root: str | None = None,
     canary_token: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(finding, dict):
         finding = CandidateFinding.model_validate(finding)
@@ -258,6 +267,7 @@ def _prove_activity_impl(
         prior_attempts=prior_attempts,
         artifact_root=artifact_root,
         canary_token=canary_token,
+        replay_mode=replay_mode,
     )
 
     persist_model_invocations(db_path, finding.scan_id, client)

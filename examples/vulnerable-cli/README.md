@@ -8,6 +8,7 @@ Deliberately vulnerable Rust CLI for Quarry prove-subsystem testing.
 
 1. **Command injection** (`--run-cmd`): passes user input directly to `sh -c`.
 2. **Path traversal** (`--read-file`): reads any path without canonicalization.
+3. **Env injection** (`--edit`): executes the attacker-controlled `$EDITOR` value.
 
 ## Build
 
@@ -21,6 +22,7 @@ cargo build --release
 ```bash
 ./target/release/vulnerable-cli --run-cmd "echo hello"
 ./target/release/vulnerable-cli --read-file corpus/project/config.toml
+./target/release/vulnerable-cli --edit corpus/project/config.toml
 ```
 
 ## Corpus
