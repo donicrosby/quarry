@@ -24,25 +24,39 @@ thread (``Page.evaluate`` has no native timeout), its return value is
 JSON-serialized and capped at 100 KB, non-serializable values produce an error,
 and the value passes through the ``Scrubber`` before it is returned.
 
+Wedge containment (N1, close-out t_6669f88a): a script that wedges the page
+renderer (``while (true) {}``) parks the driver thread inside ``Page.evaluate``
+past its deadline. When that happens the caller thread SIGKILLs the session's
+Chromium process tree (the only way to unwedge a stuck evaluate), reclaims the
+renderer's CPU, marks the session wedged, and every later action on that
+session fails fast with a ``session_wedged`` named error. The driver runs on a
+daemon thread so a wedged session can never hang worker shutdown or
+interpreter exit.
+
 HAR capture (spec HAR requirement): opt-in via ``capture_har`` on ``open_url``;
 on an explicit ``stop_har`` (or session expiry) the recorded traffic is scrubbed
 through the ``Scrubber`` and stored as an ``ArtifactRef(kind=har)``. Credentials
-minted *after* ``open_url`` (login ``Set-Cookie``, token refresh) are re-registered
-into the scrubber at finalize time, and ``HarRecorder`` redacts credential-header
-values at the capture boundary.
+minted *after* ``open_url`` (login ``Set-Cookie``, token refresh, a bearer
+token stashed in ``localStorage``) are re-registered into the scrubber at
+finalize time, and ``HarRecorder`` redacts credential-header values at the
+capture boundary.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import queue
+import signal
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -85,8 +99,151 @@ class BrowserSessionExpiredError(BrowserSessionError):
     """Raised when an action references a ``session_id`` whose TTL has elapsed."""
 
 
+class BrowserSessionWedgedError(BrowserSessionError):
+    """Raised when an action is dispatched to a session whose driver wedged.
+
+    A wedged session is dead: a prior call missed its driver deadline, the
+    session's Chromium tree was SIGKILLed to unwedge it, and no further
+    browser work is possible on that ``session_id``.
+    """
+
+
+#: Name prefix of every session driver thread (also asserted by tests).
+_DRIVER_THREAD_NAME = "quarry-browser-session"
+
+
+def _proc_stat_fields(pid: int) -> list[bytes] | None:
+    """Fields after the comm field of ``/proc/<pid>/stat``, or None when unreadable.
+
+    Parsing *after* the last ``)`` sidesteps comm values containing spaces or
+    parentheses; field 1 is then the process state and field 2 the parent pid.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read()
+    except OSError:
+        return None
+    tail = stat.rsplit(b")", 1)
+    if len(tail) != 2:
+        return None
+    return tail[1].split()
+
+
+def _browser_tree_pids(root_pid: int) -> list[int]:
+    """*root_pid* plus every living descendant, breadth-first (depth-ordered).
+
+    The depth ordering is load-bearing: the *shallowest* chromium-looking
+    descendant of the Playwright transport pid is the browser root; its
+    renderer/GPU children hang below it.
+    """
+    children: dict[int, list[int]] = {}
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        fields = _proc_stat_fields(pid)
+        if fields is None or len(fields) < 2:
+            continue
+        try:
+            ppid = int(fields[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    tree: list[int] = []
+    seen: set[int] = set()
+    frontier: deque[int] = deque([root_pid])
+    while frontier:
+        pid = frontier.popleft()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        tree.append(pid)
+        frontier.extend(children.get(pid, []))
+    return tree
+
+
+def _looks_like_chromium(pid: int) -> bool:
+    """True when ``/proc/<pid>/cmdline`` still looks like a Chromium build.
+
+    Guard against pid reuse: the wedge reclaim may fire minutes after launch,
+    and a recycled pid must never turn the reclaim into an arbitrary kill.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().decode("utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return "chrom" in cmdline
+
+
+def _kill_process_tree(pid: int) -> None:
+    """SIGKILL *pid* and its whole descendant tree (best-effort, never raises).
+
+    Called from the *caller's* thread when the session driver misses a
+    deadline: a ``Page.evaluate`` parked on a hostile script can only be
+    unwedged by destroying the renderer it is stuck on, and SIGKILL (not a
+    graceful close, which would need the wedged driver thread) is the only
+    signal a busy-looping renderer cannot ignore.
+    """
+    if pid <= 1 or not _looks_like_chromium(pid):
+        return
+    with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+        # Collect first, then kill in one pass: nothing can re-parent or
+        # respawn mid-sweep, so every descendant dies in this call.
+        for target in reversed(_browser_tree_pids(pid)):
+            os.kill(target, signal.SIGKILL)
+
+
+def _resolve_browser_root_pid(candidate_pid: int | None) -> int | None:
+    """Map the pid captured at launch to the Chromium *browser root* pid.
+
+    Playwright's transport pid is its driver *helper* process (a python
+    process whose cmdline carries no browser marker), with the launched
+    Chromium tree hanging below it. The wedge reclaim must target the
+    shallowest chromium-looking descendant — killing a renderer leaf would
+    leave the browser and its siblings alive. Returns ``None`` when no
+    chromium-looking descendant exists (launch layout change: the reclaim
+    degrades to no-kill, never an arbitrary kill).
+    """
+    if candidate_pid is None or candidate_pid <= 1:
+        return None
+    if _looks_like_chromium(candidate_pid):
+        return candidate_pid
+    for pid in _browser_tree_pids(candidate_pid)[1:]:
+        if _looks_like_chromium(pid):
+            return pid
+    return None
+
+
+class _ResultSlot:
+    """Result mailbox for one driver-thread call."""
+
+    __slots__ = ("done", "exception", "result")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.result: Any = None
+        self.exception: BaseException | None = None
+
+    def deliver(self, fn: Callable[[], Any]) -> None:
+        """Run *fn* on the driver thread and record its outcome for the caller."""
+        try:
+            self.result = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            self.exception = exc
+        finally:
+            self.done.set()
+
+
+class _WorkItem(NamedTuple):
+    """One queued driver call plus the mailbox its result lands in."""
+
+    fn: Callable[[], Any]
+    slot: _ResultSlot
+
+
 class _SessionDriver:
-    """One dedicated thread per session; every Playwright call is queued onto it.
+    """One dedicated daemon thread per session; every Playwright call is queued onto it.
 
     Playwright's sync API is thread-affine: a browser built on one thread raises
     ``greenlet.error`` ("cannot switch to a different thread") when driven from
@@ -95,24 +252,96 @@ class _SessionDriver:
     Pinning each session's browser to a single owned thread (and funneling every
     call through it) keeps the session-handle model working across invocations,
     and is also where ``execute_js``'s hard bound is enforced.
+
+    Wedge containment (N1, close-out t_6669f88a): a ``ThreadPoolExecutor``
+    cannot be used here — its worker threads are non-daemon and
+    ``concurrent.futures`` joins them at interpreter exit, so a driver parked
+    inside a wedged ``Page.evaluate`` hangs worker shutdown forever. This
+    hand-rolled loop runs on a *daemon* thread (interpreter exit can never
+    join it), and when ``run`` misses its deadline the *caller* thread marks
+    the session wedged and SIGKILLs the session's Chromium process tree — the
+    only thing that unwedges a stuck evaluate — reclaiming the renderer's CPU.
+    A wedged session is dead: every later call fails fast with
+    ``BrowserSessionWedgedError`` instead of burning another deadline.
     """
 
-    def __init__(self) -> None:
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="quarry-browser-session"
+    def __init__(self, *, kill_tree: Callable[[int], None] | None = None) -> None:
+        self._queue: queue.Queue[_WorkItem | None] = queue.Queue()
+        self._wedged = False
+        self._wedge_lock = threading.Lock()
+        self._browser_pid: int | None = None
+        self._kill_tree: Callable[[int], None] = (
+            kill_tree if kill_tree is not None else _kill_process_tree
         )
+        self._thread = threading.Thread(target=self._serve, name=_DRIVER_THREAD_NAME, daemon=True)
+        self._thread.start()
 
-    def run(self, fn: Any, *, timeout: float | None = None) -> Any:
+    def _serve(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            item.slot.deliver(item.fn)
+
+    @property
+    def is_wedged(self) -> bool:
+        """True once a call has missed its deadline — the session is dead then."""
+        return self._wedged
+
+    def attach_browser_pid(self, pid: int | None) -> None:
+        """Record the session's Chromium root pid for the wedge reclaim."""
+        self._browser_pid = pid
+
+    def kill_browser_tree(self) -> None:
+        """Mark the session wedged and SIGKILL its Chromium tree (idempotent)."""
+        with self._wedge_lock:
+            self._wedged = True
+        pid = self._browser_pid
+        if pid is not None:
+            self._kill_tree(pid)
+
+    def run(self, fn: Callable[[], Any], *, timeout: float | None = None) -> Any:
         """Run *fn* on the session thread, joining with an optional deadline."""
-        future = self._executor.submit(fn)
-        try:
-            return future.result(timeout=timeout)
-        except FuturesTimeoutError as exc:
+        if self._wedged:
+            msg = "browser session is wedged (a prior call missed its deadline)"
+            raise BrowserSessionWedgedError(msg)
+        slot = _ResultSlot()
+        self._queue.put(_WorkItem(fn=fn, slot=slot))
+        if not slot.done.wait(timeout) and not slot.done.is_set():
+            # Deadline miss: the driver thread is stuck inside fn (a wedged
+            # Page.evaluate). Kill the tree from THIS thread — the only way to
+            # unwedge it — and refuse every later call on this session. The
+            # is_set() re-check narrows the race with a result landing in the
+            # wait-timeout window.
+            self.kill_browser_tree()
             msg = "browser driver call exceeded its deadline"
-            raise BrowserActionTimeoutError(msg) from exc
+            raise BrowserActionTimeoutError(msg)
+        exc = slot.exception
+        if exc is not None:
+            raise exc
+        return slot.result
+
+    def run_teardown(self, fn: Callable[[], Any], *, timeout: float) -> None:
+        """Queue a best-effort teardown call, ignoring the wedge flag.
+
+        Only for teardown after ``kill_browser_tree``: the SIGKILL unwedges
+        the driver thread (the stuck call errors out against the dead
+        browser), after which queued cleanup — Playwright's own ``stop()`` —
+        can run and reap the transport helper process. When the kill could
+        not fire (no pid captured) this silently misses its deadline; callers
+        treat teardown as best-effort.
+        """
+        slot = _ResultSlot()
+        self._queue.put(_WorkItem(fn=fn, slot=slot))
+        slot.done.wait(timeout)
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        """Stop the driver loop.
+
+        Never joins the thread: a wedged driver must not be able to hang
+        teardown or interpreter exit (the thread is a daemon either way).
+        """
+        self._queue.put(None)
 
 
 class _ThreadedBrowser:
@@ -198,10 +427,24 @@ class _ThreadedBrowser:
         return cast("bytes", self._driver.run(self._inner.screenshot, timeout=self._deadline_s))
 
     def close(self) -> None:
+        """Release Chromium — killing the process tree when the driver cannot.
+
+        A graceful close goes through the driver thread; when the session is
+        already wedged, or the graceful close misses its deadline, the tree is
+        SIGKILLed from the *caller's* thread instead, so teardown can never
+        hang and never leaks the Chromium process tree (N1). After the kill,
+        Playwright's own teardown still runs (the kill unwedged the driver
+        thread) so the transport helper process is reaped too.
+        """
+        if self._driver.is_wedged:
+            self._driver.kill_browser_tree()
+            self._driver.run_teardown(self._inner.close, timeout=self._deadline_s)
+            return
         try:
             self._driver.run(self._inner.close, timeout=self._deadline_s)
-        except Exception:  # noqa: BLE001 - teardown is best-effort
-            return
+        except Exception:  # noqa: BLE001 - teardown is best-effort; reclaim below
+            self._driver.kill_browser_tree()
+            self._driver.run_teardown(self._inner.close, timeout=self._deadline_s)
 
 
 @dataclass
@@ -305,7 +548,13 @@ def _artifact_store(inp: BrowserSessionActivityInput) -> LocalArtifactStore:
 
 
 def _register_session_secrets(browser: Any, scrubber: Scrubber) -> None:
-    """Register captured cookie values so they are redacted from any output."""
+    """Register captured session secrets so they are redacted from any output.
+
+    Cookies *and* localStorage values are session credentials: a login flow
+    that stashes a bearer token in localStorage (N2, close-out t_6669f88a)
+    must have it denylisted exactly like a ``Set-Cookie`` value, or it rides
+    verbatim into any HAR, DOM, or JS output that echoes it.
+    """
     try:
         state = browser.storage_state()
     except Exception:  # noqa: BLE001 - best-effort; never fail a session on this
@@ -314,6 +563,11 @@ def _register_session_secrets(browser: Any, scrubber: Scrubber) -> None:
         value = cookie.get("value")
         if value:
             scrubber.register_secret(str(value))
+    for origin in state.get("origins", []):
+        for item in origin.get("localStorage", []):
+            value = item.get("value")
+            if value:
+                scrubber.register_secret(str(value))
 
 
 def _finalize_har(session: _LiveSession) -> dict[str, Any] | None:
@@ -395,6 +649,11 @@ def _open_url(inp: BrowserSessionActivityInput) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - named error, never leak the driver
         driver.close()
         return {"error": "open_url_failed", "message": str(exc)}
+    # Capture the Chromium root pid for the wedge reclaim (N1): the caller
+    # thread SIGKILLs this tree when the driver later misses a deadline. The
+    # transport pid is Playwright's *helper* process; resolve to the actual
+    # browser root below it before storing.
+    driver.attach_browser_pid(_resolve_browser_root_pid(getattr(inner, "browser_pid", None)))
     browser = _ThreadedBrowser(inner, driver)
     try:
         if inp.capture_har:
@@ -433,6 +692,8 @@ def _get_dom(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[st
     cap = min(max(inp.text_cap, 1), MAX_TEXT_CAP)
     try:
         raw = str(session.browser.get_dom(text_cap=cap + 1))
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except BrowserActionTimeoutError as exc:
         return {"error": "action_timeout", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
@@ -449,6 +710,8 @@ def _click(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str,
         return {"error": "missing_selector"}
     try:
         session.browser.click(inp.selector)
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except BrowserActionTimeoutError as exc:
         return {"error": "action_timeout", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
@@ -461,6 +724,8 @@ def _fill(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str, 
         return {"error": "missing_selector"}
     try:
         session.browser.fill(inp.selector, inp.value or "")
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except BrowserActionTimeoutError as exc:
         return {"error": "action_timeout", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
@@ -471,6 +736,8 @@ def _fill(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str, 
 def _screenshot(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str, Any]:
     try:
         data = session.browser.screenshot()
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
         return {"error": "action_failed", "message": str(exc)}
     key = f"{session.scan_id}/browser/{session.session_id}/screenshot-{uuid4().hex}.png"
@@ -481,6 +748,8 @@ def _screenshot(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict
 def _get_cookies(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict[str, Any]:
     try:
         cookies = session.browser.get_cookies()
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
         return {"error": "action_failed", "message": str(exc)}
     # Defense-in-depth: strip any ``value`` field even if the driver returned one.
@@ -494,6 +763,8 @@ def _execute_js(inp: BrowserSessionActivityInput, session: _LiveSession) -> dict
     timeout_ms = min(max(inp.timeout_ms or DEFAULT_JS_TIMEOUT_MS, 1), MAX_JS_TIMEOUT_MS)
     try:
         value = session.browser.execute_js(inp.script, timeout_ms=timeout_ms)
+    except BrowserSessionWedgedError as exc:
+        return {"error": "session_wedged", "message": str(exc)}
     except BrowserActionTimeoutError as exc:
         return {"error": "execute_js_timeout", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 - surface a named error, never crash
@@ -525,6 +796,9 @@ def _stop_har(inp: BrowserSessionActivityInput) -> dict[str, Any]:
         return {"error": "session_expired", "message": str(exc), "session_id": inp.session_id}
     except BrowserSessionNotFoundError as exc:
         return {"error": "session_not_found", "message": str(exc), "session_id": inp.session_id}
+    if session.driver.is_wedged:
+        # The Chromium tree is gone; there is nothing left to finalize.
+        return {"error": "session_wedged", "session_id": inp.session_id}
     if not session.capture_har:
         return {"status": "ok", "artifact": None}
     return {"status": "ok", "artifact": _finalize_har(session)}

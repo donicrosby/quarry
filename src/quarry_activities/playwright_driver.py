@@ -123,8 +123,29 @@ CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = ("--disable-dev-shm-usage", "--no-zygote
 #: that the ``Scrubber`` denylist never saw (e.g. a ``Set-Cookie`` produced by a
 #: login flow after ``open_url``). Route discovery needs the header *name*, not
 #: its value.
+#:
+#: N2 (close-out t_6669f88a): the original four-name list let opaque tokens
+#: riding *custom* auth header names (``X-API-Key``, ``X-Auth-Token``, …) leak
+#: verbatim into stored HARs. The list now covers the common API-credential
+#: header names. Residual: a service using a private header name outside this
+#: list is NOT redacted at the capture boundary — its only protection is the
+#: ``Scrubber`` denylist (cookies + localStorage values registered per
+#: session) and pattern matching, so prefer registering such values as secrets
+#: when they are observed.
 _CREDENTIAL_HEADERS: frozenset[str] = frozenset(
-    {"cookie", "set-cookie", "authorization", "proxy-authorization"}
+    {
+        "cookie",
+        "set-cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-session-token",
+        "x-access-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    }
 )
 
 #: Placeholder written in place of every credential-header value.
@@ -134,9 +155,10 @@ _CREDENTIAL_PLACEHOLDER = "[REDACTED_CREDENTIAL]"
 def _record_headers(header_map: Any) -> list[dict[str, str]]:
     """Serialize headers for the HAR, redacting credential-bearing values.
 
-    Credential headers (cookie/set-cookie/authorization/proxy-authorization) have
-    their values replaced with ``[REDACTED_CREDENTIAL]`` at capture time; every
-    other header keeps its value (route discovery needs method/URL/content-type,
+    Credential headers (see ``_CREDENTIAL_HEADERS``: the cookie/authorization
+    family plus the common custom API-credential names) have their values
+    replaced with ``[REDACTED_CREDENTIAL]`` at capture time; every other
+    header keeps its value (route discovery needs method/URL/content-type,
     not secrets).
     """
     headers = cast("dict[str, Any]", header_map or {})
@@ -157,9 +179,9 @@ class HarRecorder:
     content type. Response bodies are deliberately never captured: they are
     attacker-controlled, potentially huge, and unnecessary for route discovery,
     which is what the browser tool exists to support. Credential-bearing header
-    values (cookie/set-cookie/authorization/proxy-authorization) are replaced at
-    record time, so a live session token cannot reach stored evidence even before
-    the ``Scrubber`` pass runs.
+    values (see ``_CREDENTIAL_HEADERS``) are replaced at record time, so a live
+    session token cannot reach stored evidence even before the ``Scrubber``
+    pass runs.
     """
 
     def __init__(self) -> None:
@@ -331,6 +353,32 @@ class PlaywrightBrowserSession:
     def action_timeout_ms(self) -> int:
         """The per-action ceiling this session applies to Playwright operations."""
         return self._timeout_ms
+
+    @property
+    def browser_pid(self) -> int | None:
+        """The Playwright transport helper's pid, or ``None`` when unavailable.
+
+        Used by the session driver's wedge reclaim (N1, close-out
+        t_6669f88a): when a driver call misses its deadline, the caller
+        thread SIGKILLs the session's Chromium tree to unwedge a stuck
+        ``Page.evaluate``. Playwright does not publish the launched browser
+        process; this exposes the transport helper pid (whose descendants
+        include the browser root — ``browser_session._resolve_browser_root_pid``
+        does that mapping) via the private attribute chain
+        (``Browser._impl_obj._connection._transport._proc``) defensively —
+        any layout change merely returns ``None``, which degrades the reclaim
+        (no kill; the daemon driver still cannot hang interpreter exit)
+        instead of breaking the session.
+        """
+        with contextlib.suppress(Exception):
+            impl = getattr(self._browser, "_impl_obj", None)
+            connection = getattr(impl, "_connection", None)
+            transport = getattr(connection, "_transport", None)
+            proc = getattr(transport, "_proc", None)
+            pid = getattr(proc, "pid", None)
+            if isinstance(pid, int) and pid > 0:
+                return pid
+        return None
 
     def close(self) -> None:
         if self._closed:

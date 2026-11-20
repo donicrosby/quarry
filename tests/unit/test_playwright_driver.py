@@ -243,6 +243,37 @@ class TestHarRecorderStructuralRedaction:
         assert "abc12345" not in blob
 
 
+class TestCustomCredentialHeaderRedaction:
+    """N2 (close-out t_6669f88a): opaque credentials riding custom auth header
+    names must be redacted at the capture boundary, not only cookie/authorization."""
+
+    @pytest.mark.parametrize(
+        "header_name",
+        [
+            "X-API-Key",
+            "API-Key",
+            "X-Auth-Token",
+            "X-Session-Token",
+            "X-Access-Token",
+            "X-CSRF-Token",
+            "X-XSRF-Token",
+        ],
+    )
+    def test_custom_credential_header_value_is_redacted_at_record_time(
+        self, header_name: str
+    ) -> None:
+        from quarry_activities.playwright_driver import HarRecorder
+
+        token = "SYNTH-OPAQUE-TOKEN-4a5b6c7d8e"
+        recorder = HarRecorder()
+        recorder.record(_FakeRequest("GET", "http://localhost/api", {header_name: token}), None)
+        blob = recorder.to_json_bytes().decode("utf-8")
+        assert token not in blob, f"{header_name} value leaked into the stored HAR"
+        # The *name* survives (route discovery needs it); only the value goes.
+        assert header_name in blob
+        assert "REDACTED_CREDENTIAL" in blob
+
+
 # ---------------------------------------------------------------------------
 # Browser-dependent: real Chromium driver (spec Requirement 2 + 5)
 # ---------------------------------------------------------------------------

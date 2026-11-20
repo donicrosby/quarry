@@ -8,6 +8,9 @@ driver path is covered by the gated integration test.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -452,3 +455,289 @@ class TestSessionReclamation:
         _open(tmp_path, monkeypatch, fresh)
         assert stale.closed is True
         assert fresh.closed is False
+
+
+# ---------------------------------------------------------------------------
+# N1 (close-out t_6669f88a): a wedged execute_js must not leak the Chromium
+# tree, hang interpreter exit, or stall later actions and teardown.
+# ---------------------------------------------------------------------------
+
+
+class _WedgingBrowser(_FakeBrowser):
+    """``execute_js`` blocks past its bound — the ``while (true) {}`` shape.
+
+    The driver thread cannot return from the call, so only the caller-side
+    deadline (and the wedge reclaim behind it) can contain it. The block only
+    needs to outlive the 500 ms wedge bound: post-wedge actions are refused
+    before queueing, and teardown waits (at most) for the block to lift —
+    mirroring the real flow where the SIGKILL unwedges the driver.
+    """
+
+    def __init__(self, block_s: float = 2.0) -> None:
+        super().__init__()
+        self._block_s = block_s
+
+    def execute_js(self, script: str, timeout_ms: int = 5_000) -> Any:
+        time.sleep(self._block_s)
+        return "unreachable"
+
+
+def _wedge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: Any
+) -> tuple[str, dict[str, Any]]:
+    """Open a session and wedge it with a hostile script (500 ms bound)."""
+    opened = _open(tmp_path, monkeypatch, _WedgingBrowser(), **overrides)
+    assert opened["status"] == "ok"
+    sid = opened["session_id"]
+    wedged = browser_session_impl(
+        BrowserSessionActivityInput(
+            action="execute_js", session_id=sid, script="while(true){}", timeout_ms=500
+        )
+    )
+    return sid, wedged
+
+
+class TestWedgeContainment:
+    def test_wedge_returns_timeout_error_within_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sid, wedged = _wedge(tmp_path, monkeypatch)
+        assert sid
+        assert wedged["error"] == "execute_js_timeout"
+
+    def test_post_wedge_action_fails_fast_with_named_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sid, _ = _wedge(tmp_path, monkeypatch)
+        started = time.monotonic()
+        after = browser_session_impl(BrowserSessionActivityInput(action="get_dom", session_id=sid))
+        elapsed = time.monotonic() - started
+        assert after["error"] == "session_wedged", after
+        # Fail fast: the full per-action deadline (35 s) must not be burned.
+        assert elapsed < 5.0, f"post-wedge action burned {elapsed:.1f}s"
+
+    def test_wedge_kills_the_sessions_browser_tree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _WedgingBrowser()
+        opened = _open(tmp_path, monkeypatch, browser)
+        sid = opened["session_id"]
+        driver = bs._STORE._sessions[sid].driver  # pyright: ignore[reportPrivateUsage]
+        killed: list[int] = []
+        driver._browser_pid = 31337  # pyright: ignore[reportPrivateUsage]
+        driver._kill_tree = killed.append  # pyright: ignore[reportPrivateUsage]
+        wedged = browser_session_impl(
+            BrowserSessionActivityInput(
+                action="execute_js", session_id=sid, script="while(true){}", timeout_ms=500
+            )
+        )
+        assert wedged["error"] == "execute_js_timeout"
+        assert killed == [31337], "deadline expiry must kill the session's browser tree"
+
+    def test_wedge_close_reclaims_without_stalling(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _, wedged = _wedge(tmp_path, monkeypatch)
+        assert wedged["error"] == "execute_js_timeout"
+        started = time.monotonic()
+        bs._STORE.clear()  # pyright: ignore[reportPrivateUsage]
+        elapsed = time.monotonic() - started
+        assert elapsed < 10.0, f"teardown of a wedged session stalled {elapsed:.1f}s"
+        assert not bs._STORE._sessions  # pyright: ignore[reportPrivateUsage]
+
+    def test_driver_thread_is_daemon(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The session driver must be a daemon thread.
+
+        A non-daemon driver parked inside a wedged call is joined by
+        ``concurrent.futures._python_exit`` at interpreter exit and hangs the
+        worker forever (N1's shutdown-hang half).
+        """
+        opened = _open(tmp_path, monkeypatch, _FakeBrowser())
+        assert opened["status"] == "ok"
+        drivers = [t for t in threading.enumerate() if t.name.startswith("quarry-browser-session")]
+        assert drivers, "driver thread must exist while a session is open"
+        assert all(t.daemon for t in drivers), [t.name for t in drivers]
+
+
+_CHILD_WEDGE_SCRIPT = """
+import time
+
+from quarry_activities import browser_session as bs
+
+
+class _WedgingFake:
+    blocked_requests = []
+
+    def navigate(self, url):
+        self._url = url
+
+    def current_url(self):
+        return getattr(self, "_url", "")
+
+    def storage_state(self):
+        return {"cookies": [], "origins": []}
+
+    def execute_js(self, script, timeout_ms=5000):
+        time.sleep(25.0)
+        return "unreachable"
+
+
+bs._build_browser_session = lambda **_: _WedgingFake()
+opened = bs.browser_session_impl(
+    bs.BrowserSessionActivityInput(
+        action="open_url",
+        url="http://localhost/x",
+        allowed_hosts=("localhost",),
+        scan_id="child-exit",
+    )
+)
+assert opened["status"] == "ok", opened
+result = bs.browser_session_impl(
+    bs.BrowserSessionActivityInput(
+        action="execute_js",
+        session_id=opened["session_id"],
+        script="while(true){}",
+        timeout_ms=500,
+    )
+)
+assert result["error"] == "execute_js_timeout", result
+print("WEDGE-DONE", flush=True)
+# No store.clear(), no os._exit: the interpreter must be able to exit while a
+# driver thread is still parked inside the wedged call.
+"""
+
+
+class TestInterpreterExit:
+    def test_wedged_driver_cannot_hang_interpreter_exit(self) -> None:
+        """N1: interpreter exit must not join a wedged driver thread.
+
+        The child wedges its session (fake sleeping 25 s past a 500 ms bound),
+        prints WEDGE-DONE, then exits *naturally*. A non-daemon driver thread
+        parked in the wedged call blocks the child's exit for the remaining
+        sleep — the grandchild-isolated proof from close-out t_6669f88a.
+        """
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", _CHILD_WEDGE_SCRIPT],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("child interpreter hung on exit while its driver was wedged")
+        assert "WEDGE-DONE" in completed.stdout, completed.stdout + completed.stderr
+        assert completed.returncode == 0, completed.stderr
+
+
+# ---------------------------------------------------------------------------
+# N2 (close-out t_6669f88a): localStorage credential values must join the
+# scrubber denylist, and the redaction stamp must match stored reality.
+# ---------------------------------------------------------------------------
+
+_LS_TOKEN = "LS-STORED-TOKEN-77c655aaf1"
+
+
+class _LateLocalStorageBrowser(_FakeBrowser):
+    """A page that stashed a bearer token in localStorage mid-session (N2).
+
+    ``storage_state`` is empty on its first read (the open_url-time
+    registration) and exposes the token on the second (the finalize-time
+    re-read). The token reaches the HAR only as a ``?tok=`` URL parameter — a
+    shape no built-in scrub pattern matches, so only denylist registration can
+    catch it.
+    """
+
+    def __init__(self, late_value: str) -> None:
+        super().__init__()
+        self.late_value = late_value
+        self._state_reads = 0
+
+    def storage_state(self) -> dict[str, Any]:
+        self._state_reads += 1
+        if self._state_reads < 2:
+            return {"cookies": [], "origins": []}
+        return {
+            "cookies": [],
+            "origins": [
+                {
+                    "origin": "http://localhost",
+                    "localStorage": [{"name": "api_token", "value": self.late_value}],
+                }
+            ],
+        }
+
+    def stop_har(self) -> bytes:
+        har = {
+            "log": {
+                "version": "1.2",
+                "entries": [
+                    {
+                        "request": {
+                            "method": "GET",
+                            "url": f"http://localhost/dashboard?tok={self.late_value}",
+                            "headers": [{"name": "Accept", "value": "text/html"}],
+                        }
+                    }
+                ],
+            }
+        }
+        return json.dumps(har).encode("utf-8")
+
+
+class TestLocalStorageSecretRegistration:
+    def test_localstorage_token_is_redacted_from_stored_har(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        browser = _LateLocalStorageBrowser(_LS_TOKEN)
+        opened = _open(tmp_path, monkeypatch, browser, capture_har=True)
+        result = browser_session_impl(
+            BrowserSessionActivityInput(action="stop_har", session_id=opened["session_id"])
+        )
+        artifact = result["artifact"]
+        assert artifact is not None
+        assert artifact["redaction_status"] == RedactionStatus.REDACTED.value
+        stored = Path(artifact["uri"].removeprefix("file://")).read_bytes()
+        assert _LS_TOKEN.encode() not in stored
+        assert b"REDACTED" in stored
+
+    def test_register_session_secrets_covers_localstorage_values(self) -> None:
+        from quarry_models.redaction import Scrubber
+
+        scrubber = Scrubber()
+        browser = _LateLocalStorageBrowser(_LS_TOKEN)
+        browser.storage_state()  # first (empty) read, as at open_url time
+        bs._register_session_secrets(browser, scrubber)  # pyright: ignore[reportPrivateUsage]
+        scrubbed = scrubber.scrub(f"tok={_LS_TOKEN}").text
+        assert _LS_TOKEN not in scrubbed
+
+
+class TestRedactionStampIntegrity:
+    """The REDACTED stamp must never decorate an artifact that still leaks."""
+
+    def test_clean_har_is_stamped_not_required_and_unchanged(self, tmp_path: Path) -> None:
+        from quarry_activities.playwright_driver import store_har
+        from quarry_artifacts.local import LocalArtifactStore
+        from quarry_models.redaction import Scrubber
+
+        store = LocalArtifactStore(tmp_path / "artifacts")
+        clean = json.dumps(
+            {
+                "log": {
+                    "version": "1.2",
+                    "entries": [
+                        {
+                            "request": {
+                                "method": "GET",
+                                "url": "http://localhost/x",
+                                "headers": [{"name": "Accept", "value": "text/html"}],
+                            }
+                        }
+                    ],
+                }
+            }
+        ).encode("utf-8")
+        ref = store_har(store, "scan-clean/traffic.har", clean, Scrubber())
+        assert ref.redaction_status is RedactionStatus.NOT_REQUIRED
+        stored = store.get_bytes(ref)
+        assert stored == clean
+        assert b"REDACTED" not in stored

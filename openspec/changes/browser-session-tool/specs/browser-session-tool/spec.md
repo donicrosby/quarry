@@ -129,7 +129,25 @@ SHALL produce a named error, not a crash.
 
 - **WHEN** a script exceeds its timeout
 - **THEN** the response carries an error naming the timeout
-- **AND** the browser page is not torn down
+- **AND** a script that merely returns late (the page stays responsive) leaves
+  the session usable
+
+#### Scenario: execute-js-wedge-reclaims-chromium
+
+- **WHEN** a script wedges the page renderer past its hard bound (e.g.
+  `while (true) {}`, which `Page.evaluate` cannot time out natively)
+- **THEN** the caller receives the timeout error within the bound
+- **AND** the session's Chromium process tree is SIGKILLed and reaped (no
+  renderer left at high CPU)
+- **AND** the session is marked wedged
+
+#### Scenario: wedged-session-fails-fast
+
+- **WHEN** any action is dispatched to a wedged session
+- **THEN** the response carries `error: "session_wedged"` immediately, without
+  waiting out the per-action deadline
+- **AND** neither session teardown nor worker/interpreter shutdown can hang on
+  the wedged driver
 
 #### Scenario: execute-js-secrets-are-redacted
 
@@ -175,6 +193,32 @@ as an `ArtifactRef(kind=har)`. HAR capture SHALL be opt-in (default off).
 - **WHEN** `open_url` is dispatched without `capture_har` or with `capture_har:
   false`
 - **THEN** no HAR recording is performed and no HAR artifact is produced
+
+#### Scenario: har-credential-header-denylist
+
+- **WHEN** recorded traffic carries a credential in a request or response
+  header named `cookie`, `set-cookie`, `authorization`,
+  `proxy-authorization`, `x-api-key`, `api-key`, `x-auth-token`,
+  `x-session-token`, `x-access-token`, `x-csrf-token`, or `x-xsrf-token`
+  (matched case-insensitively — including opaque custom auth headers)
+- **THEN** the stored HAR carries the header *name* with a placeholder value,
+  never the credential
+
+#### Scenario: har-localstorage-credential-is-registered
+
+- **WHEN** a login flow stashes a token in `localStorage` after `open_url` and
+  that token is echoed into recorded traffic (e.g. a URL parameter)
+- **THEN** the token is registered in the scrubber at HAR finalization (every
+  cookie and `localStorage` value from `storage_state()` is registered at
+  `open_url` and again at finalization) and the stored HAR does not contain it
+
+#### Scenario: har-redaction-stamp-matches-stored-bytes
+
+- **WHEN** a stored HAR is stamped `redaction_status: REDACTED`
+- **THEN** the stored bytes actually contain redaction (registered secrets
+  absent, placeholders present)
+- **AND** a session whose traffic carries no credential headers and no
+  registered secrets stores a HAR stamped `NOT_REQUIRED` with no placeholders
 
 ### Requirement: Role gate and agent-visibility ceiling
 

@@ -51,10 +51,47 @@ other action references it.
   activities run on an unpinned thread pool, so the handle returned by `open_url`
   is driven from a different thread on each subsequent invocation; the driver
   thread keeps Playwright's sync-API thread affinity intact across invocations.
-- Captured cookie values are registered in the per-run `Scrubber`, so they are
-  redacted from every subsequent DOM/JS/HAR/screenshot output — including
-  credentials minted mid-session (a login flow's `Set-Cookie`), which are
-  re-registered when the HAR is finalized.
+- The driver thread is a daemon, and every driver call carries a deadline. When
+  a call misses its deadline — in practice a script that wedged the page
+  renderer, e.g. `while (true) {}`, which `Page.evaluate` cannot time out
+  natively — the caller thread SIGKILLs the session's Chromium process tree
+  (the only way to unwedge a stuck evaluate, reclaiming the renderer's CPU),
+  marks the session **wedged**, and every later action on that session returns
+  `{"error": "session_wedged"}` immediately instead of burning another
+  deadline. A wedged session is dead; open a new one. Neither teardown nor
+  interpreter exit can hang on it (the daemon driver is never joined).
+
+### Credential redaction coverage
+
+Three layers keep session credentials out of agent-visible output and stored
+evidence:
+
+1. **Capture boundary (unconditional):** `HarRecorder` replaces the *value* of
+   every request/response header whose (lowercased) name is in the credential
+   denylist — `cookie`, `set-cookie`, `authorization`, `proxy-authorization`,
+   `x-api-key`, `api-key`, `x-auth-token`, `x-session-token`, `x-access-token`,
+   `x-csrf-token`, `x-xsrf-token` — with `[REDACTED_CREDENTIAL]` at record
+   time. Header *names* survive (route discovery needs them); response bodies
+   are never recorded at all.
+2. **Per-run scrubber denylist:** every cookie value **and** every
+   `localStorage` value from the session's `storage_state()` is registered as
+   a secret, so it is redacted from `get_dom`/`execute_js` return values and
+   from stored HAR bytes (URL parameters echoing a token included). Values
+   minted mid-session (a login flow's `Set-Cookie`, a token stashed in
+   `localStorage` after `open_url`) are re-registered when the HAR is
+   finalized.
+3. **Stamp integrity:** an artifact's `redaction_status=REDACTED` means the
+   storage-boundary scrub pass actually removed something from the stored
+   bytes; `NOT_REQUIRED` means nothing needed removing there. Capture-boundary
+   placeholders may appear in a `NOT_REQUIRED` artifact (the denylist above is
+   unconditional and stamp-independent).
+
+**Residuals (known, documented):** a service using a *private* credential
+header name outside the denylist above is not redacted at the capture
+boundary — its only protection is the scrubber denylist and built-in secret
+patterns. `sessionStorage` values are not captured by Playwright's
+`storage_state()` and therefore cannot be registered (or leaked through this
+path).
 
 ## Outputs
 
@@ -67,10 +104,12 @@ other action references it.
 - `get_cookies` → `{cookies: [{name, domain, path, httpOnly, secure, sameSite}]}`
   — **metadata only; cookie values are never returned**.
 - `execute_js` → `{result, result_type, truncated}` — JSON-serialized, capped at
-  100 KB, scrubbed; a timeout yields `{error: "execute_js_timeout"}` and a
-  non-serializable value yields `{error: "execute_js_not_serializable"}`.
+  100 KB, scrubbed; a timeout yields `{error: "execute_js_timeout"}` (the
+  session is then wedged — see above) and a non-serializable value yields
+  `{error: "execute_js_not_serializable"}`.
 - `stop_har` → `{status, artifact}` — an `ArtifactRef(kind=har)` when HAR capture
   was enabled, else `{status: "ok", artifact: null}`.
 
 All failures are returned as named `error` payloads (the activity never raises on
-a lifecycle/containment failure), so the agent can recover.
+a lifecycle/containment failure), so the agent can recover — including
+`session_wedged` for any action dispatched to a session whose driver wedged.

@@ -102,3 +102,56 @@ the first production wiring that points `PlaywrightBrowserSession` at a hostile
 target. The infra-level companion (restricted live-egress Docker network + dynamic
 worker memory cap + hadolint DL3066) is out of this change's scope and is tracked
 as a follow-up card.
+
+## 11. Revise r3 (close-out t_6669f88a: N1 Chromium leak, N2 HAR creds leak)
+
+- [x] N1: replace the `ThreadPoolExecutor` session driver with a hand-rolled
+  daemon thread + queue (a non-daemon executor thread parked in a wedged
+  `Page.evaluate` is joined by `concurrent.futures._python_exit` and hangs
+  interpreter exit)
+- [x] N1: on a driver-deadline miss, the caller thread marks the session wedged
+  and SIGKILLs the session's Chromium process tree (pid resolved at launch from
+  the Playwright transport helper to the shallowest chromium-looking
+  descendant; pid-reuse guarded by a /proc cmdline check)
+- [x] N1: wedged-session fail-fast — every later action returns
+  `{"error": "session_wedged"}` immediately instead of burning the per-action
+  deadline; teardown kills the tree and re-runs Playwright's own stop so the
+  transport helper is reaped too
+- [x] N1 red-first: unit wedge battery (bound, fail-fast, tree-kill spy, no-stall
+  teardown, daemon-thread assert, child-process interpreter-exit proof) observed
+  red on 64cf50e, green after the fix
+- [x] N1 red-first: real-Chromium hostile-script probe
+  (`while(true){}` @ 1500 ms) observed leaking a 4-process tree on 64cf50e;
+  after the fix the deadline fires at 1.50 s, the tree is fully reaped, the
+  post-wedge action returns `session_wedged` in ~0 ms, wedged teardown is 0.12 s
+- [x] N2: extend the capture-boundary credential-header denylist with the common
+  custom auth names (x-api-key, api-key, x-auth-token, x-session-token,
+  x-access-token, x-csrf-token, x-xsrf-token)
+- [x] N2: register `storage_state()` localStorage values in the per-run
+  Scrubber (at open_url and again at HAR finalization)
+- [x] N2 red-first: 7-param custom-header capture test + late-localStorage
+  activity test observed red on 64cf50e (values verbatim, false
+  NOT_REQUIRED/REDACTED stamps), green after the fix; live leak-matrix e2e
+  (X-API-Key/X-Auth-Token/localStorage) green on real Chromium
+- [x] Stamp integrity: negative control pinned both sides (credential-free
+  traffic → NOT_REQUIRED, no placeholders; REDACTED stamp implies placeholders
+  present + raw secrets absent)
+- [x] Docs: `docs/browser-session-tool.md` states the exact post-N2 coverage
+  (denylist names, cookies, localStorage, stamp semantics) and the residuals
+  (unknown header names, sessionStorage); spec delta amended (wedge scenarios,
+  header denylist, localStorage registration, stamp-matches-bytes)
+- [x] Data hygiene: audited stored evidence for the leak pattern — all four C3
+  `traffic-capture/index.db` stores empty (0 exchanges); the only contaminated
+  blob was the close-out review's own synthetic leak-evidence HAR
+  (127.0.0.1 probe traffic; sha256 7a19b38623d2e37dc38bdcd56f1ae08f0b30751a2652d7810ff6fa66f0c5a408)
+  plus its base64 twin (1a457d0091c373c18c4e8c03576ab7d7b563ae89209ae247afa946cea8c97141);
+  synthetic-only, no real-target data, both purged
+- [x] Gates: ruff check / ruff format --check / pyright (0 errors) /
+  prompt-lint / `openspec validate browser-session-tool --strict` green
+- [x] Full battery: unit+golden 2121 passed / 2 skipped / 0 failed (xdist);
+  integration 239 passed / 13 skipped / 1 Temporal e2e flake (passes standalone
+  in 4.6 s; attributed to co-tenant Temporal-server contention — a pristine
+  64cf50e A/B run under the same contention showed the same fixture-error
+  class with zero test failures); real-Chromium browser suite 14 passed
+  (e2e file + login resolver)
+- [x] Push to origin `impl/browser-session-tool`
