@@ -15,16 +15,33 @@ unchanged for all existing callers.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # High-signal secret token shapes, plus assignment-style secrets that reuse the
 # vocabulary of the secrets scanner. Order matters only for readability; matches
 # are collected across all patterns.
+#
+# PEM private-key blocks get a dedicated linear scanner (``_sub_pem_blocks``)
+# instead of ``.*?`` under DOTALL: on a body of many ``-----BEGIN`` markers with
+# no ``-----END`` each start lazily scans to EOF and the failure is retried from
+# every later BEGIN, which is quadratic (measured 28-46 s at the 512 KB body
+# cap) and invisible to a run-length guard (that body's longest alnum run is
+# ``PRIVATE``). A bounded body would gut detection — real PEM bodies are
+# multi-KB — and a body that refuses to cross an inner BEGIN changes which span
+# is redacted (it can leave a secret body held between two BEGIN markers in the
+# clear), so the pairing semantics are reproduced exactly in one pass.
+_PEM_BEGIN = r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+_PEM_END = r"-----END [A-Z ]*PRIVATE KEY-----"
+_PEM_PATTERN = re.compile(_PEM_BEGIN + r".*?" + _PEM_END, re.DOTALL)
+_PEM_BEGIN_RE = re.compile(_PEM_BEGIN)
+_PEM_END_RE = re.compile(_PEM_END)
+
 _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
     re.compile(r"xox[abpors]-[A-Za-z0-9-]{10,}"),  # Slack tokens
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+    _PEM_PATTERN,
     re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}"),  # auth headers
     # KEY/SECRET/TOKEN/PASSWORD = "value" assignments (value is the secret).
     re.compile(
@@ -35,6 +52,33 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # The assignment pattern (last entry) redacts only the captured value group.
 _ASSIGNMENT_PATTERN = _PATTERNS[-1]
+
+
+def _sub_pem_blocks(text: str, replace: Callable[[str], str]) -> str:
+    """Redact private-key PEM blocks in *text* in one linear pass.
+
+    Equivalent to ``_PEM_PATTERN.sub(replace, text)``: each BEGIN binds to the
+    first END after it (so a block spanning an inner BEGIN is redacted whole), a
+    BEGIN with no END after it is left untouched, and once the text after a
+    BEGIN holds no END no later BEGIN can match either. Runs in O(len(text)),
+    avoiding the per-start scan-to-EOF that makes the lazy ``.*?`` regex
+    quadratic on repeated BEGIN-without-END bodies.
+    """
+    parts: list[str] = []
+    pos = 0
+    while True:
+        begin = _PEM_BEGIN_RE.search(text, pos)
+        if begin is None:
+            parts.append(text[pos:])
+            return "".join(parts)
+        end = _PEM_END_RE.search(text, begin.end())
+        if end is None:
+            # No END anywhere after this BEGIN, so no later BEGIN can match.
+            parts.append(text[pos:])
+            return "".join(parts)
+        parts.append(text[pos : begin.start()])
+        parts.append(replace(text[begin.start() : end.end()]))
+        pos = end.end()
 
 
 def _empty_placeholders() -> dict[str, str]:
@@ -94,6 +138,10 @@ class Scrubber:
         redacted = _ASSIGNMENT_PATTERN.sub(replace_value, text)
 
         for pattern in _PATTERNS[:-1]:
+            if pattern is _PEM_PATTERN:
+                # Linear single-pass equivalent of pattern.sub(replace_whole, ...).
+                redacted = _sub_pem_blocks(redacted, placeholder_for)
+                continue
 
             def replace_whole(match: re.Match[str]) -> str:
                 return placeholder_for(match.group(0))
