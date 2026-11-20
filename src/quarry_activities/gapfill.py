@@ -34,12 +34,15 @@ from quarry.schemas import (
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.binary_analysis_context import merge_binary_analysis_context
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -287,6 +290,7 @@ def gapfill_impl(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[AgentTask]:
     """Core gapfill implementation — callable from the activity and from tests.
 
@@ -396,6 +400,9 @@ def gapfill_impl(
         scan_id=scan_id,
         turn_timeout_seconds=turn_timeout_seconds,
         limiter=limiter,
+        agent_instance_id=compute_agent_instance_id("gapfill", scan_id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -439,6 +446,27 @@ def gapfill_impl(
             now=datetime.now(UTC),
         )
 
+    # Terminal cells (credibility-economics): a cell whose only occupants are all
+    # discounted and that was already gapfill-hunted gets no further re-hunt —
+    # it is permanently excluded so the loop cannot spin on cells no
+    # tool-grounded evidence exists for.
+    terminal_cells = {
+        (cell.scope, cell.vuln_class) for cell in ledger.cells if cell.terminal_uncovered
+    }
+    if terminal_cells:
+        extra_tasks = [
+            task
+            for task in extra_tasks
+            if ((task.scope or "").replace("\\", "/").strip().strip("/"), task.vuln_class)
+            not in terminal_cells
+        ]
+
+    # Binary analysis report consumption (slice-3 C6): enrich
+    # security_misconfiguration re-hunt tasks with the persisted hardening report,
+    # on the same consumption path as hunt tasks. Idempotent — a task already
+    # carrying the report is left unchanged.
+    extra_tasks = [merge_binary_analysis_context(task, artifact_root) for task in extra_tasks]
+
     return extra_tasks
 
 
@@ -459,6 +487,7 @@ def gapfill_activity(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """Temporal activity: enforce coverage floor and detect agentic gaps.
 
@@ -503,6 +532,7 @@ def gapfill_activity(
             kb_root_index_key,
             exploratory_injection_fraction,
             exploratory_gap_paths,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -526,6 +556,7 @@ def _gapfill_activity_impl(
     kb_root_index_key: str | None = None,
     exploratory_injection_fraction: float = 0.0,
     exploratory_gap_paths: list[str] | None = None,
+    replay_mode: bool = False,
 ) -> list[dict[str, Any]]:
     if isinstance(ledger, dict):
         ledger = CoverageLedger.model_validate(ledger)
@@ -583,6 +614,7 @@ def _gapfill_activity_impl(
         kb_root_index_key=kb_root_index_key,
         exploratory_injection_fraction=exploratory_injection_fraction,
         exploratory_gap_paths=exploratory_gap_paths,
+        replay_mode=replay_mode,
     )
 
     persist_model_invocations(db_path, ledger.scan_id, client)

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+import warnings
 from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatch
-from typing import Any, Literal
+from typing import Any, Literal, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -110,6 +112,14 @@ class VulnerabilityClass(StrEnum):
     SECURITY_MISCONFIGURATION = "security_misconfiguration"
     INSECURE_DESIGN = "insecure_design"
     WEAK_CRYPTO = "weak_crypto"
+    # Supply-chain risk detected statically from dependency manifests by the
+    # deterministic dependency-risk scanner.
+    SUPPLY_CHAIN = "supply_chain"
+    # CLI-side classes (tempfile-race-terminal-escape change): unsafe temporary
+    # file creation in shared directories, and attacker-controlled input echoed
+    # to a terminal without ANSI/escape-sequence sanitization.
+    TEMPFILE_RACE = "tempfile_race"
+    TERMINAL_ESCAPE = "terminal_escape"
 
 
 class TriageLabel(StrEnum):
@@ -205,6 +215,12 @@ class ArtifactKind(StrEnum):
     KNOWLEDGE_BASE = "knowledge_base"
     # ADR-020: scrubbed ActionReasoning artifact for provenance audit trail.
     REASONING = "reasoning"
+    # versioned-handoff-artifacts: handoff artifacts addressable through the same
+    # reference system as COVERAGE_LEDGER (ADR-026 rule 6 — handoff over compaction).
+    ARCHITECTURE_DOC = "architecture_doc"
+    HUNT_HANDOFF = "hunt_handoff"
+    # per-agent-durable-logs: append-only per-agent execution log (JSONL).
+    AGENT_LOG = "agent_log"
     # Multi-persona authorization matrix: endpoint × persona status/hash grid.
     AUTHZ_MATRIX = "authz_matrix"
 
@@ -232,7 +248,15 @@ def _empty_artifact_refs() -> list[ArtifactRef]:
     return []
 
 
+def _empty_candidate_findings() -> list[CandidateFinding]:
+    return []
+
+
 def _empty_strings() -> list[str]:
+    return []
+
+
+def _empty_canary_callbacks() -> list[CanaryCallback]:
     return []
 
 
@@ -425,6 +449,65 @@ class ArtifactRef(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class QuarantineEventType(StrEnum):
+    """Outcome of one proof-artifact quarantine policy decision."""
+
+    ARTIFACT_QUARANTINED = "artifact.quarantined"
+    ARTIFACT_REJECTED_OVERSIZE = "artifact.rejected_oversize"
+    ARTIFACT_REMOTE_WRITE_REFUSED = "artifact.remote_write_refused"
+    ARTIFACT_SCANNER_SKIPPED = "artifact.scanner_skipped"
+    ARTIFACT_SCANNER_DETECTED = "artifact.scanner_detected"
+
+
+class QuarantineEvent(BaseModel):
+    """A recorded proof-artifact quarantine decision.
+
+    Every policy decision in the quarantine pipeline (acceptance, over-size
+    rejection, refused remote write, scanner skipped, scanner detection) is
+    recorded as one of these: logged by the pipeline, embedded in the stored
+    ``ArtifactRef.metadata`` for accepted artifacts, and carried on the refusal
+    exception for rejected ones.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    event_type: QuarantineEventType
+    artifact_kind: ArtifactKind | None = None
+    scan_id: str = ""
+    artifact_key: str = ""
+    byte_count: int | None = None
+    limit_bytes: int | None = None
+    detail: str = ""
+    created_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        event_type: QuarantineEventType,
+        *,
+        artifact_kind: ArtifactKind | None = None,
+        scan_id: str = "",
+        artifact_key: str = "",
+        byte_count: int | None = None,
+        limit_bytes: int | None = None,
+        detail: str = "",
+        now: datetime | None = None,
+    ) -> QuarantineEvent:
+        """Build a quarantine event with a fresh id and timestamp."""
+        return cls(
+            id=str(uuid4()),
+            event_type=event_type,
+            artifact_kind=artifact_kind,
+            scan_id=scan_id,
+            artifact_key=artifact_key,
+            byte_count=byte_count,
+            limit_bytes=limit_bytes,
+            detail=detail,
+            created_at=now if now is not None else utc_now(),
+        )
+
+
 class FileManifestEntry(BaseModel):
     path: str
     size_bytes: int
@@ -604,6 +687,25 @@ class ModelPanelEntry(BaseModel):
     # module, so the reverse would be circular). Reconstructed into ModelTier by
     # panel_json_for_role when building the per-role RoleConfig for the worker.
     tiers: list[dict[str, Any]] = Field(default_factory=_empty_tier_dicts)
+    # Per-role context-window enforcement (hunter-context-reset), frozen with the
+    # rest of the panel so the worker's loop sees the scan's configured limit.
+    # None = no limit (unbounded conversation history).
+    context_window_tokens: int | None = None
+    context_window_threshold: float = 0.8
+
+
+VALID_SCOPE_EXCLUSION_KINDS: frozenset[str] = frozenset(
+    {
+        "route",
+        "path_glob",
+        "functional_area",
+        "vuln_class",
+        "command",
+        "binary",
+        "filesystem_path",
+        "note",
+    }
+)
 
 
 class ScopeExclusion(BaseModel):
@@ -611,10 +713,20 @@ class ScopeExclusion(BaseModel):
 
     model_config = {"frozen": True}
 
-    kind: str  # e.g. "route", "vuln_class", "note"
+    kind: str  # one of VALID_SCOPE_EXCLUSION_KINDS
     value: str
     reason: str
     block_dynamic: bool = False
+
+    @field_validator("kind")
+    @classmethod
+    def _validate_kind(cls, value: str) -> str:
+        """Reject unknown exclusion kinds at construction (fail-closed)."""
+        if value not in VALID_SCOPE_EXCLUSION_KINDS:
+            valid = ", ".join(sorted(VALID_SCOPE_EXCLUSION_KINDS))
+            msg = f"Unknown scope exclusion kind '{value}'. Valid kinds: {valid}"
+            raise ValueError(msg)
+        return value
 
 
 def _empty_scope_exclusions() -> list[ScopeExclusion]:
@@ -716,6 +828,11 @@ class EnsembleJudgement(BaseModel):
     verdict: JudgementVerdict | str
     refuted: bool | None = None  # set only for debater judgements
     model_invocation_id: str | None = None
+    # The candidate's tier-discounted credibility prior at the time the
+    # judgement was recorded (credibility-economics). Provenance only: the
+    # ordinal ``compute_credibility`` posterior is computed from stances, never
+    # from this number.
+    credibility_prior: float = 1.0
 
     @field_validator("verdict", mode="before")
     @classmethod
@@ -738,6 +855,77 @@ def _empty_ensemble_judgements() -> list[EnsembleJudgement]:
     return []
 
 
+def _empty_ints() -> list[int]:
+    return []
+
+
+LEGACY_SEVERITY_RATIONALE_TEXT = "No structured severity rationale from pre-contract scan."
+
+MODEL_OMITTED_SEVERITY_RATIONALE_TEXT = "Model did not provide structured severity rationale"
+
+
+class SeverityRationale(BaseModel):
+    """Structured severity justification carried by every finding (finding-contract).
+
+    Decomposes a severity label into **impact** (what the attacker gains),
+    **exploitability** (how hard the bug is to trigger) and **reachability**
+    (whether an attacker can reach the vulnerable code), so a CRITICAL from one
+    hunter means the same thing as a CRITICAL from another (ADR-026 rule 4 —
+    findings are data, not prose).
+
+    ``evidence_refs`` are indices into the finding's ``evidence_path`` (or, when
+    there is no ordered path, ``source_refs``) — the same shape as the existing
+    evidence pointers, never free text.
+
+    Two fallback markers keep the report honest instead of fabricating prose:
+    ``legacy`` marks a finding persisted before the contract existed, and
+    ``model_omitted`` marks slots the model did not supply (or emitters that
+    have no model-supplied rationale at all).
+    """
+
+    impact: str
+    exploitability: str
+    reachability: str
+    evidence_refs: list[int] = Field(default_factory=_empty_ints)
+    legacy: bool = False
+    model_omitted: bool = False
+
+    @field_validator("impact", "exploitability", "reachability")
+    @classmethod
+    def _require_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("severity rationale slots must be non-empty")
+        return value
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def _require_valid_indices(cls, value: list[int]) -> list[int]:
+        for index in value:
+            if index < 0:
+                raise ValueError("evidence_refs entries must be non-negative indices")
+        return value
+
+
+def legacy_severity_rationale() -> SeverityRationale:
+    """Backfill rationale for findings persisted before the contract existed."""
+    return SeverityRationale(
+        impact=LEGACY_SEVERITY_RATIONALE_TEXT,
+        exploitability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        reachability=LEGACY_SEVERITY_RATIONALE_TEXT,
+        legacy=True,
+    )
+
+
+def model_omitted_severity_rationale() -> SeverityRationale:
+    """Fallback rationale when no model-supplied slots exist for a finding."""
+    return SeverityRationale(
+        impact=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        exploitability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        reachability=MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
+        model_omitted=True,
+    )
+
+
 class CandidateFinding(BaseModel):
     id: str
     scan_id: str
@@ -756,6 +944,14 @@ class CandidateFinding(BaseModel):
     confidence: Confidence = Confidence.LOW
     severity: Severity = Severity.MEDIUM
     severity_adjusted: Severity | None = None
+    # Structured severity justification (finding-contract). Required — an
+    # explicit ``severity_rationale=None`` is rejected; a payload persisted
+    # before the contract existed backfills to a ``legacy`` rationale.
+    # ``default_factory`` carries the same legacy backfill for statically typed
+    # call sites (pyright strict treats a defaultless pydantic field as a
+    # required constructor argument); the before-validator below is the
+    # normative backfill for raw payloads.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     # Calibration fields (candidate-precision-and-calibration). ``raw_severity``
     # is the hunter's severity and is never overwritten by calibration;
     # ``calibrated_severity``/``calibrated_priority`` are None until the
@@ -767,6 +963,32 @@ class CandidateFinding(BaseModel):
     status: FindingStatus = FindingStatus.CANDIDATE
     root_cause_key: str | None = None
     cross_vendor_disagreement: bool = False
+    # Write-time credibility economics (credibility-economics). ``grounded`` is
+    # provenance, not a score: True when the finding's claim came from a
+    # deterministic tool observation (a parsed HTTP status, a regex/grep match, a
+    # port scan, a proven exploit chain), False when a model produced it from
+    # reasoning. It is set explicitly at every construction site and never
+    # recomputed. Distinct from citation-grounding
+    # (``validate._refute_must_be_grounded``) and knowledge-base grounding
+    # (``kb_recon.py`` grounded entities).
+    grounded: bool = True
+    # The model that produced the finding when it was a model judgment; None for
+    # deterministic tool output. Resolves the reliability tier used to discount
+    # a judgment.
+    originating_model_id: str | None = None
+    # Tier-discounted credibility prior (``base * (1.0 if grounded else
+    # tier_factor)``), derived in ``_derive_credibility_prior`` below. A
+    # cascade/coverage-ledger input only — it never modulates the ordinal
+    # ``compute_credibility`` posterior.
+    credibility_prior: float = 1.0
+    # The tier factor actually applied when the finding was discounted (None when
+    # the finding is tool-grounded). Recorded so the discount is auditable.
+    credibility_discount: float | None = None
+    # Set by the corroboration cascade when the finding was corroborated
+    # (tool-grounded evidence or independent signals); promotes its coverage cell.
+    corroborated: bool = False
+    # The cascade step that resolved the finding, for report provenance.
+    cascade_step: str | None = None
     # Ensemble credibility posterior (MDASH, design D3). ``None`` when the finding
     # was not reviewed by a debater/counterpoint ensemble. ``ensemble`` retains
     # each contributing judgement (provenance-linked) so the report is auditable.
@@ -783,12 +1005,53 @@ class CandidateFinding(BaseModel):
     created_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        # Pre-contract findings were persisted without the key entirely. An
+        # explicit ``severity_rationale=None`` is NOT backfilled — the field is
+        # non-optional and must fail validation at the schema boundary.
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
+
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> CandidateFinding:
         # Pre-calibration findings only set ``severity``; mirror it into
         # ``raw_severity`` so the raw value is always exposed.
         if self.raw_severity is None:
             self.raw_severity = self.severity
+        return self
+
+    @model_validator(mode="after")
+    def _derive_credibility_prior(self) -> CandidateFinding:
+        """Derive the tier-discounted credibility prior from the write-time tag.
+
+        ``prior = base * (1.0 if grounded else tier_factor)``; the applied tier
+        factor (when any) is recorded as ``credibility_discount``. Deriving it
+        here makes the invariant hold at every construction site — including the
+        sites that build findings in workflow code — instead of relying on each
+        caller to recompute it. Findings written before this field existed
+        deserialise with ``grounded=True`` (no discount), so their prior is 1.0.
+        """
+        # Local import: ``quarry_models.credibility`` imports ``quarry.schemas``
+        # (and ``quarry.panel_config``, which does too), so a module-level import
+        # here would be circular.
+        from quarry_models.credibility import credibility_prior_for
+
+        prior, discount = credibility_prior_for(
+            grounded=self.grounded,
+            originating_model_id=self.originating_model_id,
+        )
+        self.credibility_prior = prior
+        self.credibility_discount = discount
         return self
 
 
@@ -800,6 +1063,9 @@ class FinalFinding(BaseModel):
     vuln_class: VulnerabilityClass
     severity: Severity
     severity_adjusted: Severity | None = None
+    # Structured severity justification copied verbatim from the candidate
+    # (finding-contract). Required; pre-contract payloads backfill to legacy.
+    severity_rationale: SeverityRationale = Field(default_factory=legacy_severity_rationale)
     raw_severity: Severity | None = None
     calibrated_severity: Severity | None = None
     calibrated_priority: int | None = None
@@ -816,6 +1082,20 @@ class FinalFinding(BaseModel):
     triage_label: TriageLabel | None = None
     remediation: str | None = None
     created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_severity_rationale(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        payload = cast("dict[str, Any]", data)
+        if "severity_rationale" in payload:
+            return payload
+        merged: dict[str, Any] = {
+            **payload,
+            "severity_rationale": legacy_severity_rationale(),
+        }
+        return merged
 
     @model_validator(mode="after")
     def _backfill_raw_severity(self) -> FinalFinding:
@@ -854,6 +1134,10 @@ class WorkflowEvent(BaseModel):
       ``agent.reasoning_rejected`` — emitted when a retry is consumed or the loop halts
         with ``reasoning_rejected``. Payload: ``agent_kind``, ``iteration``, ``tool_name``,
         ``failed_checks``, ``retries_remaining``.
+      ``agent.context_reset`` — emitted when the loop compresses history after crossing
+        the role's context-window threshold (hunter-context-reset). Payload: ``agent_kind``,
+        ``iteration``, ``tokens_before``, ``tokens_after``, ``turns_compressed``,
+        ``strategy``.
 
     All ``agent.*`` payloads are scrubbed before emission. Raw ``args`` and full reasoning
     text are never included in the payload; only the scrubbed ``reasoning_summary`` (hypothesis
@@ -928,6 +1212,11 @@ class ValidationResult(BaseModel):
     # The recorded negative-constraint checklist (cpc slice 5). Populated when the
     # debater runs the checklist refute regime; empty for the legacy binary refuter.
     checklist: list[ChecklistItem] = Field(default_factory=_empty_checklist)
+    # Corroboration cascade outcome (credibility-economics): the step that
+    # resolved the finding and whether it was corroborated. Both stay at their
+    # defaults when the scan has no ``[credibility]`` config (legacy path).
+    corroborated: bool = False
+    cascade_step: str | None = None
     safe_payload: str | None = None  # benign exploit payload used to prove the finding
     created_at: datetime
 
@@ -942,6 +1231,11 @@ class ProofArtifact(BaseModel):
     evidence_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
     safe_payload: str | None = None
     redaction_status: RedactionStatus
+    # Proof-artifact quarantine (D6 / proof-artifact-quarantine): proof output is
+    # attacker-controlled content and enters the store quarantined — fail-closed
+    # default True. Only an explicit operator release clears it; there is no
+    # automatic release path.
+    quarantine: bool = True
     created_at: datetime
 
 
@@ -994,6 +1288,39 @@ class HunterGap(BaseModel):
     vuln_class: VulnerabilityClass | None = None
 
 
+class CoverageCell(BaseModel):
+    """Tier-aware occupancy state of one ``(scope, vuln_class)`` coverage cell.
+
+    A cell is *covered* only when at least one of its occupants is
+    tool-grounded (``grounded=True``), was corroborated by the cascade
+    (``corroborated=True``), or carries a tier-discounted credibility prior at
+    or above the STRONG factor (0.9). A cell whose sole occupants are all
+    discounted stays uncovered and is therefore eligible for one gapfill
+    re-hunt; once that re-hunt produces no new corroborated finding the cell is
+    recorded ``terminal_uncovered`` and permanently excluded from gapfill.
+    """
+
+    vuln_class: VulnerabilityClass
+    scope: str
+    covered: bool
+    terminal_uncovered: bool = False
+    # Occupancy counts, for audit: how many findings landed in the cell, and how
+    # many of them counted toward coverage.
+    occupant_count: int = 0
+    covered_occupants: int = 0
+    # True when coverage came from a cascade corroboration rather than from the
+    # finding's own grounded/tier status.
+    corroboration_promotion: bool = False
+    # The reliability tier of the occupant that decided coverage (audit trail for
+    # the frontier/strong-tier judgment case). None when coverage came from a
+    # tool-grounded or corroborated occupant.
+    tier: str | None = None
+
+
+def _empty_coverage_cells() -> list[CoverageCell]:
+    return []
+
+
 class CoverageLedger(BaseModel):
     id: str
     scan_id: str
@@ -1003,6 +1330,13 @@ class CoverageLedger(BaseModel):
     vuln_classes_requested: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     vuln_classes_completed: list[VulnerabilityClass] = Field(default_factory=_empty_vuln_classes)
     skipped_items: list[CoverageGap] = Field(default_factory=_empty_coverage_gaps)
+    # Tier-aware ``(scope, vuln_class)`` cell occupancy (credibility-economics).
+    # A cell counts as covered only when it has an occupant that is
+    # tool-grounded, corroborated, or carries a prior at/above ``TIER_THRESHOLD``;
+    # cells left uncovered after a gapfill attempt are recorded
+    # ``terminal_uncovered`` and excluded from further gapfill. Empty for ledgers
+    # built without findings (pre-guarantee behaviour).
+    cells: list[CoverageCell] = Field(default_factory=_empty_coverage_cells)
     # Proactive production-file accounting (candidate-precision-and-calibration).
     # Every first-party file in the snapshot manifest is accounted for exactly
     # once: covered by an investigation, intentionally excluded (with reason),
@@ -1011,6 +1345,11 @@ class CoverageLedger(BaseModel):
     file_coverage: list[ProductionFileAccounting] = Field(
         default_factory=_empty_production_file_accounting
     )
+    # versioned-handoff-artifacts: version stamps make every ledger uniquely
+    # identifiable and diffable across scans (ADR-026 rule 6). Both default to 1
+    # so ledgers serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
     created_at: datetime
 
     def file_gap_paths(self) -> list[str]:
@@ -1025,6 +1364,12 @@ class GroundTruthFinding(BaseModel):
     route: str | None = None
     severity: Severity
     expected_fingerprint_hint: str | None = None
+    # Planted-regression manifests flag the vulns they seed so the benchmark can
+    # report recall drops on exactly those, and record the proof the harness is
+    # expected to produce (e.g. "command_output", "file_read"). Both default off
+    # so pre-existing fixtures stay valid.
+    planted: bool = False
+    expected_proof_type: str | None = None
 
 
 class ModelInvocation(BaseModel):
@@ -1327,6 +1672,52 @@ class ArchitectureDoc(BaseModel):
     build_commands: list[BuildCommand] = Field(default_factory=_empty_build_commands)
     attack_surface_summary: str = ""
     transcript_refs: list[str] = Field(default_factory=_empty_strings)
+    # versioned-handoff-artifacts: version stamps (see CoverageLedger). Default to
+    # 1 so docs serialised before the stamps existed deserialise unchanged.
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+
+
+class HuntHandoff(BaseModel):
+    """Structured per-round hunt handoff (ADR-026 rule 6 — handoff over compaction).
+
+    Records what a hunt round covered, what it found, what tasks remain for the
+    next round, and any unproven hypotheses. Together with the ArchitectureDoc
+    and CoverageLedger it forms the cold-start contract: a fresh agent process
+    given only these artifacts (plus the scan id) can resume a hunt without
+    access to Temporal workflow state, in-memory data, or conversation history.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    scan_id: str
+    workspace_id: str
+    round_number: int
+    stage: Literal["HUNT"] = "HUNT"
+    covered_scope_units: list[str] = Field(default_factory=_empty_strings)
+    candidate_finding_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_ids: list[str] = Field(default_factory=_empty_strings)
+    pending_task_count: int = 0
+    open_hypotheses: list[str] = Field(default_factory=_empty_strings)
+    scan_ordinal: int = 1
+    artifact_version: int = 1
+    created_at: datetime
+
+
+class ContextResetEvent(BaseModel):
+    """Audit record of one agent-loop history reset (hunter-context-reset).
+
+    Recorded on the iteration's ``AgentStep.context_reset`` and emitted as an
+    ``agent.context_reset`` workflow event, so the reset survives the loop without
+    the conversation history it replaced.
+    """
+
+    iteration: int
+    tokens_before: int
+    tokens_after: int
+    turns_compressed: int
+    strategy: str
 
 
 class AgentStep(BaseModel):
@@ -1357,6 +1748,9 @@ class AgentStep(BaseModel):
     # None when the iteration had no proposed_actions (e.g. a pure tool-execution turn or
     # when the iteration ended in reasoning_rejected before any action was accepted).
     reasoning_summary: str | None = None
+    # hunter-context-reset: set on the iteration whose completion crossed the role's
+    # context-window threshold and folded the older turns into a summary message.
+    context_reset: ContextResetEvent | None = None
 
 
 def _empty_agent_steps() -> list[AgentStep]:
@@ -1500,6 +1894,125 @@ class TargetEndpoint(BaseModel):
     base_path: str = "/"
 
 
+# ---------------------------------------------------------------------------
+# Per-destination-set egress policy (ADR-024 §A — sandbox network containment)
+# ---------------------------------------------------------------------------
+
+
+class DestinationSet(BaseModel):
+    """One named category of outbound destinations for a sandbox egress policy.
+
+    A destination set groups the domains and IPs that belong to a single
+    capability (``target-host``, ``canary-listener``, …).  Every destination the
+    sandbox may reach must appear in some set; the policy denies all else.  The
+    model is pure data — resolution to IPs happens in ``quarry.egress``.
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_domains: list[str] = Field(default_factory=_empty_strings)
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_destination_sets() -> list[DestinationSet]:
+    return []
+
+
+class EgressPolicy(BaseModel):
+    """An unresolved destination-set policy for sandbox egress.
+
+    Carries named :class:`DestinationSet` entries; domains are resolved to IPs
+    once at policy construction (see ``quarry.egress.resolve_egress_policy``).
+    ``deny_all_else`` defaults to True — anything not in a declared set is
+    refused at the sandbox tier.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[DestinationSet] = Field(default_factory=_empty_destination_sets)
+    deny_all_else: bool = True
+
+    def is_empty(self) -> bool:
+        """True when the policy declares no reachable destination."""
+        return not any(ds.allowed_domains or ds.allowed_ips for ds in self.destination_sets)
+
+
+class ResolvedDestinationSet(BaseModel):
+    """A :class:`DestinationSet` with every domain resolved to pinned IPs.
+
+    ``allowed_ips`` is the union of the set's declared IPs and the IPs each
+    domain resolved to at construction time.  The IPs are frozen for the policy
+    lifetime — re-resolution is rejected (DNS-rebinding guard).
+    """
+
+    model_config = {"frozen": True}
+
+    name: str
+    allowed_ips: list[str] = Field(default_factory=_empty_strings)
+
+
+def _empty_resolved_destination_sets() -> list[ResolvedDestinationSet]:
+    return []
+
+
+class ResolvedEgressPolicy(BaseModel):
+    """An :class:`EgressPolicy` with all domains resolved to pinned IPs.
+
+    This is what every sandbox tier enforces: Tier 2 attaches the container to
+    a restricted network carrying only these destinations; Tier 3 renders the
+    IPs as NetworkPolicy egress rules.  ``resolution_frozen`` records that the
+    IP set is final — no destination is re-resolved during execution.
+    """
+
+    model_config = {"frozen": True}
+
+    destination_sets: list[ResolvedDestinationSet] = Field(
+        default_factory=_empty_resolved_destination_sets
+    )
+    deny_all_else: bool = True
+    resolution_frozen: bool = True
+
+    @model_validator(mode="after")
+    def _require_frozen(self) -> ResolvedEgressPolicy:
+        """A resolved policy is frozen by definition — refuse an unfrozen one.
+
+        Enforcement tiers trust the pinned IPs; a policy that was never frozen
+        could still be re-resolved, defeating the DNS-rebinding guard.
+        """
+        if not self.resolution_frozen:
+            msg = "ResolvedEgressPolicy must carry resolution_frozen=True"
+            raise ValueError(msg)
+        return self
+
+    def all_allowed_ips(self) -> list[str]:
+        """Union of every set's pinned IPs, de-duplicated and sorted."""
+        ips: list[str] = []
+        for ds in self.destination_sets:
+            for ip in ds.allowed_ips:
+                if ip not in ips:
+                    ips.append(ip)
+        return sorted(ips)
+
+    def is_empty(self) -> bool:
+        """True when no destination is reachable (empty policy ⇒ no egress)."""
+        return not self.all_allowed_ips()
+
+
+class MultipartFieldSpec(BaseModel):
+    """One part of a multipart/form-data request body.
+
+    ``filename`` and ``content_type`` are optional: a part that carries neither
+    is a plain form field, one that carries either is sent as a file part (the
+    file-upload vulnerability class needs the latter).
+    """
+
+    name: str
+    value: str
+    filename: str | None = None
+    content_type: str | None = None
+
+
 class HttpRequestSpec(BaseModel):
     """The HTTP request a dynamic_validate or prove agent proposes.
 
@@ -1512,6 +2025,44 @@ class HttpRequestSpec(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     body: str | None = None
     auth_profile: str | None = None  # named cred only; never an inline token
+    # multipart/form-data parts. When non-empty the activity sends these and
+    # ignores ``body`` (file-upload probes).
+    multipart_fields: list[MultipartFieldSpec] | None = None
+    # Redirect-following is off by default; when on the activity follows up to
+    # ten hops, re-validating every hop's host against allowed_hosts.
+    follow_redirects: bool = False
+    # Per-request cookie injection; values are registered with the run scrubber
+    # and redacted from stored request artifacts.
+    cookies: dict[str, str] = Field(default_factory=dict)
+    # Timing-oracle annotations (verify-oracle-upgrade), declared by the
+    # proposing agent alongside the delay payload. injected_delay_ms opts the
+    # probe into the statistical timing path; absent leaves the hardened
+    # differential path (the timing path never guesses a delay).
+    injected_delay_ms: int | None = None
+    # The exact payload substrings this probe injects, declared by the agent
+    # alongside the payload. Differential evaluators normalize these out of the
+    # response bodies (a reflected payload must not read as a difference).
+    injected_values: tuple[str, ...] | None = None
+    # Optional hunter-supplied success marker. When present, the differential
+    # evaluator tests for it in the raw response bodies before generic
+    # heuristics; present-in-attack-only decides the finding on its own.
+    indicator: str | None = None
+
+    @model_validator(mode="after")
+    def _warn_multipart_and_body(self) -> HttpRequestSpec:
+        """Warn (never fail) when both multipart parts and a raw body are set.
+
+        The activity sends the multipart payload and ignores ``body`` — the
+        warning makes that silent drop visible to the proposing agent.
+        """
+        if self.multipart_fields and self.body is not None:
+            warnings.warn(
+                "HttpRequestSpec carries both multipart_fields and body; "
+                "the multipart payload is sent and body is ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return self
 
     @field_validator("auth_profile")
     @classmethod
@@ -1543,6 +2094,29 @@ class HttpResponseCapture(BaseModel):
     # captures construct without it and evaluators treat a missing body as
     # non-corroboration, never an error.
     body_artifact_key: str | None = None
+    # Deterministic session-token/JWT/cookie analysis, attached in-activity by
+    # ``http_request_activity`` ONLY when the request carried an ``auth_profile``
+    # (session-jwt-cookie-analysis). None for unauthenticated captures and for
+    # legacy captures; the workflow persists ``findings`` through the existing
+    # ``persist-scan-state`` path.
+    session_token_analysis: SessionTokenAnalysisResult | None = None
+    # The stored ArtifactRefs (request, response body) as the quarantine pipeline
+    # returned them, so the pure workflow can attach the recorded sha256/size to
+    # the proof artifact's evidence refs. Empty for legacy captures.
+    artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
+
+
+class SessionTokenAnalysisResult(BaseModel):
+    """Emitted session-token analysis attached to an auth-related capture.
+
+    Carries the candidate findings produced by
+    ``quarry_activities.session_analysis.analyze_session_tokens`` for one captured
+    response. Findings are placeholder-redacted (never the raw token/cookie value)
+    and fingerprinted deterministically on (artifact ref, check name, token index),
+    so replaying the same capture yields the same finding ids.
+    """
+
+    findings: list[CandidateFinding] = Field(default_factory=_empty_candidate_findings)
 
 
 # ---------------------------------------------------------------------------
@@ -1677,16 +2251,30 @@ class ExploitChain(BaseModel):
 # Sandbox execution schemas (ADR-017 §5 — transport-agnostic prove subsystem)
 # ---------------------------------------------------------------------------
 
+# Allowlisted environment-variable names and their permitted values for target
+# subprocess execution.  Both the names and the values are fixed and
+# infrastructure-provided: the prove agent selects from this map and never
+# supplies a free-form value.  LD_PRELOAD / LD_LIBRARY_PATH are deliberately
+# absent (no dynamic-loader injection surface) and PATH values are restricted to
+# standard system directories.
+ENV_VAR_ALLOWLIST: dict[str, frozenset[str]] = {
+    "EDITOR": frozenset({"/bin/sh"}),
+    "PATH": frozenset({"/usr/local/bin:/usr/bin:/bin"}),
+}
+
 
 class EnvProfile(StrEnum):
     """Named, vetted environment profiles for sandbox execution.
 
     The prove agent picks a NAME, never raw env-var values.  Credential injection
     (QUARRY_INJECTED_CRED_*) is the sole exception and is resolved worker-side (ADR-018).
+
+    REPO_READONLY is deferred: until a fixed, enumerated resolution map ships, any
+    env_profile other than NONE is refused at the tool-call boundary (fail-safe).
     """
 
     NONE = "none"  # empty env — default; tightest containment
-    REPO_READONLY = "repo_readonly"  # minimal PATH + repo root only, no credentials
+    REPO_READONLY = "repo_readonly"  # deferred: no resolution implementation yet
 
 
 class SandboxExecSpec(BaseModel):
@@ -1695,16 +2283,39 @@ class SandboxExecSpec(BaseModel):
     Parallels HttpRequestSpec: carries no inline secrets; auth_profile and env_profile
     are NAMES resolved worker-side at dispatch (ADR-018).  input_files are crafted
     attacker-controlled files staged into the sandbox working dir before execution.
+    env carries allowlisted variables (fixed, infrastructure-provided values) and is
+    applied to the target subprocess only — the sandbox runtime never inherits it.
     """
 
     command: str
     args: list[str] = Field(default_factory=list)
     stdin: str | None = None
     env_profile: EnvProfile = EnvProfile.NONE
+    env: dict[str, str] = Field(default_factory=dict)  # allowlisted names + values only
     cwd: str = "."  # relative to sandbox working dir; restricted worker-side
     input_files: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = 30  # hard-capped worker-side (max 60 s)
     auth_profile: str | None = None  # named cred only; never an inline token
+
+    @field_validator("env")
+    @classmethod
+    def _reject_non_allowlisted_env(cls, v: dict[str, str]) -> dict[str, str]:
+        """Reject env names/values outside the fixed ENV_VAR_ALLOWLIST."""
+        for name, value in v.items():
+            allowed_values = ENV_VAR_ALLOWLIST.get(name)
+            if allowed_values is None:
+                msg = (
+                    f"env var name '{name}' is not on the sandbox allowlist. "
+                    f"Permitted names: {sorted(ENV_VAR_ALLOWLIST)}"
+                )
+                raise ValueError(msg)
+            if value not in allowed_values:
+                msg = (
+                    f"env var value for '{name}' is not allowed. "
+                    f"Permitted values: {sorted(allowed_values)}"
+                )
+                raise ValueError(msg)
+        return v
 
     @field_validator("auth_profile")
     @classmethod
@@ -1718,12 +2329,43 @@ class SandboxExecSpec(BaseModel):
         return v
 
 
+#: Maximum characters retained from a request-controlled canary path.
+CANARY_PATH_MAX_CHARS: int = 2048
+
+
+class CanaryCallback(BaseModel):
+    """One HTTP request observed by the canary listener during a sandbox run.
+
+    Only safe fields are captured: ``method``, ``path``, ``source_ip`` and
+    ``timestamp``.  Request headers and bodies are never stored — the listener
+    must not retain attacker-controlled content beyond the length-capped path.
+    """
+
+    timestamp: str
+    method: str
+    path: str
+    source_ip: str
+
+    @field_validator("path")
+    @classmethod
+    def _cap_path(cls, value: str) -> str:
+        """Clamp the request-controlled path to a fixed maximum length."""
+        return value[:CANARY_PATH_MAX_CHARS]
+
+
 class SandboxExecCapture(BaseModel):
     """Captured result of a sandbox execution.  Parallels HttpResponseCapture.
 
     stdout/stderr stored as artifacts (TOOL_STDOUT/TOOL_STDERR), never inline.
     Both streams pass through Scrubber.scrub() + <target_content> wrap before
     any prompt re-entry (same policy as HTTP response bodies).
+
+    ``canary_callbacks`` carries the requests the canary listener observed while
+    the command ran (empty when no canary token was set).  ``resolved_target_ips``
+    carries the pinned ``target-host`` IPs the activity enforced, so the pure
+    workflow-side evaluator can corroborate callbacks without doing DNS — it is
+    empty for a Tier-1 (no-egress) dispatch, which structurally keeps canary
+    corroboration Tier-2-only.
     """
 
     exit_code: int
@@ -1733,6 +2375,14 @@ class SandboxExecCapture(BaseModel):
     scrubber_hits: int = 0
     redaction_status: RedactionStatus
     timed_out: bool = False
+    canary_callbacks: list[CanaryCallback] = Field(default_factory=_empty_canary_callbacks)
+    resolved_target_ips: list[str] = Field(default_factory=_empty_strings)
+    # The stored ArtifactRefs (stdout, stderr) as the quarantine pipeline
+    # returned them, so the pure workflow can attach the recorded sha256/size to
+    # the proof artifact's evidence refs. Empty for captures built before this
+    # field existed (legacy/replay payloads) — the workflow then reconstructs
+    # id-only refs.
+    artifact_refs: list[ArtifactRef] = Field(default_factory=_empty_artifact_refs)
 
 
 class ProveCorpus(BaseModel):

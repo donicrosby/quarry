@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from quarry.schemas import (
@@ -217,7 +218,9 @@ def test_scrub_and_wrap_strips_multiline_script_tags() -> None:
 def _make_mock_response(text: str = "") -> MagicMock:
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.headers = {}
+    # A real httpx.Headers so the session-token analyzer can read multi-value
+    # Set-Cookie via ``get_list`` (a plain dict has no ``get_list``).
+    mock_response.headers = httpx.Headers({})
     mock_response.text = text
     mock_response.content = text.encode()
     mock_response.url = "http://localhost:9000/path"

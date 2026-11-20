@@ -10,14 +10,13 @@ duplicate tickets.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 
 from quarry.schemas import FinalFinding, IntegrationRun, IntegrationStatus
 from quarry_activities.inputs import DeliverIntegrationsInput
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import build_artifact_store
 from quarry_integrations.base import DeliveryContext
 from quarry_integrations.sinks import default_sinks
 
@@ -33,7 +32,7 @@ def deliver_integrations_activity(
 
 def deliver_integrations(input: DeliverIntegrationsInput) -> list[IntegrationRun]:
     findings = [FinalFinding.model_validate(item) for item in json.loads(input.final_findings_json)]
-    store = LocalArtifactStore(Path(input.artifact_root))
+    store = build_artifact_store(input.artifact_root)
     ctx = DeliveryContext(
         scan_id=input.scan_id,
         workspace_id=input.workspace_id,

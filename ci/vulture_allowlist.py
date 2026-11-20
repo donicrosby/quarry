@@ -16,6 +16,9 @@ symbol, remove its line here in the same PR so the gate keeps tracking zero.
 
 _ALLOWLIST = [
     # --- Pydantic/dataclass fields (set by BaseModel/dataclass __init__ — invisible to vulture) ---
+    # AgentLogEvent is constructed with **fields in the loop, so vulture cannot see
+    # this field's keyword usage; it is set on every per-agent log line.
+    src.quarry_models.agent_log.replay,
     src.quarry.benchmark_artifacts.recall_per_class,
     src.quarry.benchmark_artifacts.fp_rate,
     src.quarry.benchmark_artifacts.models,
@@ -27,6 +30,9 @@ _ALLOWLIST = [
     src.quarry.config.config_file,
     src.quarry.config.redis_url,
     src.quarry.config.s3_bucket,
+    src.quarry.config.redis_max_artifact_bytes,
+    src.quarry.config.artifact_retry_max_attempts,
+    src.quarry.config.artifact_retry_backoff_seconds,
     src.quarry.panel_config.max_tokens_per_scan,
     src.quarry.panel_config.reasoning_lexicon,
     src.quarry.schemas.snippet_hash,
@@ -52,6 +58,8 @@ _ALLOWLIST = [
     src.quarry.schemas.trigger_input,
     src.quarry.schemas.triage_notes,
     src.quarry.schemas.triaged_at,
+    src.quarry.schemas.legacy,
+    src.quarry.schemas.model_omitted,
     src.quarry.schemas.duplicate_of,
     src.quarry.schemas.severity_adjusted,
     src.quarry.schemas.attack_surface_item_id,
@@ -74,6 +82,8 @@ _ALLOWLIST = [
     src.quarry.schemas.severity_hint,
     src.quarry.schemas.route,
     src.quarry.schemas.expected_fingerprint_hint,
+    src.quarry.schemas.planted,
+    src.quarry.schemas.expected_proof_type,
     src.quarry.schemas.response_ref,
     src.quarry.schemas.integration_config_id,
     src.quarry.schemas.links,
@@ -111,6 +121,7 @@ _ALLOWLIST = [
     src.quarry.schemas.model_invocation_id,
     src.quarry.schemas.rejected_reasoning_refs,
     src.quarry.schemas.reasoning_summary,
+    src.quarry.schemas.context_reset,
     src.quarry.schemas.attack_surface_item_id,
     src.quarry.schemas.request_artifact_id,
     src.quarry.schemas.response_artifact_id,
@@ -122,9 +133,28 @@ _ALLOWLIST = [
     src.quarry.schemas.env_profile,
     src.quarry.schemas.materialize_as,
     src.quarry.schemas.setup_commands,
+    # SARIF v2.1.0 models: fields are set by the constructors and read in tests
+    # (vulture only analyses src/), so the camelCase field names read as unused.
+    src.quarry_integrations.sarif_models.startLine,
+    src.quarry_integrations.sarif_models.endLine,
+    src.quarry_integrations.sarif_models.artifactLocation,
+    src.quarry_integrations.sarif_models.physicalLocation,
+    src.quarry_integrations.sarif_models.shortDescription,
+    src.quarry_integrations.sarif_models.rules,
+    src.quarry_integrations.sarif_models.locations,
+    src.quarry_integrations.sarif_models.properties,
+    src.quarry_integrations.sarif_models.schema_url,
     src.quarry_activities.exploit.proposed_http_spec,
     src.quarry_activities.exploit.done,
     src.quarry_activities.inputs.prove_corpus_json,
+    # fuzzing-harness: FuzzSpec/FuzzCrash/FuzzResult fields whose only reader is
+    # a dict lookup over the serialised Temporal payload (invisible to vulture).
+    src.quarry_activities.inputs.entry_point_function,
+    src.quarry_activities.inputs.stderr_sha256,
+    src.quarry_activities.inputs.runs_executed,
+    src.quarry_activities.inputs.budget_exhausted,
+    src.quarry_activities.inputs.boundary_outcomes,
+    src.quarry_activities.inputs.non_crash_exits,
     src.quarry_activities.live_recon.code_file,
     src.quarry_activities.live_recon.code_function,
     src.quarry_activities.live_recon.auth_required,
@@ -133,6 +163,7 @@ _ALLOWLIST = [
     src.quarry_activities.reporting.calls,
     src.quarry_activities.reporting.total_input_tokens,
     src.quarry_activities.reporting.total_output_tokens,
+    src.quarry_activities.reporting.evidence_links,
     src.quarry_artifacts.http_utils.original_size,
     src.quarry_benchmark.agent.poc_format,
     src.quarry_benchmark.agent.rationale,
@@ -170,8 +201,16 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.session_updates,
     src.quarry_workflows.run_scan.candidate_finding_count,
     src.quarry_workflows.run_scan.final_finding_count,
+    # VerdictReceipt field reached only through dataclasses.asdict() when the
+    # timing receipt is serialized onto finding.dynamic_validated (vulture's AST
+    # walk does not see the keyword-argument name in the receipt constructor).
+    src.quarry_activities.verdict_evaluators.VerdictReceipt.induced_delay_ms,
 
     # --- Protocol signature params, dunder params, instance attrs ---
+    src.quarry_artifacts.s3_store.Body,
+    src.quarry_artifacts.s3_store.Bucket,
+    src.quarry_artifacts.s3_store.ContentType,
+    src.quarry_artifacts.s3_store.Key,
     src.quarry.panel_config.COUNTERPOINT,
     src.quarry.schemas.QUEUED,
     src.quarry.schemas.PREPARING,
@@ -231,7 +270,27 @@ _ALLOWLIST = [
     src.quarry_tools.treesitter.signum,
     src.quarry_workflows.tracer_stage.trace_id,
 
+    # --- BaseHTTPRequestHandler dynamic dispatch (do_* methods + silenced log) ---
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_GET,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_POST,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PUT,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_DELETE,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_HEAD,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PATCH,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message,
+    src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message.format,
+
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
+    src.quarry.benchmark_inventory.inventory_as_dicts,
+    # Plugin-level match->CandidateFinding converters: the spec pins them on the
+    # scanner modules (analogous to secrets); production sweep wiring uses the
+    # workflow-side mirror in quarry_workflows.candidate_sources, so only unit
+    # tests reference these directly.
+    src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
+    src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
+
+    # --- browser-worker-playwright: helpers referenced only from tests/ ---
+    src.quarry_activities.playwright_driver.store_screenshot,
 
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
@@ -258,6 +317,7 @@ _ALLOWLIST = [
     src.quarry_activities.sandbox_exec.scrub_and_wrap_output,
     src.quarry_integrations.sinks.file_sink.FILE_SINK,
     src.quarry_integrations.sinks.jira_dry_run.JIRA_DRY_RUN_SINK,
+    src.quarry_integrations.sinks.sarif.SARIF_SINK,
     src.quarry_integrations.sinks.slack_dry_run.SLACK_DRY_RUN_SINK,
     src.quarry_models.checklist.discharged_checklist,
     src.quarry_models.client.ModelClient,
@@ -267,6 +327,7 @@ _ALLOWLIST = [
     src.quarry_models.validation.parse_and_validate_output,
     src.quarry_persistence.repositories.QuarryRepository.from_engine,
     src.quarry_plugins.context.kb_context.KB_CONTEXT_PLUGIN,
+    src.quarry_plugins.context.binary_analysis_context.BINARY_ANALYSIS_PLUGIN,
     src.quarry_plugins.context.multitenant_isolation.MULTITENANT_ISOLATION_PLUGIN,
     src.quarry_plugins.context.template_injection.TEMPLATE_INJECTION_PLUGIN,
     src.quarry_plugins.hooks.slack_notify.SLACK_NOTIFY_HOOK,
@@ -288,6 +349,13 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.StepOutcome,
     src.quarry_workflows.roe.repo_path_in_scope,
     src.quarry_workflows.run_scan.select_dynamic_probe_spec,
+    # credibility-economics: pydantic fields set through model_copy / constructors
+    # that vulture's AST walk cannot see.
+    src.quarry.schemas.credibility_discount,
+    src.quarry.schemas.occupant_count,
+    src.quarry.schemas.covered_occupants,
+    src.quarry.schemas.corroboration_promotion,
+    src.quarry_activities.corroborator.skipped_steps,
 ]
 
 _ = _ALLOWLIST  # mark the allowlist itself as used (vulture sees only definitions otherwise)

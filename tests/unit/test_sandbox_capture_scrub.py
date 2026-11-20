@@ -70,7 +70,7 @@ class TestSandboxExecActivityScrubbing:
                 command="sh",
                 args=["-c", f"echo {secret}"],
             ).model_dump_json(),
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path=str(tmp_path),
             scan_id="scan-scrub-test",
@@ -107,7 +107,7 @@ class TestSandboxExecActivityScrubbing:
         """Clean output that triggers no scrubber rules gets NOT_REQUIRED status."""
         inp = SandboxExecActivityInput(
             spec_json=SandboxExecSpec(command="echo", args=["clean"]).model_dump_json(),
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path=str(tmp_path),
             scan_id="scan-clean-test",
@@ -132,7 +132,7 @@ class TestSandboxExecActivityScrubbing:
         """timed_out=True from the sandbox must be reflected in SandboxExecCapture."""
         inp = SandboxExecActivityInput(
             spec_json=SandboxExecSpec(command="echo").model_dump_json(),
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path=str(tmp_path),
             scan_id="scan-timeout-test",
@@ -186,14 +186,15 @@ class TestSandboxCredentialInjection:
             sandbox: LocalSubprocessSandbox,
             work_dir: Path,
             resolved_env: dict[str, str],
-            target_endpoint: object,
+            egress_policy: object,
+            canary_active: bool = False,
         ) -> SandboxResult:
             captured_envs.append(dict(resolved_env))
             return SandboxResult(exit_code=0, stdout="ok", stderr="", elapsed_ms=5)
 
         inp = SandboxExecActivityInput(
             spec_json=SandboxExecSpec(command="echo").model_dump_json(),
-            target_endpoint_json=None,
+            egress_policy_json=None,
             allowed_hosts=(),
             artifact_store_path=str(tmp_path),
             scan_id="scan-cred-test",

@@ -1,13 +1,14 @@
-"""Tests for ContainerSandbox (Tier 2) — ADR-022 §A.
+"""Tests for ContainerSandbox (Tier 2) — ADR-024 §A.
 
 Red-first: these tests define the expected behaviour of ContainerSandbox
 before the implementation exists.
 
 Test scope:
   - Protocol conformance: ContainerSandbox satisfies SandboxBackend.
-  - ``--network none`` when target_endpoint is None (CLI prove, no egress).
-  - Live-egress flag NOT set when a TargetEndpoint is provided (deferred to
-    week 14.5, but the flag must be absent rather than present).
+  - ``--network none`` when the egress policy is None/empty (no egress).
+  - A non-empty policy attaches the container to a restricted internal network
+    carrying only the policy's pinned IPs.
+  - A container memory cap (``--memory``/``--memory-swap``) is applied by default.
   - TimeoutExpired → timed_out=True in SandboxResult.
   - stdout/stderr capped to MAX_OUTPUT_BYTES.
   - Proxy env vars scrubbed from the env passed to docker run.
@@ -20,21 +21,31 @@ skipped when Docker is unavailable.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from quarry.schemas import SandboxExecSpec, TargetEndpoint
+from quarry.egress import EgressPolicyError
+from quarry.schemas import (
+    ResolvedDestinationSet,
+    ResolvedEgressPolicy,
+    SandboxExecSpec,
+)
 from quarry_activities.sandbox import (
     BLOCKED_ENV_PREFIXES,
+    DEFAULT_MEMORY_LIMIT,
+    EGRESS_ALLOWED_IPS_ENV,
     HARD_TIMEOUT_SECONDS,
     MAX_OUTPUT_BYTES,
     ContainerSandbox,
     SandboxBackend,
     SandboxResult,
+    egress_network_name,
 )
 
 # ---------------------------------------------------------------------------
@@ -60,6 +71,53 @@ def _minimal_spec(**kwargs: object) -> SandboxExecSpec:
     return SandboxExecSpec(**defaults)  # type: ignore[arg-type]
 
 
+def _policy(*ips: str, name: str = "target-host") -> ResolvedEgressPolicy:
+    return ResolvedEgressPolicy(
+        destination_sets=[ResolvedDestinationSet(name=name, allowed_ips=list(ips))]
+    )
+
+
+def _docker_run_call(mock_run: MagicMock) -> list[str]:
+    """Return the argv of the ``docker run`` invocation from a patched subprocess.run."""
+    for call in cast("list[Any]", mock_run.call_args_list):
+        argv = [str(part) for part in cast("list[object]", call[0][0])]
+        if len(argv) >= 2 and argv[1] == "run":
+            return argv
+    raise AssertionError(f"no docker run invocation in {mock_run.call_args_list!r}")
+
+
+def _network_inspect_json(*, internal: bool = True, driver: str = "bridge") -> str:
+    """A realistic ``docker network inspect <name>`` JSON payload (one entry)."""
+    return json.dumps([{"Name": "quarry-egress-test", "Driver": driver, "Internal": internal}])
+
+
+def _docker_side_effect(
+    *,
+    inspect_stdout: str | None = None,
+    inspect_rc: int = 0,
+    run_stdout: str = "ok",
+    run_rc: int = 0,
+) -> Any:
+    """Build a ``subprocess.run`` side_effect that answers inspect and run calls.
+
+    ``inspect_stdout=None`` models an *absent* network (inspect rc != 0); a
+    string models a present network whose body is returned verbatim.  ``docker
+    run`` always returns ``_make_proc(run_stdout, run_rc)``.
+    """
+
+    def _side_effect(argv: list[str], **kwargs: object) -> MagicMock:
+        if len(argv) >= 3 and argv[0] == "docker" and argv[1] == "network":
+            if argv[2] == "inspect":
+                if inspect_stdout is None:
+                    return _make_proc(stdout="", returncode=1)
+                return _make_proc(stdout=inspect_stdout, returncode=inspect_rc)
+            if argv[2] == "create":
+                return _make_proc(stdout="created", returncode=0)
+        return _make_proc(stdout=run_stdout, returncode=run_rc)
+
+    return _side_effect
+
+
 # ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
@@ -76,44 +134,319 @@ class TestContainerSandboxProtocol:
 
 
 # ---------------------------------------------------------------------------
+# Canary containment: NET_RAW drop
+# ---------------------------------------------------------------------------
+
+
+class TestContainerSandboxCanaryCapDrop:
+    def test_canary_active_drops_net_raw_and_net_admin(self, tmp_path: Path) -> None:
+        """While a canary is active the sandbox must not forge the target source IP."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(
+                spec,
+                work_dir=tmp_path,
+                resolved_env={},
+                egress_policy=None,
+                canary_active=True,
+            )
+
+        docker_args = _docker_run_call(mock_run)
+        drops = [
+            docker_args[idx + 1]
+            for idx, part in enumerate(docker_args)
+            if part == "--cap-drop" and idx + 1 < len(docker_args)
+        ]
+        assert "NET_RAW" in drops
+        assert "NET_ADMIN" in drops
+
+    def test_no_canary_keeps_raw_sockets(self, tmp_path: Path) -> None:
+        """Ping-based proofs without a canary keep NET_RAW (default rationale)."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert "NET_RAW" not in docker_args
+
+
+# ---------------------------------------------------------------------------
 # Network isolation
 # ---------------------------------------------------------------------------
 
 
 class TestContainerSandboxNetworkIsolation:
-    def test_network_none_when_no_endpoint(self, tmp_path: Path) -> None:
-        """CLI prove (no TargetEndpoint) must pass --network none to docker."""
+    def test_network_none_when_policy_empty(self, tmp_path: Path) -> None:
+        """No egress policy (CLI prove) must pass --network none to docker."""
         spec = _minimal_spec()
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
-        docker_args: list[str] = mock_run.call_args[0][0]
+        docker_args = _docker_run_call(mock_run)
         assert "--network" in docker_args
         idx = docker_args.index("--network")
         assert docker_args[idx + 1] == "none"
 
-    def test_no_network_flag_when_endpoint_provided(self, tmp_path: Path) -> None:
-        """When a TargetEndpoint is supplied, --network none must NOT be present.
+    def test_empty_policy_is_network_none(self, tmp_path: Path) -> None:
+        """A policy whose sets carry no pinned IPs is empty ⇒ no egress."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        empty = ResolvedEgressPolicy(
+            destination_sets=[ResolvedDestinationSet(name="target-host", allowed_ips=[])]
+        )
 
-        Live egress wiring (Docker network attachment) is deferred to week 14.5.
-        This test only asserts the flag is absent, not that live egress works.
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=empty)
+
+        docker_args = _docker_run_call(mock_run)
+        idx = docker_args.index("--network")
+        assert docker_args[idx + 1] == "none"
+
+    def test_non_empty_policy_attaches_restricted_network(self, tmp_path: Path) -> None:
+        """A non-empty policy attaches to a restricted network, not --network none.
+
+        The network is an internal Docker network created for the policy; the
+        pinned IPs ride along as QUARRY_EGRESS_ALLOWED_IPS.
         """
         spec = _minimal_spec()
-        endpoint = TargetEndpoint(scheme="https", host="example.com", port=443)
+        sb = ContainerSandbox()
+        policy = _policy("93.184.216.34", "198.51.100.7")
+
+        with patch(
+            "subprocess.run",
+            side_effect=_docker_side_effect(inspect_stdout=_network_inspect_json(internal=True)),
+        ) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        docker_args = _docker_run_call(mock_run)
+        idx = docker_args.index("--network")
+        assert docker_args[idx + 1] != "none"
+        assert docker_args[idx + 1].startswith("quarry-egress-")
+        env_values = [
+            docker_args[i + 1]
+            for i, a in enumerate(docker_args)
+            if a == "-e" and i + 1 < len(docker_args)
+        ]
+        assert any(v == f"{EGRESS_ALLOWED_IPS_ENV}=198.51.100.7,93.184.216.34" for v in env_values)
+
+
+# ---------------------------------------------------------------------------
+# Container memory cap (browser-worker-playwright tasks.md 5.2)
+# ---------------------------------------------------------------------------
+
+
+class TestContainerSandboxMemoryCap:
+    """5.2: the browser-capable container runs under a kernel-enforced memory cap."""
+
+    def test_default_memory_cap_in_run_args(self, tmp_path: Path) -> None:
+        """A default ContainerSandbox caps container memory (--memory/--memory-swap)."""
+        spec = _minimal_spec()
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=endpoint)
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
-        docker_args: list[str] = mock_run.call_args[0][0]
-        # --network none must not appear; another network flag may be added later.
-        for i, arg in enumerate(docker_args):
-            if arg == "--network" and i + 1 < len(docker_args):
-                assert docker_args[i + 1] != "none", (
-                    "--network none must not be set when a TargetEndpoint is provided"
-                )
+        docker_args = _docker_run_call(mock_run)
+        assert docker_args[docker_args.index("--memory") + 1] == DEFAULT_MEMORY_LIMIT
+        # --memory-swap pinned equal so the cap cannot be exceeded via swap.
+        assert docker_args[docker_args.index("--memory-swap") + 1] == DEFAULT_MEMORY_LIMIT
+
+    def test_custom_memory_limit_is_honoured(self, tmp_path: Path) -> None:
+        """An explicit memory_limit is passed through verbatim."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox(memory_limit="512m")
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert docker_args[docker_args.index("--memory") + 1] == "512m"
+        assert docker_args[docker_args.index("--memory-swap") + 1] == "512m"
+
+    def test_empty_memory_limit_opts_out(self, tmp_path: Path) -> None:
+        """An explicit empty limit omits the cap entirely (documented opt-out)."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox(memory_limit="")
+
+        with patch("subprocess.run", return_value=_make_proc()) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
+
+        docker_args = _docker_run_call(mock_run)
+        assert "--memory" not in docker_args
+        assert "--memory-swap" not in docker_args
+
+
+# ---------------------------------------------------------------------------
+# Restricted-network reuse verification (F1: fail closed on a squatted name)
+# ---------------------------------------------------------------------------
+
+
+def _docker_calls(mock_run: MagicMock, verb: str) -> list[list[str]]:
+    """Every recorded subprocess argv invoking *verb*.
+
+    Matches either a top-level docker verb (``docker run …``) or a network
+    subcommand (``docker network create|inspect …``).
+    """
+
+    def _matches(argv: list[str]) -> bool:
+        return (len(argv) >= 2 and argv[1] == verb) or (len(argv) >= 3 and argv[2] == verb)
+
+    return [
+        [str(part) for part in cast("list[object]", call[0][0])]
+        for call in cast("list[Any]", mock_run.call_args_list)
+        if _matches([str(part) for part in cast("list[object]", call[0][0])])
+    ]
+
+
+class TestContainerSandboxNetworkVerification:
+    """F1: an existing network with the expected name must prove it is internal."""
+
+    def test_existing_non_internal_network_fails_closed(self, tmp_path: Path) -> None:
+        """A pre-created NON-internal network (name squat) must raise, never reuse.
+
+        This is the F1 containment bypass: reuse of an externally-routed bridge
+        that happens to carry the content-addressed quarry-egress-* name would
+        silently grant the sandbox full egress.
+        """
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=_docker_side_effect(
+                    inspect_stdout=_network_inspect_json(internal=False)
+                ),
+            ) as mock_run,
+            pytest.raises(EgressPolicyError, match="internal|Internal"),
+        ):
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        # The sandbox must never have attached to the untrusted network.
+        assert _docker_calls(mock_run, "run") == []
+
+    def test_existing_non_bridge_driver_fails_closed(self, tmp_path: Path) -> None:
+        """An internal network on an unexpected driver is also refused."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=_docker_side_effect(
+                    inspect_stdout=_network_inspect_json(internal=True, driver="macvlan")
+                ),
+            ) as mock_run,
+            pytest.raises(EgressPolicyError, match="driver"),
+        ):
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        assert _docker_calls(mock_run, "run") == []
+
+    def test_unparseable_inspect_output_fails_closed(self, tmp_path: Path) -> None:
+        """Unparseable ``docker network inspect`` output must not be trusted."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=_docker_side_effect(inspect_stdout="not json at all"),
+            ) as mock_run,
+            pytest.raises(EgressPolicyError, match="JSON"),
+        ):
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        assert _docker_calls(mock_run, "run") == []
+
+    def test_inspect_without_entry_fails_closed(self, tmp_path: Path) -> None:
+        """An inspect rc=0 with no network entry must not be trusted."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=_docker_side_effect(inspect_stdout="[]"),
+            ) as mock_run,
+            pytest.raises(EgressPolicyError, match="no inspectable"),
+        ):
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        assert _docker_calls(mock_run, "run") == []
+
+    def test_absent_network_created_internal_and_verified(self, tmp_path: Path) -> None:
+        """First-time creation uses --internal, re-inspects, then proceeds."""
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+        expected = egress_network_name(policy)
+        assert expected is not None
+
+        inspects = {"n": 0}
+
+        def _side_effect(argv: list[str], **kwargs: object) -> MagicMock:
+            if len(argv) >= 3 and argv[0] == "docker" and argv[1] == "network":
+                if argv[2] == "inspect":
+                    inspects["n"] += 1
+                    if inspects["n"] == 1:
+                        return _make_proc(stdout="", returncode=1)
+                    return _make_proc(stdout=_network_inspect_json(internal=True), returncode=0)
+                if argv[2] == "create":
+                    return _make_proc(stdout="created", returncode=0)
+            return _make_proc()
+
+        with patch("subprocess.run", side_effect=_side_effect) as mock_run:
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        creates = _docker_calls(mock_run, "create")
+        assert creates, "absent network must be created"
+        assert "--internal" in creates[0]
+        assert expected in creates[0]
+        docker_args = _docker_run_call(mock_run)
+        idx = docker_args.index("--network")
+        assert docker_args[idx + 1] == expected
+
+    def test_squat_race_in_create_window_fails_closed(self, tmp_path: Path) -> None:
+        """A network that appears between create and attach is still verified.
+
+        Models the TOCTOU: inspect says absent, ``create --internal`` loses the
+        name race, and the re-inspect finds the squatter's non-internal network.
+        """
+        spec = _minimal_spec()
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+
+        inspects = {"n": 0}
+
+        def _side_effect(argv: list[str], **kwargs: object) -> MagicMock:
+            if len(argv) >= 3 and argv[0] == "docker" and argv[1] == "network":
+                if argv[2] == "inspect":
+                    inspects["n"] += 1
+                    if inspects["n"] == 1:
+                        return _make_proc(stdout="", returncode=1)
+                    return _make_proc(stdout=_network_inspect_json(internal=False), returncode=0)
+                if argv[2] == "create":
+                    return _make_proc(stdout="", returncode=1)  # name conflict
+            return _make_proc()
+
+        with (
+            patch("subprocess.run", side_effect=_side_effect) as mock_run,
+            pytest.raises(EgressPolicyError, match="internal|Internal"),
+        ):
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+
+        assert _docker_calls(mock_run, "run") == []
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +465,7 @@ class TestContainerSandboxTimeout:
         exc.stderr = b""
 
         with patch("subprocess.run", side_effect=exc):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert result.timed_out is True
         assert result.exit_code == 124  # conventional timeout exit code
@@ -146,7 +479,7 @@ class TestContainerSandboxTimeout:
         exc.stderr = None
 
         with patch("subprocess.run", side_effect=exc):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert result.exit_code == 124
 
@@ -156,7 +489,7 @@ class TestContainerSandboxTimeout:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         _, kwargs = mock_run.call_args
         assert kwargs.get("timeout") <= HARD_TIMEOUT_SECONDS
@@ -174,7 +507,7 @@ class TestContainerSandboxOutputCapping:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc(stdout=large_output)):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert len(result.stdout.encode("utf-8")) <= MAX_OUTPUT_BYTES
 
@@ -184,7 +517,7 @@ class TestContainerSandboxOutputCapping:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc(stderr=large_err)):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert len(result.stderr.encode("utf-8")) <= MAX_OUTPUT_BYTES
 
@@ -193,7 +526,7 @@ class TestContainerSandboxOutputCapping:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc(stdout="hello", stderr="world")):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert result.stdout == "hello"
         assert result.stderr == "world"
@@ -213,7 +546,7 @@ class TestContainerSandboxEnvScrubbing:
         resolved_env = {proxy_var: "http://proxy.example.com"}
 
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            sb.run(spec, work_dir=tmp_path, resolved_env=resolved_env, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env=resolved_env, egress_policy=None)
 
         docker_args: list[str] = mock_run.call_args[0][0]
         # Ensure the proxy key never appears as an -e value
@@ -234,7 +567,7 @@ class TestContainerSandboxEnvScrubbing:
         resolved_env = {"QUARRY_INJECTED_CRED_TOKEN": "secret-value"}
 
         with patch("subprocess.run", return_value=_make_proc()) as mock_run:
-            sb.run(spec, work_dir=tmp_path, resolved_env=resolved_env, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env=resolved_env, egress_policy=None)
 
         docker_args: list[str] = mock_run.call_args[0][0]
         env_values = [
@@ -263,7 +596,7 @@ class TestContainerSandboxInputFiles:
             return _make_proc()
 
         with patch("subprocess.run", side_effect=fake_run):
-            sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert staged_at_call_time == [True], "input_files must be staged BEFORE docker run"
 
@@ -272,7 +605,7 @@ class TestContainerSandboxInputFiles:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc()):
-            sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         staged = tmp_path / "config" / "dbt_project.yml"
         assert staged.exists()
@@ -290,7 +623,7 @@ class TestContainerSandboxResult:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc(returncode=0)):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert isinstance(result, SandboxResult)
 
@@ -299,7 +632,7 @@ class TestContainerSandboxResult:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc(returncode=42)):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert result.exit_code == 42
 
@@ -308,7 +641,7 @@ class TestContainerSandboxResult:
         sb = ContainerSandbox()
 
         with patch("subprocess.run", return_value=_make_proc()):
-            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+            result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
 
         assert result.elapsed_ms >= 0
 
@@ -344,7 +677,7 @@ class TestContainerSandboxLive:
     def test_echo_runs_in_container(self, tmp_path: Path) -> None:
         spec = _minimal_spec(command="echo", args=["quarry-live-test"])
         sb = ContainerSandbox()
-        result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+        result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
         assert result.exit_code == 0
         assert "quarry-live-test" in result.stdout
 
@@ -356,7 +689,36 @@ class TestContainerSandboxLive:
             timeout_seconds=10,
         )
         sb = ContainerSandbox(image="curlimages/curl:latest")
-        result = sb.run(spec, work_dir=tmp_path, resolved_env={}, target_endpoint=None)
+        result = sb.run(spec, work_dir=tmp_path, resolved_env={}, egress_policy=None)
         # With --network none curl cannot resolve DNS; should fail with non-zero exit
         # embedded in stdout ("exit:6" or similar) OR non-zero exit_code
         assert result.exit_code != 0 or "exit:0" not in result.stdout
+
+    def test_pre_created_non_internal_network_fails_closed(self, tmp_path: Path) -> None:
+        """F1 live PoC: a squatted NON-internal network with the expected name is refused.
+
+        Reproduces the review's proven bypass (t_987a8d13): pre-create the
+        content-addressed ``quarry-egress-*`` name as an *external* bridge, then
+        run a matching-policy sandbox.  Fixed behaviour: fail closed with
+        EgressPolicyError instead of attaching and reaching 1.1.1.1.
+        """
+        sb = ContainerSandbox()
+        policy = _policy("203.0.113.10")
+        network = egress_network_name(policy)
+        assert network is not None
+
+        # Clean slate, then squat the name (deliberately NO --internal).
+        subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=15)
+        created = subprocess.run(
+            ["docker", "network", "create", network],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if created.returncode != 0:
+            pytest.skip(f"could not pre-create squatted network: {created.stderr.strip()}")
+        try:
+            with pytest.raises(EgressPolicyError, match="internal|Internal"):
+                sb.run(_minimal_spec(), work_dir=tmp_path, resolved_env={}, egress_policy=policy)
+        finally:
+            subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=15)

@@ -1,22 +1,28 @@
-"""ArtifactStore Protocol and build_artifact_store() factory (Phase 1c).
+"""ArtifactStore Protocol and build_artifact_store() factory.
 
-The Protocol formalises the interface that LocalArtifactStore already implements.
-The factory is config-driven (QUARRY_ARTIFACT_BACKEND) so swapping backends is a
-deployment change, not a code change.
+The Protocol formalises the interface every backend implements. The factory is
+config-driven (QUARRY_ARTIFACT_BACKEND) so swapping backends is a deployment
+change, not a code change.
 
 Backends:
   file   LocalArtifactStore  — filesystem (default, dev)
-  redis  RedisArtifactStore   — deferred (fast small scratch; feat/cli-hunting-path)
-  s3     S3ArtifactStore      — deferred (large blobs; feat/cli-hunting-path)
+  redis  RedisArtifactStore  — fast small scratch (stdout/stderr, JSON, <1 MB)
+  s3     S3ArtifactStore     — large blobs (compiled binaries, tar'd corpora)
 
-See ADR-022 §B for the full backend rationale.
+``get_bytes`` dispatches by ``ArtifactRef.uri`` scheme through
+:func:`resolve_artifact_store` (ADR-024 §B). See ADR-024 §B for the backend
+rationale and the env vars (QUARRY_REDIS_URL / QUARRY_S3_BUCKET).
 """
 
 from __future__ import annotations
 
+import importlib
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
+from urllib.parse import urlsplit
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
 
@@ -42,8 +48,8 @@ class _JsonArtifact(Protocol):
 class ArtifactStore(Protocol):
     """Protocol shared by all artifact-store backends.
 
-    LocalArtifactStore satisfies this structurally; the Redis/S3 backends
-    (deferred) will implement it explicitly.
+    Every backend (local filesystem, Redis, S3) implements this interface
+    explicitly, including ``append_bytes``.
     """
 
     def put_bytes(
@@ -57,6 +63,24 @@ class ArtifactStore(Protocol):
         redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
     ) -> ArtifactRef: ...
 
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the object at *key* instead of rewriting it.
+
+        The append-only counterpart to ``put_bytes`` (which truncates).  The
+        per-agent execution log relies on it so a replay appends after the
+        original run's lines rather than truncating them.
+        """
+        ...
+
     def put_json(
         self,
         key: str,
@@ -69,6 +93,120 @@ class ArtifactStore(Protocol):
 
     def get_bytes(self, artifact_ref: ArtifactRef) -> bytes: ...
 
+    def get_text(self, key: str) -> str | None: ...
+
+    def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Transient-failure classification + bounded retry (ADR-024 §B)
+# ---------------------------------------------------------------------------
+
+# (module, attribute) pairs whose classes count as transient network errors.
+# Loaded lazily so the artifact package imports without the optional clients.
+_TRANSIENT_EXCEPTION_ATTRS: tuple[tuple[str, str], ...] = (
+    ("redis.exceptions", "ConnectionError"),
+    ("redis.exceptions", "TimeoutError"),
+    ("botocore.exceptions", "ConnectionError"),
+    ("botocore.exceptions", "EndpointConnectionError"),
+)
+
+
+def _optional_import(name: str) -> Any:
+    """Import *name*, returning ``None`` when the (optional) package is absent."""
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Return the HTTP status on a botocore-style error, else ``None``."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return None
+    meta = cast("dict[str, object]", response).get("ResponseMetadata")
+    if not isinstance(meta, dict):
+        return None
+    status = cast("dict[str, object]", meta).get("HTTPStatusCode")
+    return status if isinstance(status, int) else None
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    """True for timeout / connection-reset / server-error failures.
+
+    Covers the builtin network exceptions, the Redis client's
+    ``ConnectionError``/``TimeoutError``, botocore's ``ConnectionError`` /
+    ``EndpointConnectionError``, and any botocore-style error carrying a 5xx
+    HTTP status. Auth failures and 4xx responses are NOT transient.
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError, ConnectionResetError)):
+        return True
+    for module_name, attr in _TRANSIENT_EXCEPTION_ATTRS:
+        module = _optional_import(module_name)
+        if module is None:
+            continue
+        candidate = getattr(module, attr, None)
+        if (
+            isinstance(candidate, type)
+            and issubclass(candidate, BaseException)
+            and isinstance(exc, candidate)
+        ):
+            return True
+    status = _http_status(exc)
+    return status is not None and 500 <= status < 600
+
+
+def retry_transient[T](
+    fn: Callable[[], T],
+    *,
+    max_attempts: int,
+    backoff_seconds: float,
+) -> T:
+    """Call *fn*, retrying transient failures with exponential backoff.
+
+    Makes at most *max_attempts* attempts, waiting ``backoff_seconds *
+    2**(attempt-1)`` between them (1s then 2s for the default 3 attempts).
+    Non-transient errors propagate on the first attempt; after exhausting the
+    attempts the last error is re-raised.
+    """
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            attempt += 1
+            if attempt >= max_attempts or not is_transient_error(exc):
+                raise
+            time.sleep(backoff_seconds * (2 ** (attempt - 1)))
+
+
+# ---------------------------------------------------------------------------
+# Scheme dispatch (ADR-024 §B)
+# ---------------------------------------------------------------------------
+
+
+def resolve_artifact_store(ref: ArtifactRef, *, root: str = "") -> ArtifactStore:
+    """Return the backend that owns *ref*, dispatched by its URI scheme.
+
+    ADR-024 §B table: ``file://`` → ``LocalArtifactStore`` (rooted at *root*),
+    ``redis://`` → ``RedisArtifactStore``, ``s3://`` → ``S3ArtifactStore``.
+    Any other scheme raises ``ValueError`` (fail-closed).
+    """
+    scheme = urlsplit(ref.uri).scheme
+    if scheme == "file":
+        return build_artifact_store(root)
+    if scheme == "redis":
+        from quarry_artifacts.redis_store import RedisArtifactStore
+
+        return RedisArtifactStore()
+    if scheme == "s3":
+        from quarry_artifacts.s3_store import S3ArtifactStore
+
+        return S3ArtifactStore()
+    msg = f"Unsupported artifact URI scheme '{scheme}' in {ref.uri}"
+    raise ValueError(msg)
+
 
 # ---------------------------------------------------------------------------
 # Factory
@@ -80,11 +218,11 @@ def build_artifact_store(root: str) -> ArtifactStore:
 
     Reads QUARRY_ARTIFACT_BACKEND (via QuarrySettings) to select the backend:
       ""  / "file"  — LocalArtifactStore (default; backward-compatible)
-      "redis"       — NotImplementedError (deferred; see ADR-022 §B)
-      "s3"          — NotImplementedError (deferred; see ADR-022 §B)
+      "redis"       — RedisArtifactStore (QUARRY_REDIS_URL)
+      "s3"          — S3ArtifactStore (QUARRY_S3_BUCKET)
 
-    The root argument is the filesystem path used by the file backend.
-    It is ignored by Redis/S3 backends (they use QUARRY_REDIS_URL / QUARRY_S3_BUCKET).
+    The root argument is the filesystem path used by the file backend. It is
+    ignored by the Redis/S3 backends (see ADR-024 §B).
     """
     from quarry.config import QuarrySettings
 
@@ -97,22 +235,17 @@ def build_artifact_store(root: str) -> ArtifactStore:
         return LocalArtifactStore(Path(root))
 
     if backend == "redis":
-        raise NotImplementedError(
-            "RedisArtifactStore is deferred to the CLI hunting follow-on. "
-            "Set QUARRY_ARTIFACT_BACKEND=file (or unset it) for now. "
-            "See ADR-022 §B and feat/cli-hunting-path."
-        )
+        from quarry_artifacts.redis_store import RedisArtifactStore
+
+        return RedisArtifactStore(settings.redis_url)
 
     if backend == "s3":
-        raise NotImplementedError(
-            "S3ArtifactStore is deferred to the CLI hunting follow-on. "
-            "Set QUARRY_ARTIFACT_BACKEND=file (or unset it) for now. "
-            "See ADR-022 §B and feat/cli-hunting-path."
-        )
+        from quarry_artifacts.s3_store import S3ArtifactStore
+
+        return S3ArtifactStore(settings.s3_bucket)
 
     msg = (
-        f"Unknown QUARRY_ARTIFACT_BACKEND='{backend}'. "
-        "Valid values: '' (or 'file'), 'redis' (deferred), 's3' (deferred)."
+        f"Unknown QUARRY_ARTIFACT_BACKEND='{backend}'. Valid values: '' (or 'file'), 'redis', 's3'."
     )
     raise ValueError(msg)
 
@@ -215,9 +348,12 @@ def store_seed_prompt(
     verifier, which expects the seed invocation's per-part hashes.
 
     Semantics (design D5): a non-local backend under ``full_prompts_local_only`` is
-    a disclosure-safety violation and propagates; a transient write failure is
+    a disclosure-safety violation and propagates; a best-effort write failure is
     logged and swallowed so the scan continues (provenance hashes are still on the
-    invocation). A no-op when there are no invocations or retention stores no bytes.
+    invocation). Best-effort covers local ``OSError`` and the network backends'
+    transient error types (timeout / connection reset / 5xx) — a post-retry
+    seed-prompt failure stays non-scan-fatal (task 5.5). A no-op when there are no
+    invocations or retention stores no bytes.
     """
     if not invocations:
         return
@@ -235,14 +371,24 @@ def store_seed_prompt(
     except ValueError:
         # Fail-closed backend guard (full_prompts_local_only on a remote backend).
         raise
-    except OSError as exc:  # best-effort: transient IO must not fail the scan
-        import logging
-
-        logging.getLogger(__name__).warning("seed prompt storage failed: %s", exc)
+    except OSError as exc:  # best-effort: local IO must not fail the scan
+        _log_seed_prompt_failure(exc)
+        return
+    except Exception as exc:  # best-effort: post-retry network failures too
+        if not is_transient_error(exc):
+            raise
+        _log_seed_prompt_failure(exc)
         return
 
     if ref is not None:
         seed.prompt_ref = ref
+
+
+def _log_seed_prompt_failure(exc: BaseException) -> None:
+    """Log a best-effort seed-prompt storage failure without failing the scan."""
+    import logging
+
+    logging.getLogger(__name__).warning("seed prompt storage failed: %s", exc)
 
 
 def persist_seed_prompt(

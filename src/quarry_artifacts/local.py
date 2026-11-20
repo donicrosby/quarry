@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from quarry.schemas import ArtifactKind, ArtifactRef, RedactionStatus
+from quarry_artifacts.quarantine import clear_execute_bits, enforce_artifact_size
 
 
 class JsonArtifact(Protocol):
@@ -27,9 +28,14 @@ class LocalArtifactStore:
         metadata: dict[str, Any] | None = None,
         redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
     ) -> ArtifactRef:
+        # Proof-artifact quarantine (D6): the per-kind size limit is enforced
+        # before any write (over-size -> ArtifactOverSizeError with a recorded
+        # event), and the stored file never carries execute bits.
+        enforce_artifact_size(kind, len(data), artifact_key=key)
         path = self._safe_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        clear_execute_bits(path)
         digest = sha256(data).hexdigest()
         return ArtifactRef(
             id=str(uuid4()),
@@ -62,6 +68,41 @@ class LocalArtifactStore:
             redaction_status=redaction_status,
         )
 
+    def append_bytes(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        kind: ArtifactKind,
+        content_type: str,
+        metadata: dict[str, Any] | None = None,
+        redaction_status: RedactionStatus = RedactionStatus.UNKNOWN,
+    ) -> ArtifactRef:
+        """Append *data* to the object at *key* (``O_APPEND``), creating it if absent.
+
+        Unlike :meth:`put_bytes`, which rewrites the whole object, this opens the
+        file in append mode so existing bytes are never truncated — the property
+        the per-agent execution log depends on for replay safety.  The returned
+        ``ArtifactRef`` describes the appended chunk (its ``sha256`` and
+        ``size_bytes`` are of *data*), not the whole object; this keeps the
+        per-line append O(len(data)) rather than O(object size).
+        """
+        path = self._safe_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("ab") as handle:
+            handle.write(data)
+        return ArtifactRef(
+            id=str(uuid4()),
+            uri=f"file://{path}",
+            kind=kind,
+            content_type=content_type,
+            sha256=sha256(data).hexdigest(),
+            size_bytes=len(data),
+            redaction_status=redaction_status,
+            created_at=datetime.now(UTC),
+            metadata=metadata or {},
+        )
+
     def get_bytes(self, artifact_ref: ArtifactRef) -> bytes:
         uri_prefix = "file://"
         if not artifact_ref.uri.startswith(uri_prefix):
@@ -90,3 +131,6 @@ class LocalArtifactStore:
             msg = f"Artifact key escapes store root: {key}"
             raise ValueError(msg)
         return path
+
+    def close(self) -> None:
+        """No-op: the file backend holds no connection pool to release."""

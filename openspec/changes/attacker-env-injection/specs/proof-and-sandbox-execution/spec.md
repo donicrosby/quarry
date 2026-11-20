@@ -1,20 +1,33 @@
 ## ADDED Requirements
 
-### Requirement: Agent-controlled environment injection is blocked at the schema layer
+### Requirement: Controlled environment variables with allowlisted names
 
-The sandbox tool schema SHALL carry no field through which the agent can inject arbitrary
-environment variables. The top-level `additionalProperties: false` gate (sandbox_tool.py:82)
-and the absence of an `env` / `environment` property SHALL be verified by a conformance test.
+`SandboxExecSpec` SHALL carry an `env` field restricted to allowlisted variable names
+with per-name allowlisted values; non-allowlisted names or values SHALL be rejected at
+the schema boundary. Values SHALL be selected from a fixed infrastructure-provided set
+per name, never free-form agent strings. The allowlists SHALL include `EDITOR` with
+value `/bin/sh` (the vulnerable-cli proof path). The env SHALL be applied to the target
+subprocess only; the sandbox runtime SHALL NOT inherit it.
 
-#### Scenario: no-env-field-in-tool-schema
+#### Scenario: allowlisted-env-name-is-accepted
 
-- **WHEN** the `run_in_sandbox` tool input schema is inspected
-- **THEN** no `env`, `environment`, `env_vars`, or similarly named property exists in `properties`
+- **WHEN** the prove agent specifies `env: {"EDITOR": "/bin/sh"}`
+- **THEN** the env var is forwarded to the target subprocess
 
-#### Scenario: unknown-keys-rejected-at-schema-boundary
+#### Scenario: non-allowlisted-env-name-is-rejected
 
-- **WHEN** a tool call includes an unrecognized top-level key such as `"env": {"PATH": "/evil"}`
-- **THEN** the schema validation rejects it before any dispatch occurs
+- **WHEN** the prove agent specifies `env: {"LD_PRELOAD": "/tmp/evil.so"}`
+- **THEN** the tool call is rejected because `LD_PRELOAD` is not on the name allowlist
+
+#### Scenario: non-allowlisted-env-value-is-rejected
+
+- **WHEN** the prove agent specifies `env: {"PATH": "/tmp/attacker"}`
+- **THEN** the tool call is rejected because `/tmp/attacker` is not an allowed value for `PATH`
+
+#### Scenario: env-applied-to-subprocess-not-runtime
+
+- **WHEN** env vars are set via the `env` field and the target subprocess executes
+- **THEN** the sandbox runtime process does not inherit those variables
 
 ### Requirement: env-profile resolution is fail-safe
 
@@ -35,41 +48,67 @@ accept agent-controlled keys or values. Until a resolution implementation ships,
 - **THEN** every env-var name and value produced originates from a fixed map with no
   string interpolation from agent-supplied fields
 
-### Requirement: Shell environment-setting arguments are rejected
+### Requirement: Arg-level env-setting is defense-in-depth, not the primary defense
 
-Args passed to sandbox commands SHALL be inspected for shell environment-setting patterns
-before execution. Any arg that starts with a `NAME=value` pattern or that is `-e`, `--env`,
-`env`, or `printenv` when the command is `sh` or `python3` SHALL be rejected.
+Leading args matching a `NAME=VALUE` prefix (the `NAME=VALUE command` and
+`env NAME=VALUE command` idioms) SHALL be rejected; non-leading args SHALL NOT be
+rejected on this pattern, and `-e`/`--env` SHALL NOT be rejected. This filtering is
+defense-in-depth: shell `-c` payloads and inline code can set environment at runtime;
+the primary defense is the empty base environment plus credential scrubbing plus
+egress gating.
 
 #### Scenario: var-equals-value-arg-is-rejected
 
-- **WHEN** the prove agent specifies `args: ["VAR=malicious", "command"]` for command `sh`
+- **WHEN** the prove agent specifies an arg starting with `NAME=VALUE` (e.g.
+  `args: ["VAR=malicious", "command"]`)
 - **THEN** the sandbox rejects the arg set before execution
 
-#### Scenario: minus-e-flag-is-rejected
+#### Scenario: shell-c-payload-can-set-env-at-runtime
 
-- **WHEN** the prove agent specifies `args: ["-e", "VAR=malicious", "command"]` for command `python3`
-- **THEN** the sandbox rejects the arg set before execution
+- **WHEN** the prove agent runs `sh -c "export VAR=malicious; cmd"` or
+  `python3 -c "import os; os.environ['VAR']='x'"`
+- **THEN** the arg filter does not block it (the `-c` payload is a single arg)
+- **THEN** the empty base environment and credential scrubber remain the primary defense
 
 #### Scenario: plain-args-without-env-patterns-are-allowed
 
 - **WHEN** the prove agent specifies `args: ["-c", "echo hello"]` for command `sh`
 - **THEN** execution proceeds normally
 
-### Requirement: env command output is restricted
+### Requirement: Environment-dump output is content-keyed redacted
 
-When the `env` command is on the sandbox allowlist (sandbox.py:103), its output SHALL be
-post-filtered to redact non-credential environment variables before the capture is stored
-as an artifact. Only the exit code SHALL be returned unredacted; env-var names and values
-SHALL be replaced with a count line.
+When any allowlisted command produces stdout matching an environment-dump shape, the
+sandbox SHALL redact it to a variable-count line. Detection SHALL be content-keyed:
+stdout with at least two KEY=VALUE lines comprising at least half of non-empty lines
+SHALL be redacted regardless of which command produced it. The exit code SHALL be
+preserved. Obfuscated dump forms (dict reprs, encodings) are outside detection scope;
+credential scrubbing still applies to them.
 
-#### Scenario: env-output-is-redacted
+#### Scenario: env-command-output-is-redacted
 
-- **WHEN** the prove agent runs `env` in the sandbox and the process environment contains
-  non-credential variables
-- **THEN** the stdout artifact contains only a count of variables present, not their names or values
+- **WHEN** the prove agent runs `env` in the sandbox
+- **THEN** the stdout artifact contains only a count of variables present (e.g.
+  `"<N> environment variables present (redacted)"`), not their names or values
+
+#### Scenario: printenv-via-shell-is-redacted
+
+- **WHEN** the prove agent runs `sh -c "printenv"` and stdout matches the env-dump shape
+- **THEN** the stdout is content-matched and replaced with the count line
+
+#### Scenario: python-env-dump-is-redacted
+
+- **WHEN** the prove agent runs
+  `python3 -c "import os; [print(k + '=' + v) for k, v in os.environ.items()]"`
+  and stdout matches the env-dump shape
+- **THEN** the stdout is content-matched and replaced with the count line
+
+#### Scenario: normal-command-output-passes-through
+
+- **WHEN** command output does not match the env-dump shape (fewer than two KEY=VALUE
+  lines, or fewer than half of non-empty lines match the pattern)
+- **THEN** the output passes through unchanged (with credential scrubbing still applied)
 
 #### Scenario: env-exit-code-is-preserved
 
-- **WHEN** the prove agent runs `env` in the sandbox
-- **THEN** the exit code in the SandboxExecCapture is the actual exit code of the env command
+- **WHEN** an env-dump is redacted
+- **THEN** the exit code in the SandboxExecCapture is the actual exit code of the command

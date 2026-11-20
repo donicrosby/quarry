@@ -110,6 +110,7 @@ def test_sinks_and_tools_no_longer_import_plugin_type_from_plugins_base() -> Non
         "quarry_integrations/sinks/__init__.py",
         "quarry_integrations/sinks/file_sink.py",
         "quarry_integrations/sinks/jira_dry_run.py",
+        "quarry_integrations/sinks/sarif.py",
         "quarry_integrations/sinks/slack_dry_run.py",
         "quarry_tools/treesitter.py",
         "quarry_tools/opengrep.py",

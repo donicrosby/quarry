@@ -22,6 +22,7 @@ from temporalio import activity
 from quarry.fingerprints import compute_fingerprint, compute_root_cause_key
 from quarry.panel_config import DEFAULT_PANEL, RoleConfig
 from quarry.schemas import (
+    MODEL_OMITTED_SEVERITY_RATIONALE_TEXT,
     AgentTask,
     CandidateFinding,
     Confidence,
@@ -29,17 +30,22 @@ from quarry.schemas import (
     HunterGap,
     Provider,
     Severity,
+    SeverityRationale,
     SourceRef,
     VulnerabilityClass,
+    model_omitted_severity_rationale,
 )
 from quarry_activities.event_sink import make_event_sink
 from quarry_activities.model_cost import persist_model_invocations
+from quarry_artifacts.local import LocalArtifactStore
 from quarry_artifacts.store import persist_seed_prompt
+from quarry_models.agent_log import compute_agent_instance_id
 from quarry_models.factory import build_model_client
 from quarry_models.loop import ToolCallRequest, run_agent_loop
 from quarry_models.mock_client import MockModelClient
 from quarry_models.rate_limit import get_limiter
 from quarry_models.types import BudgetSpec, PromptProvenance, ProviderPolicy
+from quarry_plugins.context.binary_analysis_context import merge_binary_analysis_context
 from quarry_plugins.context.kb_context import KbContextInjectorPlugin
 from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt, strip_provenance_header
@@ -90,11 +96,51 @@ def _parse_evidence_path(
     return []
 
 
+def _parse_severity_rationale(raw: dict[str, Any]) -> SeverityRationale:
+    """Map the model's ``severity_rationale`` sub-object into the contract.
+
+    Schema-enforced, not prompt-enforced: a model that omits one or more slots
+    still yields a valid finding. Missing slots are filled with the pinned
+    disclosure text and the rationale is flagged ``model_omitted=True`` — the
+    parser never fabricates a justification for the model.
+    """
+    value = raw.get("severity_rationale")
+    if not isinstance(value, dict):
+        return model_omitted_severity_rationale()
+    fields = cast("dict[str, Any]", value)
+    slots: dict[str, str] = {}
+    omitted = False
+    for slot in ("impact", "exploitability", "reachability"):
+        text = fields.get(slot)
+        if isinstance(text, str) and text.strip():
+            slots[slot] = text
+        else:
+            slots[slot] = MODEL_OMITTED_SEVERITY_RATIONALE_TEXT
+            omitted = True
+    evidence_refs: list[int] = []
+    raw_refs = fields.get("evidence_refs")
+    if isinstance(raw_refs, list):
+        for item in cast("list[object]", raw_refs):
+            if isinstance(item, bool):
+                continue
+            if isinstance(item, int) and item >= 0:
+                evidence_refs.append(item)
+    return SeverityRationale(
+        impact=slots["impact"],
+        exploitability=slots["exploitability"],
+        reachability=slots["reachability"],
+        evidence_refs=evidence_refs,
+        model_omitted=omitted,
+    )
+
+
 def _parse_finding(
     raw: dict[str, Any],
     scan_id: str,
     workspace_id: str,
     vuln_class: VulnerabilityClass,
+    *,
+    originating_model_id: str | None = None,
 ) -> CandidateFinding | None:
     """Convert a model-output finding dict to a CandidateFinding, or None on parse failure.
 
@@ -103,6 +149,13 @@ def _parse_finding(
     unreliable (it writes taxonomy labels like "Horizontal IDOR" or
     "URL_Manipulation" that are not canonical enum values). Trusting it caused real
     findings to be silently dropped, so we ignore it and use the assigned class.
+
+    Write-time credibility gate (credibility-economics): a hunter finding is a
+    *model judgment* — the model reasoned from the code it read — so it is tagged
+    ``grounded=False`` with the hunter's model id, and the tier discount applies
+    until the finding is corroborated. Deterministic tool sweeps (secrets, SSRF,
+    tempfile-race, terminal-escape, diff scan) tag their own findings
+    ``grounded=True`` at construction instead.
     """
     try:
         affected = raw.get("affected_component", "")
@@ -153,7 +206,10 @@ def _parse_finding(
             severity=severity,
             source_refs=source_refs,
             evidence_path=_parse_evidence_path(raw, file_path, start_line),
+            severity_rationale=_parse_severity_rationale(raw),
             root_cause_key=root_cause_key,
+            grounded=False,
+            originating_model_id=originating_model_id,
             created_by="hunt-agent",
             created_at=datetime.now(UTC),
             metadata={"fingerprint": fingerprint},
@@ -177,12 +233,21 @@ def hunt_impl(
     limiter: Any | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    context_window_tokens: int | None = None,
+    context_window_threshold: float = 0.8,
+    originating_model_id: str | None = None,
+    replay_mode: bool = False,
 ) -> tuple[list[CandidateFinding], list[HunterGap]]:
     """Core hunt implementation — callable from the activity and from tests.
 
     Returns ``(findings, coverage_gaps)``. Each ``HunterGap`` carries the area the
     hunter did not fully cover, its reason, and this hunter's ``vuln_class`` — so
     gapfill can turn it straight into a targeted re-hunt task.
+
+    ``context_window_tokens`` / ``context_window_threshold`` are the hunt role's
+    ``RoleConfig`` values, handed straight to ``run_agent_loop`` so a long-running
+    hunter's history is compressed instead of growing without bound. ``None``
+    (the default here) leaves the history unbounded.
 
     KB consumption by reference (cpc slice 3): when *kb_root_index_key* is
     supplied (the reference the kb-recon stage recorded on the scan metadata),
@@ -200,6 +265,13 @@ def hunt_impl(
     # Resolve KB references at execution time (activity-side I/O; the workflow
     # passes only the reference). The injector returns None when nothing
     # resolves, so domain_context keeps its existing assembled content.
+    #
+    # Binary analysis report consumption (slice-3 C6): the persisted hardening
+    # report rides alongside the KB context for security_misconfiguration tasks.
+    # Idempotent — a task already enriched by the activity-level merge (which
+    # also records provenance) is left unchanged.
+    task = merge_binary_analysis_context(task, artifact_root)
+
     effective_kb_key = (
         kb_root_index_key if kb_root_index_key is not None else task.kb_root_index_key
     )
@@ -279,6 +351,11 @@ def hunt_impl(
         turn_timeout_seconds=turn_timeout_seconds,
         tool_call_cap=tool_call_cap,
         limiter=limiter,
+        context_window_tokens=context_window_tokens,
+        context_window_threshold=context_window_threshold,
+        agent_instance_id=compute_agent_instance_id("hunt", task.id),
+        agent_log_store=LocalArtifactStore(artifact_root) if artifact_root else None,
+        replay_mode=replay_mode,
     )
 
     if artifact_root is not None:
@@ -298,9 +375,17 @@ def hunt_impl(
         hunt_class = task.vuln_class
         for raw in result.final_answer.findings:
             cf = (
-                _parse_finding(raw, task.scan_id, "local", hunt_class)
+                _parse_finding(
+                    raw,
+                    task.scan_id,
+                    "local",
+                    hunt_class,
+                    originating_model_id=originating_model_id,
+                )
                 if hunt_class is not None
-                else _parse_exploratory_finding(raw, task.scan_id)
+                else _parse_exploratory_finding(
+                    raw, task.scan_id, originating_model_id=originating_model_id
+                )
             )
             if cf is not None:
                 findings.append(cf)
@@ -319,6 +404,8 @@ def hunt_impl(
 def _parse_exploratory_finding(
     raw: dict[str, Any],
     scan_id: str,
+    *,
+    originating_model_id: str | None = None,
 ) -> CandidateFinding | None:
     """Parse an exploratory hunter's finding, taking the class from the model.
 
@@ -333,7 +420,9 @@ def _parse_exploratory_finding(
         vuln_class = VulnerabilityClass(raw_class)
     except ValueError:
         return None
-    return _parse_finding(raw, scan_id, "local", vuln_class)
+    return _parse_finding(
+        raw, scan_id, "local", vuln_class, originating_model_id=originating_model_id
+    )
 
 
 @activity.defn(name="hunt-vuln-class")
@@ -347,6 +436,7 @@ def hunt_activity(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     """Temporal activity: hunt for vulnerabilities in one (vuln_class, scope) task.
 
@@ -388,6 +478,7 @@ def hunt_activity(
             scan_seed,
             artifact_root,
             kb_root_index_key,
+            replay_mode,
         )
     finally:
         stop_heartbeat.set()
@@ -404,6 +495,7 @@ def _hunt_activity_impl(
     scan_seed: int | None = None,
     artifact_root: str | None = None,
     kb_root_index_key: str | None = None,
+    replay_mode: bool = False,
 ) -> dict[str, Any]:
     if isinstance(task, dict):
         task = AgentTask.model_validate(task)
@@ -439,6 +531,12 @@ def _hunt_activity_impl(
     )
     _, kb_resolved, kb_record_keys = kb_injector.last_resolution
 
+    # Binary analysis report consumption (slice-3 C6): merge the persisted
+    # hardening report into the task's domain_context and record its provenance
+    # before rendering. Absent artifact or a non-matching class leaves the task
+    # unchanged (portability invariant).
+    task = merge_binary_analysis_context(task, artifact_root)
+
     findings, coverage_gaps = hunt_impl(
         task=task,
         repo_path=repo_path,
@@ -452,6 +550,10 @@ def _hunt_activity_impl(
         limiter=limiter,
         artifact_root=artifact_root,
         kb_root_index_key=effective_kb_key,
+        context_window_tokens=role_cfg.context_window_tokens,
+        context_window_threshold=role_cfg.context_window_threshold,
+        originating_model_id=role_cfg.model,
+        replay_mode=replay_mode,
     )
 
     persist_model_invocations(db_path, task.scan_id, client)

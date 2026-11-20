@@ -107,6 +107,24 @@ A path is VULNERABLE if attacker-controlled name/type/content survives into
 storage or a served response without an effective server-side check.
 </methodology>
 
+<test_cases>
+For each upload handler, reason about these four cases (name the one the code
+fails to stop; the live probe only ever sends an inert marker):
+1. PHP shell upload — a `.php`/`.phtml` filename whose content is a marker.
+   Vulnerable when no server-side extension allow-list rejects it and the file
+   lands where the web server can execute or serve it.
+2. Path traversal in filename — a `../../` / absolute filename.
+   Vulnerable when the client filename is joined to the upload dir without
+   sanitisation, so the write (and any later read) escapes the intended dir.
+3. Content-type bypass — a dangerous extension declared with a benign
+   content-type, or a benign extension declared dangerous.
+   Vulnerable when the handler trusts the declared content-type (or ignores it)
+   instead of sniffing magic bytes.
+4. Oversized file DoS — a file far larger than any legitimate upload.
+   Vulnerable when no server-side size/quantity cap exists (the body is read
+   fully into memory or written unbounded).
+</test_cases>
+
 <examples>
 Illustrative vulnerable patterns (different languages; NOT specific to this repo —
 do not assume these files exist here; use them to recognise the shape of the bug):

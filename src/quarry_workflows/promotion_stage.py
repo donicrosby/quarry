@@ -118,6 +118,8 @@ def final_from_candidate(candidate: CandidateFinding, scan_id: str, now: Any) ->
         fingerprint=candidate.metadata.get("fingerprint", candidate.id),
         vuln_class=candidate.vuln_class,
         severity=candidate.severity,
+        # Contract survives candidate→final promotion verbatim (finding-contract).
+        severity_rationale=candidate.severity_rationale,
         # Calibration mirror (severity-calibration capability): a candidate
         # already calibrated upstream keeps its calibrated fields on promotion;
         # the workflow's CALIBRATE stage stamps them post-validation too.
@@ -189,6 +191,7 @@ def promote_with_dynamic_evidence(
         fingerprint=candidate.metadata.get("fingerprint", candidate.id),
         vuln_class=candidate.vuln_class,
         severity=candidate.severity,
+        severity_rationale=candidate.severity_rationale,
         title=candidate.title,
         summary=candidate.hypothesis,
         affected_component=candidate.affected_component,

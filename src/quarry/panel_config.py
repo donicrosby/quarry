@@ -101,6 +101,13 @@ class RoleConfig(BaseModel):
     # Per-role caps (also settable per tier). Unset = bounded only by global caps.
     tool_call_cap: int | None = None
     thinking_budget_tokens: int | None = None
+    # Per-role context-window enforcement (hunter-context-reset). Unset = unbounded
+    # history growth (the pre-reset behaviour). When set, the agent loop folds all
+    # but the most recent turns into a summary once the accumulated history reaches
+    # ``context_window_threshold`` of this limit.
+    context_window_tokens: int | None = None
+    # Fraction of ``context_window_tokens`` that triggers a history reset.
+    context_window_threshold: float = 0.8
     # Optional ordered tier set. Empty = single-model role (implicit reasoner tier).
     tiers: list[ModelTier] = Field(default_factory=_empty_tiers)
 
@@ -154,7 +161,11 @@ def enforce_vendor_allowlist(panel: dict[str, RoleConfig], allowlist: list[str])
 # The default built-in panel.  All roles fall back here if not overridden.
 DEFAULT_PANEL: dict[str, RoleConfig] = {
     "recon": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
-    "hunt": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
+    # Hunters accumulate the most conversation history (read_file/grep output over
+    # 40 iterations), so the hunt role carries a conservative limit out of the box.
+    "hunt": RoleConfig(
+        provider=Provider.MOCK, model="mock-v1", rpm=30, context_window_tokens=32000
+    ),
     "validate": RoleConfig(provider=Provider.MOCK, model="mock-v1", rpm=30),
     # calibrate: post-validation severity calibration (severity-calibration
     # capability). Separate from validate to keep the adversarial-review
@@ -306,6 +317,28 @@ class ScanConfig(BaseModel):
     reasoning_lexicon: ReasoningLexiconConfig | None = None
 
 
+class CredibilityConfig(BaseModel):
+    """Write-time credibility gating + corroboration cascade budget (``[credibility]``).
+
+    Presence of this section in quarry.toml enables the credibility economics:
+    write-time tier discounting feeds the cascade's step-1 gate and the coverage
+    ledger's covered-cell test, and the cascade runs before the debater.
+
+    ``probe_budget`` / ``model_budget`` are per-scan hard ceilings on the two
+    independent counters (deterministic probe units and paid debater calls).
+    ``unlimited`` is an EXPLICIT per-counter opt-in: a zero cap with no
+    ``*_unlimited`` flag still gates, it never silently means unlimited.
+    ``severity_threshold`` is the step-3 passive-pass bound — a finding whose
+    severity ranks below it is resolved without spending probe or model budget.
+    """
+
+    probe_budget: int = 20
+    model_budget: int = 5
+    probe_unlimited: bool = False
+    model_unlimited: bool = False
+    severity_threshold: Severity = Severity.MEDIUM
+
+
 class IntegrationTomlEntry(BaseModel):
     """One ``[integrations.<name>]`` table in quarry.toml.
 
@@ -328,6 +361,11 @@ class QuarryConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     integrations: dict[str, IntegrationTomlEntry] = Field(default_factory=dict)
     scan: ScanConfig = Field(default_factory=ScanConfig)
+    # Write-time credibility economics + the cost-ordered corroboration cascade.
+    # ``None`` means the ``[credibility]`` section is absent, and the scan keeps
+    # the pre-change behaviour: no write-time discounting, no cascade, no
+    # tier-aware coverage cells.
+    credibility: CredibilityConfig | None = None
 
 
 def _check_for_credentials(raw: dict[str, Any]) -> None:

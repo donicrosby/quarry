@@ -71,6 +71,12 @@ def emit_agent_tasks(
     the scan metadata by the kb-recon stage (cpc slice 3): it is stamped onto
     every emitted task so the hunt stage consumes the KB by reference. The
     task carries only the reference — record content is resolved at hunt time.
+
+    Each returned task is PERSISTED by the workflow as an ``AgentTask`` row
+    (``save_agent_task``, upsert-by-id) before it is hunted, so the emitted
+    ``id`` is the task's durable identity — not a throwaway. Replay resolves
+    the same instance by loading those rows and overlaying their ids
+    (``quarry_replay.resolvers``), rather than re-deriving a fresh ``uuid4``.
     """
     with suppress(RuntimeError):
         activity.heartbeat()

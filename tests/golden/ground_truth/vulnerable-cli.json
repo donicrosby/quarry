@@ -24,5 +24,34 @@
       "args": ["--read-file", "../../../etc/passwd"],
       "proof_signal": "root:"
     }
+  },
+  {
+    "id": "gt-tempfile-race-write-temp",
+    "vuln_class": "tempfile_race",
+    "file_path": "src/main.rs",
+    "route": null,
+    "severity": "high",
+    "expected_fingerprint_hint": "tempfile_race:src/main.rs:write-temp",
+    "cli_invocation": {
+      "command": "./target/release/vulnerable-cli",
+      "args": ["--write-temp", "benign-content"],
+      "input_files": {
+        "vulnerable-cli-tmp": "ATTACKER-PLANTED-CONTENT"
+      },
+      "proof_signal": "ATTACKER-PLANTED-CONTENT"
+    }
+  },
+  {
+    "id": "gt-terminal-escape-echo-input",
+    "vuln_class": "terminal_escape",
+    "file_path": "src/main.rs",
+    "route": null,
+    "severity": "medium",
+    "expected_fingerprint_hint": "terminal_escape:src/main.rs:echo-input",
+    "cli_invocation": {
+      "command": "./target/release/vulnerable-cli",
+      "args": ["--echo-input", "\u001b[2J\u001b[Hpwned"],
+      "proof_signal": "\u001b[2J"
+    }
   }
 ]

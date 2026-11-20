@@ -29,6 +29,12 @@ class StartScanRequest(BaseModel):
     # True for benchmark scoring runs: forces integrations off (no lifecycle
     # hook or sink fires), regardless of quarry.toml [integrations.*].
     benchmark: bool = False
+    # Optional client-provided context-injector allowlist. When non-None the
+    # server uses it as the scan's active plugin list, overriding quarry.toml
+    # scan_defaults.plugins_active; None falls back to the toml default
+    # (backward-compatible). Benchmark runs still force empty downstream via
+    # effective_plugins_active.
+    plugins_active: list[str] | None = None
 
 
 class DiffScanRequest(BaseModel):

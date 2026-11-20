@@ -1,5 +1,6 @@
 """Quarry configuration management."""
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,9 +47,47 @@ class QuarrySettings(BaseSettings):
     redis_url: str = ""  # env: QUARRY_REDIS_URL      (used when backend=redis)
     s3_bucket: str = ""  # env: QUARRY_S3_BUCKET      (used when backend=s3)
 
+    # Network-backend tuning (ADR-024 §B).
+    # Max artifact size the Redis backend will accept (larger -> ValueError, use S3).
+    redis_max_artifact_bytes: int = 1_048_576  # env: QUARRY_REDIS_MAX_ARTIFACT_BYTES
+    # Bounded retry for transient network failures on put_bytes/get_bytes.
+    artifact_retry_max_attempts: int = 3  # env: QUARRY_ARTIFACT_RETRY_MAX_ATTEMPTS
+    artifact_retry_backoff_seconds: float = 1.0  # env: QUARRY_ARTIFACT_RETRY_BACKOFF_SECONDS
+
     # Sandbox execution backend (ADR-022 §A).
     # "" or "local"     => LocalSubprocessSandbox (default, dev/test, no Docker required).
     # "container"       => ContainerSandbox Tier 2 (Docker/Podman, production default).
     # "k8s_job"         => K8sJobSandbox Tier 3 (deferred; multi-tenant only).
     sandbox_backend: str = ""  # env: QUARRY_SANDBOX_BACKEND
     sandbox_image: str = ""  # env: QUARRY_SANDBOX_IMAGE (override default container image)
+    # Container memory cap for the Tier-2 sandbox (Docker ``--memory`` value,
+    # e.g. "2g").  Empty => the backend default (DEFAULT_MEMORY_LIMIT).  A
+    # browser-capable worker executing untrusted page JS must be capped so a
+    # runaway Chromium is OOM-killed rather than starving the host.
+    # env: QUARRY_SANDBOX_MEMORY
+    sandbox_memory: str = ""
+
+    # SSRF/XXE canary sidecar (Tier 2).  The canary listener must be published on
+    # a single pinned host interface the target can reach — never a wildcard.
+    # Empty means no Tier-2 canary (the listener fails closed).  env: QUARRY_CANARY_HOST
+    canary_host: str = ""
+    canary_image: str = ""  # env: QUARRY_CANARY_IMAGE (override default canary image)
+    # Dependency-manifest supply-chain scanner. Configurable typosquat name
+    # patterns; the check is a no-op until at least one pattern is configured.
+    # env: QUARRY_TYPOSQUAT_PATTERNS (JSON array, e.g. '["dateutil","lodassh"]')
+    typosquat_patterns: list[str] = Field(default_factory=list)
+    # Proof-artifact quarantine (D6 / proof-artifact-quarantine). Per-kind size
+    # limits in bytes, enforced before any artifact byte is accepted; the default
+    # covers kinds without an explicit limit. A quarantined proof artifact is
+    # local-only unless quarantine_remote_backend names the one remote backend the
+    # operator has explicitly opted in as a quarantine destination.
+    quarantine_max_tool_output_bytes: int = 1_048_576
+    # env: QUARRY_QUARANTINE_MAX_TOOL_OUTPUT_BYTES
+    quarantine_max_http_response_bytes: int = 104_857_600
+    # env: QUARRY_QUARANTINE_MAX_HTTP_RESPONSE_BYTES
+    quarantine_max_code_snippet_bytes: int = 5_242_880
+    # env: QUARRY_QUARANTINE_MAX_CODE_SNIPPET_BYTES
+    quarantine_max_artifact_bytes: int = 104_857_600
+    # env: QUARRY_QUARANTINE_MAX_ARTIFACT_BYTES
+    quarantine_remote_backend: str = ""  # env: QUARRY_QUARANTINE_REMOTE_BACKEND
+    malware_scanner: str = ""  # env: QUARRY_MALWARE_SCANNER ("" = no scanner configured)

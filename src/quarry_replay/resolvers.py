@@ -84,6 +84,11 @@ class HuntInputs:
     repo_path: str
     kb_root_index_key: str | None
     panel: PanelSelection
+    # The scan's artifact-store root. Threaded so a replay hands the hunt
+    # activity the same store the original run wrote its per-agent log to
+    # (``runner.artifact_root_of`` reads this field) — replay then appends to
+    # the original ``agents/<scan_id>/hunt/<instance_id>.jsonl``.
+    artifact_root: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,8 @@ def _panel_for_scan_role(
                 rpm=entry.rate_limit_rpm,
                 turn_timeout_seconds=entry.turn_timeout_seconds,
                 tiers=tiers,
+                context_window_tokens=entry.context_window_tokens,
+                context_window_threshold=entry.context_window_threshold,
             ),
         )
     return _resolve_panel_selection(
@@ -285,13 +292,23 @@ def resolve_hunt_inputs(
     vuln_class: str,
     panel_name: str | None = None,
     mock: bool = False,
+    artifact_root: str | None = None,
 ) -> HuntInputs:
     """Resolve ``hunt_activity(task, repo_path, ...)`` inputs from persisted state.
 
-    AgentTasks are NOT persisted (the scan DB's ``load_agent_tasks`` re-derives
-    them), so the resolver reconstructs the task the same way the workflow
-    does: one per (vuln_class, scope) pair from the persisted ArchitectureDoc
-    — via ``emit_agent_tasks`` itself, so the shape cannot drift.
+    Unlike the finding-driven stages (whose ids come straight from a persisted
+    ``CandidateFinding.id`` / ``scan_id`` / assignment name), hunt tasks are
+    re-derived rather than looked up: the resolver rebuilds the task shape from
+    the persisted ArchitectureDoc via ``emit_agent_tasks`` itself, so the shape
+    cannot drift from the emitter. But the workflow DOES persist every emitted
+    task (``save_agent_task`` upsert-by-id), and ``emit_agent_tasks`` mints a
+    fresh ``uuid4`` per call — so a lone re-derivation would give the replay a
+    new id and write a new, uncorrelated per-agent log. To reconstruct the
+    ORIGINAL instance, the fresh derivation is overlaid with the persisted
+    task ids (see :func:`_overlay_persisted_task_ids`), so ``run_agent_loop``
+    keys the log file off the same id the original run used and the replay
+    appends to ``agents/<scan_id>/hunt/<instance_id>.jsonl`` (spec Req-3
+    scenario 1).
     """
     scan = load_scan(db_path, scan_id)
 
@@ -305,7 +322,10 @@ def resolve_hunt_inputs(
             "stage never completed, so hunt tasks cannot be reconstructed"
         )
         raise ReplayResolutionError(msg)
-    tasks = _emit_tasks(doc, scan_id, scan)
+    tasks = _overlay_persisted_task_ids(
+        _emit_tasks(doc, scan_id, scan),
+        _read(db_path, lambda r: r.load_agent_tasks(scan_id)),
+    )
     matching = [t for t in tasks if t.vuln_class is not None and t.vuln_class.value == vuln_class]
     if not matching:
         requested = sorted({t.vuln_class.value for t in tasks if t.vuln_class is not None})
@@ -320,7 +340,41 @@ def resolve_hunt_inputs(
         repo_path=repo_path,
         kb_root_index_key=_metadata_str(scan, "kb_root_index_key"),
         panel=panel,
+        artifact_root=artifact_root,
     )
+
+
+def _overlay_persisted_task_ids(
+    derived: list[AgentTask], persisted: list[AgentTask]
+) -> list[AgentTask]:
+    """Overlay persisted hunt-task ids onto the freshly re-derived tasks.
+
+    ``emit_agent_tasks`` mints a fresh ``uuid4`` per call, but the workflow
+    persists every emitted task (``save_agent_task``), so the original id is
+    recoverable from the scan DB and is what keys the per-agent execution log.
+    Recon-derived originals (``source == "recon"``, emitted in round 0) are the
+    tasks this resolver reproduces; they are keyed by ``task_name`` — the
+    (vuln_class, scope) pair the emitter stamps — and their persisted ``id`` is
+    copied onto the matching re-derived task. ``task_name`` is unique per pair,
+    so a ``setdefault`` (persisted rows arrive ordered by round_index then id)
+    keeps the original when a later round re-emitted the same pair.
+
+    A scan with no persisted recon tasks (one predating task persistence)
+    leaves the derived tasks untouched: there is no original id to recover and
+    the fresh derivation is the only shape available.
+    """
+    originals: dict[str, AgentTask] = {}
+    for task in persisted:
+        if task.source == "recon":
+            originals.setdefault(task.task_name, task)
+    if not originals:
+        return derived
+    return [
+        task.model_copy(update={"id": originals[task.task_name].id})
+        if task.task_name in originals
+        else task
+        for task in derived
+    ]
 
 
 def _emit_tasks(doc: ArchitectureDoc, scan_id: str, scan: Scan) -> list[AgentTask]:

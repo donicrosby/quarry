@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -19,6 +20,7 @@ from temporalio.exceptions import is_cancelled_exception
 # Imported at workflow-module load (not lazily inside functions) so the Temporal
 # sandbox loads it before freezing — avoids the "imported after initial workflow
 # load" determinism warning.
+from quarry.egress import build_egress_policy, build_prove_sandbox_policy
 from quarry.fingerprints import compute_fingerprint as _compute_fingerprint
 from quarry.panel_config import ModelTier as _ModelTier
 from quarry.panel_config import RoleConfig as _RoleConfig
@@ -33,12 +35,14 @@ from quarry.schemas import (
     AuthzMatrixResult,
     CallGraph,
     CandidateFinding,
+    EntryPoint,
     ExploitChain,
     ExploitStep,
     FinalFinding,
     FindingStatus,
     HttpRequestSpec,
     HttpResponseCapture,
+    HuntHandoff,
     IntegrationConfig,
     IntegrationStatus,
     KBRootIndex,
@@ -83,18 +87,24 @@ from quarry_activities.inputs import (
     CloneRepoResult,
     CreateSnapshotInput,
     DispatchLifecycleHooksInput,
+    FuzzSpec,
     HttpRequestActivityInput,
+    LoadHandoffArtifactsInput,
+    LoadHandoffArtifactsOutput,
     ReadArtifactTextInput,
+    ReconSynthesisOutput,
     RenderReportInput,
     RenderReportOutput,
     SandboxExecActivityInput,
     ScanSecretsInput,
     ValidateCandidateInput,
+    WriteHandoffArtifactsInput,
+    WriteHandoffArtifactsOutput,
 )
 from quarry_activities.read_artifact import body_text_from_response_artifact
 from quarry_activities.repo import create_repository_snapshot
 from quarry_activities.reporting import render_markdown_report
-from quarry_activities.validation import SecretValidationResult
+from quarry_activities.validation import FuzzValidationResult, SecretValidationResult
 
 # Live-verdict vocabulary + per-class registry dispatch (ADR-017). Canonical
 # definitions live in quarry_activities.verdict_evaluators; re-exported here
@@ -103,8 +113,14 @@ from quarry_activities.validation import SecretValidationResult
 from quarry_activities.verdict_evaluators import (  # noqa: F401
     LIVE_CORROBORATED,
     LIVE_INCONCLUSIVE,
+    TIMING_ATTACK_SAMPLES,
+    TIMING_BASELINE_SAMPLES,
+    TIMING_STATISTICAL_PASS,
     VERDICT_SOURCE_DEFAULT,
+    VERDICT_SOURCE_PER_CLASS,
     LiveProbeEvidence,
+    VerdictReceipt,
+    evaluate_live_verdict_with_receipt,
     evaluate_live_verdict_with_source,
     resolve_evaluator_spec,
 )
@@ -123,10 +139,17 @@ from quarry_persistence import QuarryRepository
 # quarry_workflows.candidate_sources (cruft-purge §5.1); tests and integration
 # callers still import them from this module.
 from quarry_workflows.candidate_sources import (  # noqa: F401
+    fuzz_candidates_from_activity_payload as fuzz_candidates_from_activity_payload,
+)
+from quarry_workflows.candidate_sources import (  # noqa: F401
     secret_candidates_from_activity_payload as secret_candidates_from_activity_payload,
 )
 from quarry_workflows.candidate_sources import (  # noqa: F401
     ssrf_candidates_from_activity_payload as ssrf_candidates_from_activity_payload,
+)
+from quarry_workflows.candidate_sources import (
+    tempfile_race_candidates_from_activity_payload,
+    terminal_escape_candidates_from_activity_payload,
 )
 from quarry_workflows.coverage_loop import (
     build_feedback_tasks,
@@ -162,6 +185,7 @@ from quarry_workflows.coverage_stage import (  # noqa: F401
     skipped_task_records as skipped_task_records,
 )
 from quarry_workflows.exploitation_loop import (
+    build_request_spec,
     evaluate_exploit_success,
     exploit_chain_to_candidate,
 )
@@ -191,6 +215,7 @@ from quarry_workflows.promotion_stage import (  # noqa: F401
 )
 from quarry_workflows.prove_stage import (
     build_prior_attempt_record,
+    canary_token_for,
     filter_needs_proof,
     prioritize_by_live_verdict,
     prove_outcome_from_captures,
@@ -300,6 +325,10 @@ def _empty_run_plugins_active() -> list[str]:
     return []
 
 
+def _empty_typosquat_patterns() -> list[str]:
+    return []
+
+
 class RunScanInput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -313,6 +342,9 @@ class RunScanInput(BaseModel):
     repo_url: str | None = None
     resume: bool = False
     vuln_classes: list[VulnerabilityClass] = Field(default_factory=_empty_run_vuln_classes)
+    # Typosquat name patterns for the pre-recon dependency-manifest scanner
+    # (resolved from QuarrySettings outside the workflow). Empty = no-op.
+    typosquat_patterns: list[str] = Field(default_factory=_empty_typosquat_patterns)
     hunt_max_concurrent: int = 8
     # Cap on concurrently in-flight per-finding ``tracer-finding`` activities in
     # the TRACER stage (scan-stage-fanout). Trace is heavier per call than hunt,
@@ -339,6 +371,11 @@ class RunScanInput(BaseModel):
     # quarry.toml [scan_defaults].dynamic_validate_max_concurrent by the API
     # layer; 1 restores the historical serial behavior.
     dynamic_validate_max_concurrent: int = 8
+    # Per-scan sub-budget for timing-oracle probes (verify-oracle-upgrade): the
+    # dynamic-validation stage dispatches at most this many timing HTTP requests
+    # (baseline + attack + ladder) per scan. Independent of the dollar-cost
+    # validation budget; the ladder re-probe batch only fires with ≥ M headroom.
+    dynamic_timing_probe_limit: int = 20
     hunt_max_iterations: int = 12
     validate_max_iterations: int = 20
     gapfill_max_iterations: int = 20
@@ -377,6 +414,10 @@ class RunScanInput(BaseModel):
     # dispatch passed hours=1; the configured default (300s) is applied by the
     # API layer and documented in the §3.7 PR.
     calibrate_start_to_close_seconds: int = 3600
+    # Write-time credibility economics + the cost-ordered corroboration cascade
+    # (quarry.toml [credibility]). None means the section is absent and the scan
+    # keeps the pre-change behaviour; the API layer serialises the section here.
+    credibility_config_json: str | None = None
     # Per-scan cumulative cost cap (quarry.toml [budget] max_cost_per_scan_usd).
     # None disables budget gating.
     budget_cap_usd: float | None = None
@@ -468,6 +509,10 @@ class RunScanWorkflow:
         self._current_stage = "CREATED"
         # Overridden per-run in _run() from RunScanInput.activity_max_attempts.
         self._retry_policy = ACTIVITY_RETRY_POLICY
+        # versioned-handoff-artifacts: scope units covered by hunt rounds so far
+        # (seeded from the loaded HuntHandoff on a cold-start resume, so a
+        # re-written handoff never loses the covered set).
+        self._covered_scope_units: set[str] = set()
 
     @workflow.query
     def get_stage(self) -> str:
@@ -553,6 +598,13 @@ class RunScanWorkflow:
             origin_commit_sha = clone_result.commit_sha
 
         if persisted_scan is None:
+            # versioned-handoff-artifacts: source the durable cross-scan ordinal
+            # for this target (max recorded + 1) so a second scan on the same
+            # repo carries a strictly higher scan_ordinal.
+            next_ordinal = await _persist_scan_state(
+                scan_input.db_path, "load_scan_ordinal", {"repo_path": repo_path}
+            )
+            scan_ordinal = next_ordinal if isinstance(next_ordinal, int) and next_ordinal > 0 else 1
             target = Target(
                 id=str(workflow.uuid4()),
                 workspace_id="local",
@@ -598,6 +650,9 @@ class RunScanWorkflow:
                     # GET /scans/{id}; coverage_round_index is updated every
                     # round (see the loop in _run()).
                     "max_coverage_rounds": scan_input.max_coverage_rounds,
+                    # versioned-handoff-artifacts: durable scan ordinal, read
+                    # back on resume so artifact stamps stay stable.
+                    "scan_ordinal": scan_ordinal,
                 },
             )
             await _persist_scan_state(
@@ -636,6 +691,11 @@ class RunScanWorkflow:
 
         scan_manifest = await self._record_manifest(scan_input, scan)
 
+        # Candidate accumulator: declared pre-RECON so the deterministic
+        # dependency-manifest sweep below can seed it; the coverage loop appends
+        # agent/sweep candidates as it runs.
+        candidate_findings: list[CandidateFinding] = []
+
         snapshot: RepositorySnapshot | None = None
         if not _stage_completed(completed_stage, "SNAPSHOT"):
             self._current_stage = "SNAPSHOT"
@@ -667,6 +727,44 @@ class RunScanWorkflow:
                 },
             )
             await _persist_scan_stage(scan_input.db_path, scan.id, "SNAPSHOT")
+
+        # ── Deterministic dependency-manifest sweep (pre-recon) ──────────────
+        # Static supply-chain scan of the five manifest formats; deterministic,
+        # no model calls, no network. Runs between SNAPSHOT and RECON (no new
+        # canonical stage) and feeds its findings into the candidate pool so
+        # they flow through the normal validate/dedup pipeline. Gated on the
+        # SUPPLY_CHAIN class being in scope, mirroring the secrets/SSRF sweeps.
+        if VulnerabilityClass.SUPPLY_CHAIN in scan.profile.vuln_classes:
+            dependency_raw = await workflow.execute_activity(
+                "dependency-risk-scanner",
+                args=[
+                    repo_path,
+                    json.dumps({"typosquat_patterns": scan_input.typosquat_patterns}),
+                ],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=self._retry_policy,
+            )
+            dependency_candidates = _candidate_findings_from_activity(dependency_raw)
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in dependency_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                stamped = candidate.model_copy(
+                    update={"scan_id": scan.id, "created_at": workflow.now()}
+                )
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(stamped)},
+                )
+                candidate_findings.append(stamped)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": stamped.id, "source": "dependency-risk-scan"},
+                )
 
         # ── RECON stage ──────────────────────────────────────────────────────
         # Runs the recon agent (orchestrator → subsystems → synthesis) to
@@ -765,7 +863,15 @@ class RunScanWorkflow:
 
             synthesis_payload = await workflow.execute_activity(
                 "recon-synthesis",
-                args=[subsystems, repo_path, scan.id, scan_input.output_dir],
+                args=[
+                    subsystems,
+                    repo_path,
+                    scan.id,
+                    scan_input.output_dir,
+                    artifact_root,
+                    _scan_ordinal(scan),
+                    1,
+                ],
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=self._retry_policy,
             )
@@ -775,6 +881,15 @@ class RunScanWorkflow:
                 "save_architecture_doc",
                 {"scan_id": scan.id, "doc": _model_json_dict(arch_doc)},
             )
+            # versioned-handoff-artifacts (recon-and-architecture): the versioned
+            # architecture-doc artifact's ref is recorded in the scan state.
+            arch_ref = _recon_artifact_ref(synthesis_payload)
+            if arch_ref is not None:
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_artifact_ref",
+                    {"scan_id": scan.id, "artifact_ref": _model_json_dict(arch_ref)},
+                )
 
             # ── Knowledge Base recon (candidate-precision-and-calibration, D3) ──
             # Built ONCE per scan, inside RECON, BEFORE the hunt stage. The KB
@@ -829,6 +944,49 @@ class RunScanWorkflow:
                     {"error": _describe_failure(exc)},
                 )
 
+            # ── Binary analysis (slice-3 C6) ────────────────────────────────
+            # Deterministic, read-only static inspection of the repo's binaries
+            # (file type, hardening, linked libraries, SUID/sgid, symlinks),
+            # run inside RECON BEFORE the hunt stage. The report is persisted to
+            # the artifact store under a well-known key; the hunt/gapfill stages
+            # consume it at execution time. Best-effort like kb-recon: a failure
+            # never blocks the scan — the injector returns None when the report
+            # is absent.
+            try:
+                binary_payload = await workflow.execute_activity(
+                    "binary-analysis",
+                    args=[repo_path, artifact_root],
+                    start_to_close_timeout=timedelta(minutes=10),
+                    heartbeat_timeout=timedelta(minutes=3),
+                    retry_policy=self._retry_policy,
+                )
+                binary_key = _binary_analysis_key_from_activity(binary_payload)
+                if binary_key is not None:
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "update_scan_metadata",
+                        {
+                            "scan_id": scan.id,
+                            "metadata": {
+                                "binary_analysis_artifact_key": binary_key,
+                                "binary_analysis_completed_at": workflow.now().isoformat(),
+                            },
+                        },
+                    )
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "binary_analysis.completed",
+                        {"artifact_key": binary_key},
+                    )
+            except Exception as exc:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "binary_analysis.failed",
+                    {"error": _describe_failure(exc)},
+                )
+
             # Emit one AgentTask per (vuln_class, scope)
             emit_payload = await workflow.execute_activity(
                 "emit-agent-tasks",
@@ -867,7 +1025,6 @@ class RunScanWorkflow:
         # completed_stage-based resume only applies to round 0 — resuming a
         # partially-run loop (round_index > 0) is not supported (see
         # openspec/changes/iterative-coverage-loop/design.md Non-Goals).
-        candidate_findings: list[CandidateFinding] = []
         final_findings: list[FinalFinding] = []
         needs_proof_findings: list[CandidateFinding] = []
         proof_artifacts: list[ProofArtifact] = []
@@ -920,6 +1077,77 @@ class RunScanWorkflow:
                     {"finding_id": candidate.id, "source": "ssrf-sweep"},
                 )
 
+        # ── Deterministic tempfile-race + terminal-escape sweeps (C8/C9) ─────
+        # CLI-side presence-shaped classes: predictable temp paths / deprecated
+        # name-then-open tempfile APIs, and attacker-controlled input echoed to
+        # a terminal without ANSI sanitization. Same answer as secrets/SSRF —
+        # the deterministic sweep owns detection and feeds ordinary candidates
+        # through the same validate/dedup/promotion pipeline; exploitability
+        # adjudication stays with the agentic ensemble + the per-class hunt
+        # template. Runs once before the coverage loop; resume-safe via the
+        # existing candidate-id dedup.
+        if VulnerabilityClass.TEMPFILE_RACE in scan.profile.vuln_classes:
+            tempfile_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-tempfile-races",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            tempfile_candidates = tempfile_race_candidates_from_activity_payload(
+                tempfile_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in tempfile_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "tempfile-race-sweep"},
+                )
+
+        if VulnerabilityClass.TERMINAL_ESCAPE in scan.profile.vuln_classes:
+            terminal_matches_raw = await workflow.execute_activity(
+                "scan-repo-for-terminal-escapes",
+                ScanSecretsInput(repo_root=repo_path),
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(minutes=3),
+                retry_policy=self._retry_policy,
+            )
+            terminal_candidates = terminal_escape_candidates_from_activity_payload(
+                terminal_matches_raw,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+            )
+            existing_ids = {c.id for c in candidate_findings}
+            for candidate in terminal_candidates:
+                if candidate.id in existing_ids:
+                    continue  # resume: sweep candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "terminal-escape-sweep"},
+                )
+
         # ── Live-exploitation track (Shannon pillar; design D1) ──────────────
         # When live exploitation is authorized, the app-centric loop (live recon →
         # stateful propose→dispatch exploit chain) runs against the target and feeds
@@ -964,6 +1192,24 @@ class RunScanWorkflow:
         elif start_round == LOOP_DONE:
             round_tasks = []
 
+        # ── Cold-start resume from handoff artifacts (versioned-handoff-artifacts) ──
+        # When a resumed scan re-enters HUNT (the last checkpoint is RECON — a
+        # prior run wrote the handoff but never checkpointed HUNT completion),
+        # load the three cold-start artifacts and launch only the tasks whose
+        # scope units were not already covered. Findings recorded before the
+        # interruption are rehydrated from the DB so none are silently dropped.
+        if scan_input.resume and start_round == 0 and not _stage_completed(completed_stage, "HUNT"):
+            round_tasks, handoff_loaded = await self._resume_from_handoff_artifacts(
+                scan_input, scan, artifact_root, round_tasks
+            )
+            if handoff_loaded:
+                loaded_candidates = await _load_candidate_findings(scan_input.db_path, scan.id)
+                loaded_finals = await _load_final_findings(scan_input.db_path, scan.id)
+                candidate_findings.clear()
+                candidate_findings.extend(loaded_candidates)
+                final_findings.clear()
+                final_findings.extend(loaded_finals)
+
         for round_index in range(
             start_round if start_round > 0 else 0, scan_input.max_coverage_rounds
         ):
@@ -989,6 +1235,7 @@ class RunScanWorkflow:
                 scan,
                 repo_path,
                 artifact_root,
+                arch_doc,
                 hunt_panel_json,
                 kb_root_index_key,
                 round_index,
@@ -1036,6 +1283,12 @@ class RunScanWorkflow:
                     agent_tasks_total=len(all_agent_tasks),
                     agent_tasks_scanned=len(all_agent_tasks),
                     skipped_items=[],
+                    # Tier-aware cells (credibility-economics): gapfill skips
+                    # cells already recorded terminal_uncovered, so a discounted
+                    # cell is re-hunted at most once.
+                    tasks=all_agent_tasks,
+                    findings=candidate_findings,
+                    credibility_enabled=scan_input.credibility_config_json is not None,
                     id=str(workflow.uuid4()),
                     created_at=workflow.now(),
                 )
@@ -1409,7 +1662,9 @@ class RunScanWorkflow:
         # (the same safety net the deterministic sweeps use).
         semaphore = asyncio.Semaphore(max(1, scan_input.dynamic_validate_max_concurrent))
 
-        async def _exploit_one_class(vuln_class: VulnerabilityClass) -> ExploitChain:
+        async def _exploit_one_class(
+            vuln_class: VulnerabilityClass,
+        ) -> tuple[ExploitChain, list[CandidateFinding]]:
             async with semaphore:
                 return await self._exploit_class_chain(
                     scan_input,
@@ -1432,6 +1687,8 @@ class RunScanWorkflow:
         # Registration pass (class order, post-gather): a proven chain becomes a
         # first-class candidate carrying the per-class fingerprint id, so an
         # overlapped/resumed chain can never register the same fingerprint twice.
+        # Session-token analysis findings collected from this class's auth-bearing
+        # captures are registered in the same deterministic pass.
         registered_ids = {c.id for c in candidate_findings}
         for vuln_class, chain_result in zip(scan.profile.vuln_classes, chains, strict=True):
             if isinstance(chain_result, BaseException):
@@ -1443,39 +1700,58 @@ class RunScanWorkflow:
                     {"stage": "exploit_chain", "error": _describe_failure(chain_result)},
                 )
                 continue
+            chain, session_findings = chain_result
             candidate = exploit_chain_to_candidate(
-                chain_result,
+                chain,
                 finding_id=_live_exploit_fingerprint(vuln_class)[:32],
                 title=f"Live-proven {vuln_class.value} via chained exploitation",
                 hypothesis="Confirmed against the running target by a chained live exploit.",
                 created_by="exploit-agent",
                 created_at=workflow.now(),
             )
-            if candidate is None or candidate.id in registered_ids:
-                continue  # unproven chain ("prove by doing") or already registered
-            registered_ids.add(candidate.id)
-            await _persist_scan_state(
-                scan_input.db_path,
-                "save_candidate_finding",
-                {"finding": _model_json_dict(candidate)},
-            )
-            candidate_findings.append(candidate)
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "live_exploit.proven",
-                {
-                    "finding_id": candidate.id,
-                    "vuln_class": vuln_class.value,
-                    "step_count": str(len(chain_result.steps)),
-                },
-            )
-            await _append_workflow_event(
-                scan_input.db_path,
-                scan.id,
-                "finding.candidate_created",
-                {"finding_id": candidate.id, "source": "live-exploit"},
-            )
+            if candidate is not None and candidate.id not in registered_ids:
+                registered_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "live_exploit.proven",
+                    {
+                        "finding_id": candidate.id,
+                        "vuln_class": vuln_class.value,
+                        "step_count": str(len(chain.steps)),
+                    },
+                )
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "live-exploit"},
+                )
+            # Persist the session-token analysis findings (task 7.2) through the
+            # existing persist-scan-state path; ids are deterministic, so replay
+            # never registers the same check twice.
+            for session_finding in session_findings:
+                if session_finding.id in registered_ids:
+                    continue
+                registered_ids.add(session_finding.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(session_finding)},
+                )
+                candidate_findings.append(session_finding)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": session_finding.id, "source": "session-analysis"},
+                )
 
         return matrix_tasks
 
@@ -1641,7 +1917,7 @@ class RunScanWorkflow:
         attack_map: list[Any],
         exploit_panel_json: str | None,
         vuln_class: VulnerabilityClass,
-    ) -> ExploitChain:
+    ) -> tuple[ExploitChain, list[CandidateFinding]]:
         """One class's stateful propose→dispatch exploit chain (step 2 above).
 
         Per-class state (``steps``, ``session_cookies``) lives entirely inside
@@ -1649,6 +1925,10 @@ class RunScanWorkflow:
         """
         steps: list[ExploitStep] = []
         session_cookies: dict[str, str] = {}
+        # Session-token analysis findings collected from this class's auth-bearing
+        # captures; returned alongside the chain and registered by the caller in
+        # the deterministic post-gather pass (task 7.2).
+        session_findings: list[CandidateFinding] = []
         for _turn in range(scan_input.validate_max_iterations):
             prior_steps = [s.model_dump(mode="json") for s in steps]
             session_summary = "cookies set" if session_cookies else "(no session state yet)"
@@ -1696,13 +1976,7 @@ class RunScanWorkflow:
             headers: dict[str, str] = {str(k): str(v) for k, v in raw_headers.items()}
             if session_cookies:
                 headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
-            spec = HttpRequestSpec(
-                method=spec_dict.get("method", "GET"),
-                path=str(spec_dict.get("path", "/")),
-                headers=headers,
-                body=spec_dict.get("body"),
-                auth_profile=spec_dict.get("auth_profile"),
-            )
+            spec = build_request_spec(spec_dict, headers=headers)
 
             # ROE scope check — refuse out-of-scope / do-not-test before egress (D4).
             if not request_in_scope(authorization, host=target_ep.host, path=spec.path):
@@ -1760,6 +2034,11 @@ class RunScanWorkflow:
                 # A failed dispatch ends this class's chain; other classes continue.
                 break
 
+            # Collect any session-token analysis the activity attached to this
+            # auth-bearing capture (None for unauthenticated captures).
+            if capture.session_token_analysis is not None:
+                session_findings.extend(capture.session_token_analysis.findings)
+
             success_raw = turn.get("success")
             check = SuccessCheck.model_validate(success_raw) if success_raw else None
             confirmed = evaluate_exploit_success(check, status_code=capture.status_code)
@@ -1787,13 +2066,16 @@ class RunScanWorkflow:
             if confirmed:
                 break  # we have our proof
 
-        return ExploitChain(
-            scan_id=scan.id,
-            workspace_id=scan.workspace_id,
-            vuln_class=vuln_class,
-            steps=steps,
-            proven=any(s.confirmed for s in steps),
-            summary=f"live exploitation chain for {vuln_class.value}",
+        return (
+            ExploitChain(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id,
+                vuln_class=vuln_class,
+                steps=steps,
+                proven=any(s.confirmed for s in steps),
+                summary=f"live exploitation chain for {vuln_class.value}",
+            ),
+            session_findings,
         )
 
     async def _run_round(
@@ -1802,6 +2084,7 @@ class RunScanWorkflow:
         scan: Scan,
         repo_path: str,
         artifact_root: str,
+        arch_doc: ArchitectureDoc | None,
         hunt_panel_json: str | None,
         kb_root_index_key: str | None,
         round_index: int,
@@ -1826,6 +2109,7 @@ class RunScanWorkflow:
         """
         hunt_new_start = len(candidate_findings)
         needs_proof_new_start = len(needs_proof_findings)
+        gaps_new_start = len(hunter_gaps)
 
         # ── HUNT stage ───────────────────────────────────────────────────────
         # Focus + exclusion drops happen here in workflow code (deterministic).
@@ -2051,6 +2335,41 @@ class RunScanWorkflow:
                             {"finding_id": candidate.id},
                         )
 
+            # ── Deterministic fuzz sweep (C5 fuzzing-harness) ──────────────────
+            # A deterministic, non-agentic fuzzer over the round's CLI/fuzz-harness
+            # entry points: build the target, mutate its attacker-controlled args,
+            # run each mutant in the sandbox, classify crashes and emit one
+            # candidate per unique crash (fed through the same promote gate as the
+            # secrets/SSRF sweeps).  Round-0 only: fuzzing is the expensive sweep,
+            # and a re-round would rebuild and re-run an unchanged target.
+            if round_index == 0:
+                await self._run_fuzz_sweep(
+                    scan_input,
+                    scan,
+                    repo_path,
+                    artifact_root,
+                    arch_doc,
+                    round_tasks,
+                    candidate_findings,
+                    final_findings,
+                )
+
+            # ── Handoff artifacts (versioned-handoff-artifacts, task 4.2) ──────
+            # Persist the three versioned artifacts at the end of the HUNT pass,
+            # after hunters complete but before the stage checkpoint — so a kill
+            # between the two leaves a resumable handoff behind.
+            await self._write_round_handoff(
+                scan_input,
+                scan,
+                artifact_root,
+                round_index,
+                runnable_tasks,
+                round_tasks,
+                candidate_findings,
+                hunt_new_start,
+                hunter_gaps[gaps_new_start:],
+            )
+
             await _persist_scan_stage(scan_input.db_path, scan.id, "HUNT")
             # SPEC-D1 (cruft-purge 2.1): VALIDATION is a canonical stage in
             # COMPLETED_STAGE_ORDER — persist-before-advance applies. The
@@ -2134,6 +2453,7 @@ class RunScanWorkflow:
                                 scan_input.scan_seed,
                                 artifact_root,
                                 kb_root_index_key,
+                                scan_input.credibility_config_json,
                             ],
                             start_to_close_timeout=timedelta(hours=4),
                             heartbeat_timeout=timedelta(minutes=3),
@@ -2172,6 +2492,12 @@ class RunScanWorkflow:
                 return_exceptions=True,
             )
 
+            # Timing-oracle sub-budget (verify-oracle-upgrade): loop-local state
+            # for the serial post-gather loop below. Each timing HTTP request
+            # (baseline, attack, ladder) decrements it before dispatch; it is
+            # independent of the dollar-cost validation budget.
+            timing_probes_remaining = scan_input.dynamic_timing_probe_limit
+
             # Post-gather: emit events in candidate INPUT order (deterministic
             # replay), not completion order. The per-candidate verdict branches
             # below are the serial flow, unchanged.
@@ -2209,11 +2535,15 @@ class RunScanWorkflow:
                 # candidate so it flows to whichever report section it lands in.
                 credibility = payload_dict.get("credibility")
                 ensemble = payload_dict.get("ensemble")
-                if credibility is not None or ensemble:
+                cascade_corroborated = payload_dict.get("corroborated")
+                cascade_step = payload_dict.get("cascade_step")
+                if credibility is not None or ensemble or cascade_step is not None:
                     candidate = candidate.model_copy(
                         update={
                             "credibility": credibility,
                             "ensemble": ensemble or [],
+                            "corroborated": bool(cascade_corroborated),
+                            "cascade_step": cascade_step,
                         }
                     )
 
@@ -2381,27 +2711,35 @@ class RunScanWorkflow:
                                 target_ep.host,
                                 "127.0.0.1",
                             )
+                            timing_receipt: VerdictReceipt | None = None
+                            primary_capture: HttpResponseCapture | None = None
                             try:
-                                capture = await _dispatch_dynamic_probe(
-                                    probe_specs[0],
-                                    target_ep,
-                                    probe_allowed_hosts,
-                                    artifact_root,
-                                    scan.id,
-                                    candidate.id,
+                                timing_delay = timing_delay_for_specs(
+                                    retained.vuln_class, probe_specs
                                 )
-                                probe_count = 1
-                                # Differential classes (registry min_probes > 1, e.g.
-                                # SQL_INJECTION) dispatch a baseline probe — a second
-                                # single-attempt http-request — only while validation
-                                # budget remains (pure cost guard).
-                                baseline_capture: HttpResponseCapture | None = None
-                                if len(probe_specs) > 1 and differential_baseline_permitted(
-                                    retained.vuln_class,
-                                    budget_remaining=val_budget_remaining,
-                                ):
-                                    try:
-                                        baseline_capture = await _dispatch_dynamic_probe(
+                                if timing_delay is not None:
+                                    # ── Statistical timing oracle ────────────────
+                                    # N clean baseline + M delay-annotated attack
+                                    # probes; the ladder batch re-probes the SAME
+                                    # initial baseline at 2× injected delay once
+                                    # the statistical pass clears and the R7
+                                    # sub-budget has headroom.
+                                    attack_captures: list[HttpResponseCapture] = []
+                                    attack_ev: list[LiveProbeEvidence] = []
+                                    baseline_ev: list[LiveProbeEvidence] = []
+                                    ladder_ev: list[LiveProbeEvidence] = []
+                                    probe_count = 0
+                                    exhausted = False
+                                    for _ in range(TIMING_BASELINE_SAMPLES):
+                                        if timing_probes_remaining <= 0:
+                                            exhausted = True
+                                            break
+                                        timing_probes_remaining -= 1
+                                        probe_count += 1
+                                        (
+                                            _baseline_capture,
+                                            baseline_probe,
+                                        ) = await _dispatch_timing_probe(
                                             probe_specs[1],
                                             target_ep,
                                             probe_allowed_hosts,
@@ -2409,32 +2747,175 @@ class RunScanWorkflow:
                                             scan.id,
                                             candidate.id,
                                         )
-                                        probe_count = 2
-                                    except Exception:
-                                        baseline_capture = None  # degrade to primary-only
-                                primary_evidence = LiveProbeEvidence(
-                                    status_code=capture.status_code,
-                                    body_text=await _resolve_probe_body(
-                                        capture, artifact_root, scan.id
-                                    ),
-                                )
-                                baseline_evidence: LiveProbeEvidence | None = None
-                                if baseline_capture is not None:
-                                    baseline_evidence = LiveProbeEvidence(
-                                        status_code=baseline_capture.status_code,
+                                        baseline_ev.append(baseline_probe)
+                                    for _ in range(TIMING_ATTACK_SAMPLES):
+                                        if exhausted or timing_probes_remaining <= 0:
+                                            exhausted = True
+                                            break
+                                        timing_probes_remaining -= 1
+                                        probe_count += 1
+                                        attack_capture, attack_probe = await _dispatch_timing_probe(
+                                            probe_specs[0],
+                                            target_ep,
+                                            probe_allowed_hosts,
+                                            artifact_root,
+                                            scan.id,
+                                            candidate.id,
+                                        )
+                                        attack_captures.append(attack_capture)
+                                        attack_ev.append(attack_probe)
+                                    if attack_ev:
+                                        timing_verdict, initial_receipt = (
+                                            evaluate_live_verdict_with_receipt(
+                                                retained.vuln_class,
+                                                assemble_timing_evidence(
+                                                    attack=tuple(attack_ev),
+                                                    baseline=tuple(baseline_ev),
+                                                ),
+                                            )
+                                        )
+                                        timing_receipt = initial_receipt
+                                        primary_capture = attack_captures[0]
+                                    else:
+                                        # Budget ran out before any attack probe
+                                        # landed — nothing to analyse; record the
+                                        # refusal so the lead stays auditable.
+                                        timing_verdict = LIVE_INCONCLUSIVE
+                                        timing_receipt = VerdictReceipt(
+                                            n=len(baseline_ev),
+                                            m=0,
+                                            baseline_median=0.0,
+                                            attack_median=0.0,
+                                            mad=0.0,
+                                            robust_sigma=0.0,
+                                            classical_sigma=0.0,
+                                            threshold=0.0,
+                                            induced_delay_ms=0.0,
+                                            majority_count=0,
+                                            majority_required=(TIMING_ATTACK_SAMPLES + 1) // 2,
+                                            ladder_scale_factor=None,
+                                            reason="budget_exhausted",
+                                        )
+                                    if timing_verdict == TIMING_STATISTICAL_PASS:
+                                        if exhausted or not timing_ladder_permitted(
+                                            timing_probes_remaining=timing_probes_remaining
+                                        ):
+                                            # R7: corroborated requires the
+                                            # ladder; without headroom the lead
+                                            # stays open, never a partial verdict.
+                                            dyn_verdict = LIVE_INCONCLUSIVE
+                                            if timing_receipt is not None:
+                                                timing_receipt = replace(
+                                                    timing_receipt, reason="budget_exhausted"
+                                                )
+                                        else:
+                                            ladder_spec = probe_specs[0].model_copy(
+                                                update={"injected_delay_ms": 2 * timing_delay}
+                                            )
+                                            for _ in range(TIMING_ATTACK_SAMPLES):
+                                                if timing_probes_remaining <= 0:
+                                                    break
+                                                timing_probes_remaining -= 1
+                                                probe_count += 1
+                                                (
+                                                    _ladder_capture,
+                                                    ladder_probe,
+                                                ) = await _dispatch_timing_probe(
+                                                    ladder_spec,
+                                                    target_ep,
+                                                    probe_allowed_hosts,
+                                                    artifact_root,
+                                                    scan.id,
+                                                    candidate.id,
+                                                )
+                                                ladder_ev.append(ladder_probe)
+                                            if len(ladder_ev) < TIMING_ATTACK_SAMPLES:
+                                                dyn_verdict = LIVE_INCONCLUSIVE
+                                                if timing_receipt is not None:
+                                                    timing_receipt = replace(
+                                                        timing_receipt,
+                                                        reason="budget_exhausted",
+                                                    )
+                                            else:
+                                                dyn_verdict, final_receipt = (
+                                                    evaluate_live_verdict_with_receipt(
+                                                        retained.vuln_class,
+                                                        assemble_timing_evidence(
+                                                            attack=tuple(attack_ev),
+                                                            baseline=tuple(baseline_ev),
+                                                            ladder=tuple(ladder_ev),
+                                                        ),
+                                                    )
+                                                )
+                                                if final_receipt is not None:
+                                                    timing_receipt = final_receipt
+                                    else:
+                                        dyn_verdict = timing_verdict
+                                    dyn_verdict_source = VERDICT_SOURCE_PER_CLASS
+                                else:
+                                    capture = await _dispatch_dynamic_probe(
+                                        probe_specs[0],
+                                        target_ep,
+                                        probe_allowed_hosts,
+                                        artifact_root,
+                                        scan.id,
+                                        candidate.id,
+                                    )
+                                    primary_capture = capture
+                                    probe_count = 1
+                                    # Differential classes (registry min_probes > 1,
+                                    # e.g. SQL_INJECTION) dispatch a baseline probe —
+                                    # a second single-attempt http-request — only
+                                    # while validation budget remains (pure cost
+                                    # guard).
+                                    baseline_capture: HttpResponseCapture | None = None
+                                    if len(probe_specs) > 1 and differential_baseline_permitted(
+                                        retained.vuln_class,
+                                        budget_remaining=val_budget_remaining,
+                                    ):
+                                        try:
+                                            baseline_capture = await _dispatch_dynamic_probe(
+                                                probe_specs[1],
+                                                target_ep,
+                                                probe_allowed_hosts,
+                                                artifact_root,
+                                                scan.id,
+                                                candidate.id,
+                                            )
+                                            probe_count = 2
+                                        except Exception:
+                                            baseline_capture = None  # degrade to primary-only
+                                    primary_evidence = LiveProbeEvidence(
+                                        status_code=capture.status_code,
                                         body_text=await _resolve_probe_body(
-                                            baseline_capture, artifact_root, scan.id
+                                            capture, artifact_root, scan.id
+                                        ),
+                                        injected_values=probe_specs[0].injected_values,
+                                        indicator=probe_specs[0].indicator,
+                                    )
+                                    baseline_evidence: LiveProbeEvidence | None = None
+                                    if baseline_capture is not None:
+                                        baseline_evidence = LiveProbeEvidence(
+                                            status_code=baseline_capture.status_code,
+                                            body_text=await _resolve_probe_body(
+                                                baseline_capture, artifact_root, scan.id
+                                            ),
+                                            injected_values=probe_specs[1].injected_values,
+                                            indicator=probe_specs[1].indicator,
+                                        )
+                                    (
+                                        dyn_verdict,
+                                        dyn_verdict_source,
+                                    ) = evaluate_live_verdict_with_source(
+                                        retained.vuln_class,
+                                        build_differential_evidence(
+                                            primary=primary_evidence,
+                                            baseline=baseline_evidence,
                                         ),
                                     )
-                                dyn_verdict, dyn_verdict_source = evaluate_live_verdict_with_source(
-                                    retained.vuln_class,
-                                    build_differential_evidence(
-                                        primary=primary_evidence, baseline=baseline_evidence
-                                    ),
-                                )
-                                if dyn_verdict == LIVE_CORROBORATED:
+                                if dyn_verdict == LIVE_CORROBORATED and primary_capture is not None:
                                     promotion = promote_with_dynamic_evidence(
-                                        retained, capture, scan.id, workflow.now()
+                                        retained, primary_capture, scan.id, workflow.now()
                                     )
                                     if promotion is not None:
                                         dyn_final, _dyn_link = promotion
@@ -2444,21 +2925,47 @@ class RunScanWorkflow:
                                             {"finding": _model_json_dict(dyn_final)},
                                         )
                                         final_findings.append(dyn_final)
+                                        dynamic_validated_payload: dict[str, str] = {
+                                            "finding_id": dyn_final.id,
+                                            "status_code": str(primary_capture.status_code),
+                                            "proof_artifact_count": str(
+                                                len(dyn_final.proof_artifact_ids)
+                                            ),
+                                            "verdict_source": dyn_verdict_source,
+                                            "probe_count": str(probe_count),
+                                        }
+                                        if timing_receipt is not None:
+                                            dynamic_validated_payload["timing_receipt"] = (
+                                                json.dumps(asdict(timing_receipt))
+                                            )
                                         await _append_workflow_event(
                                             scan_input.db_path,
                                             scan.id,
                                             "finding.dynamic_validated",
-                                            {
-                                                "finding_id": dyn_final.id,
-                                                "status_code": str(capture.status_code),
-                                                "proof_artifact_count": str(
-                                                    len(dyn_final.proof_artifact_ids)
-                                                ),
-                                                "verdict_source": dyn_verdict_source,
-                                                "probe_count": str(probe_count),
-                                            },
+                                            dynamic_validated_payload,
                                         )
                                         dyn_promoted = True
+                                if timing_receipt is not None and not dyn_promoted:
+                                    # R3: an inconclusive / not-corroborated
+                                    # timing outcome still carries the receipt so
+                                    # the statistics and reason are auditable.
+                                    await _append_workflow_event(
+                                        scan_input.db_path,
+                                        scan.id,
+                                        "finding.dynamic_validated",
+                                        {
+                                            "finding_id": candidate.id,
+                                            "status_code": str(
+                                                primary_capture.status_code
+                                                if primary_capture is not None
+                                                else 0
+                                            ),
+                                            "verdict": dyn_verdict,
+                                            "verdict_source": dyn_verdict_source,
+                                            "probe_count": str(probe_count),
+                                            "timing_receipt": json.dumps(asdict(timing_receipt)),
+                                        },
+                                    )
                             except Exception:
                                 # Dynamic probe failure is non-fatal; stays NEEDS_PROOF.
                                 pass
@@ -2634,6 +3141,7 @@ class RunScanWorkflow:
                             scan_input.db_path,
                             scan_input.dedup_max_iterations,
                             scan_input.scan_seed,
+                            artifact_root,
                         ],
                         start_to_close_timeout=timedelta(hours=4),
                         heartbeat_timeout=timedelta(minutes=3),
@@ -2682,11 +3190,21 @@ class RunScanWorkflow:
                     else 0.0
                 )
                 _, pv_budget_remaining = budget_decision(scan.budget_cap_usd, pv_spent)
-                _target_endpoint_json = (
-                    build_target_endpoint_from_url(scan_input.target_url).model_dump_json()
+                _target_ep = (
+                    build_target_endpoint_from_url(scan_input.target_url)
                     if scan_input.target_url
                     else None
                 )
+                _target_endpoint_json = _target_ep.model_dump_json() if _target_ep else None
+                # Base destination-set egress policy for the prove sandbox.  Pure
+                # construction (no DNS) — the sandbox activity resolves domains to
+                # pinned IPs at enforcement.  Per-finding scoping (including the
+                # inert needs_canary marker) happens inside the finding loop.
+                _prove_scan_policy = build_egress_policy(
+                    allowed_hosts=scan_input.allowed_hosts
+                    or ((_target_ep.host, "127.0.0.1") if _target_ep else ())
+                )
+                _prove_needs_live_target = _target_ep is not None
                 # Prove live-corroborated leads first (dynamic_validate verdict).
                 # Per-finding fan-out (cruft-purge §3.2, mirroring
                 # scan-stage-fanout): each finding's attempt loop dispatches
@@ -2721,6 +3239,23 @@ class RunScanWorkflow:
                         prior_attempts: list[dict[str, Any]] = []
                         for attempt in range(PROVE_MAX_ATTEMPTS):
                             try:
+                                # SSRF/XXE canary: a deterministic, replay-safe
+                                # token per (finding, attempt) — no OS entropy in
+                                # workflow code.  It is the sole activation signal
+                                # (passed to the prompt gate and to sandbox-exec).
+                                _needs_canary = finding.vuln_class in (
+                                    VulnerabilityClass.SSRF,
+                                    VulnerabilityClass.XXE,
+                                )
+                                _canary_token = (
+                                    canary_token_for(finding.id, attempt) if _needs_canary else None
+                                )
+                                _prove_egress_policy_json = build_prove_sandbox_policy(
+                                    _prove_scan_policy,
+                                    needs_live_target=_prove_needs_live_target,
+                                    # inert signal — real activation is _canary_token
+                                    needs_canary=_needs_canary,
+                                ).model_dump_json()
                                 prove_raw = await workflow.execute_activity(
                                     "prove-finding",
                                     args=[
@@ -2734,6 +3269,7 @@ class RunScanWorkflow:
                                         scan_input.scan_seed,
                                         prior_attempts or None,
                                         artifact_root,
+                                        _canary_token,
                                     ],
                                     start_to_close_timeout=timedelta(hours=2),
                                     heartbeat_timeout=timedelta(minutes=3),
@@ -2747,7 +3283,9 @@ class RunScanWorkflow:
                                     finding_id=finding.id,
                                     artifact_root=artifact_root,
                                     target_endpoint_json=_target_endpoint_json,
+                                    egress_policy_json=_prove_egress_policy_json,
                                     allowed_hosts=scan_input.allowed_hosts,
+                                    canary_token=_canary_token,
                                 )
                                 exec_caps: list[SandboxExecCapture] = []
                                 http_caps: list[HttpResponseCapture] = []
@@ -2801,9 +3339,25 @@ class RunScanWorkflow:
                                         )
                                     except Exception:
                                         pass
-                                outcome_verdict = prove_outcome_from_captures(exec_caps, http_caps)
-                                if outcome_verdict == "proved":
-                                    final_verdict = "proved"
+                                # Canary evidence rides on the sandbox captures:
+                                # callbacks observed by the listener, plus the
+                                # target IPs the activity enforced (empty for a
+                                # Tier-1 dispatch, keeping corroboration Tier-2-only).
+                                canary_callbacks = [
+                                    cb for cap in exec_caps for cb in cap.canary_callbacks
+                                ]
+                                resolved_target_ips = [
+                                    ip for cap in exec_caps for ip in cap.resolved_target_ips
+                                ]
+                                outcome_verdict = prove_outcome_from_captures(
+                                    exec_caps,
+                                    http_caps,
+                                    canary_callbacks=canary_callbacks,
+                                    canary_token=_canary_token,
+                                    resolved_target_ips=resolved_target_ips,
+                                )
+                                if outcome_verdict in ("proved", "corroborated"):
+                                    final_verdict = outcome_verdict
                                     break
                                 if outcome_verdict == "needs_manual_review":
                                     final_verdict = "needs_manual_review"
@@ -3052,6 +3606,176 @@ class RunScanWorkflow:
 
         return _RoundOutcome(reachable_traces=reachable_traces, call_graph=call_graph)
 
+    async def _run_fuzz_sweep(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        repo_path: str,
+        artifact_root: str,
+        arch_doc: ArchitectureDoc | None,
+        round_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
+        final_findings: list[FinalFinding],
+    ) -> None:
+        """Deterministic fuzz sweep over the round's CLI/fuzz-harness entry points.
+
+        Gated on single-class focus (requirement: Fuzz dispatch gates on
+        single-class focus).  Each entry point additionally requires a non-empty
+        ``invocation`` and the ``args`` attacker-controlled channel; anything
+        else is recorded as a skip, never guessed at.  The non-agentic ``fuzz``
+        activity returns one crash record per unique crash; each becomes a
+        candidate promoted through the ``validate-fuzz-candidate`` gate exactly
+        like the deterministic secrets sweep.  Best-effort: an activity failure
+        is recorded and never aborts the scan.
+        """
+        focused_classes = list(scan.profile.vuln_classes)
+        focus_reason = fuzz_focus_skip_reason(focused_classes)
+        if focus_reason is not None:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "fuzz.skipped",
+                {
+                    "reason": focus_reason,
+                    "classes": ",".join(c.value for c in focused_classes),
+                },
+            )
+            return
+        vuln_class = focused_classes[0]
+
+        entry_points = fuzz_entry_points_for_dispatch(round_tasks)
+        if not entry_points:
+            await _append_workflow_event(
+                scan_input.db_path,
+                scan.id,
+                "fuzz.skipped",
+                {"reason": "no-eligible-entry-point"},
+            )
+            return
+
+        build_commands = tuple(arch_doc.build_commands) if arch_doc is not None else ()
+        existing_ids = {c.id for c in candidate_findings}
+        for entry_point in entry_points:
+            skip_reason = fuzz_skip_reason(entry_point)
+            if skip_reason is not None:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.skipped",
+                    {"reason": skip_reason, "entry_point": entry_point.file},
+                )
+                continue
+            spec = FuzzSpec(
+                scan_id=scan.id,
+                workspace_id=scan.workspace_id or "local",
+                repo_path=repo_path,
+                entry_point_file=entry_point.file,
+                entry_point_function=entry_point.function,
+                invocation=tuple(entry_point.invocation),
+                attacker_controlled_input=entry_point.attacker_controlled_input,
+                vuln_class=vuln_class.value,
+                seed_input=_FUZZ_DEFAULT_SEED_INPUT,
+                seed=scan_input.scan_seed or 0,
+                run_budget=_FUZZ_DEFAULT_RUN_BUDGET,
+                timeout_seconds=_FUZZ_DEFAULT_TIMEOUT_SECONDS,
+                build_commands=build_commands,
+                binary_path=fuzz_binary_path(entry_point),
+                artifact_store_path=artifact_root,
+            )
+            try:
+                result_payload = await workflow.execute_activity(
+                    "fuzz",
+                    spec,
+                    start_to_close_timeout=timedelta(minutes=30),
+                    heartbeat_timeout=timedelta(minutes=5),
+                    retry_policy=self._retry_policy,
+                )
+            except Exception as exc:
+                if is_cancelled_exception(exc):
+                    raise
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.failed",
+                    {"entry_point": entry_point.file, "error": _describe_failure(exc)},
+                )
+                continue
+            result_data = _fuzz_result_mapping(result_payload)
+            if result_data.get("status") != "ran":
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.skipped",
+                    {
+                        "reason": str(result_data.get("reason", "")),
+                        "entry_point": entry_point.file,
+                    },
+                )
+                continue
+            fuzz_candidates = fuzz_candidates_from_activity_payload(
+                result_payload,
+                scan_id=scan.id,
+                created_at=workflow.now(),
+                vuln_class=vuln_class,
+            )
+            for candidate in fuzz_candidates:
+                if candidate.id in existing_ids:
+                    continue  # re-run: crash candidate already recorded
+                existing_ids.add(candidate.id)
+                await _persist_scan_state(
+                    scan_input.db_path,
+                    "save_candidate_finding",
+                    {"finding": _model_json_dict(candidate)},
+                )
+                candidate_findings.append(candidate)
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "finding.candidate_created",
+                    {"finding_id": candidate.id, "source": "fuzz"},
+                )
+                validation_payload = await workflow.execute_activity(
+                    "validate-fuzz-candidate",
+                    ValidateCandidateInput(finding_json=candidate.model_dump_json()),
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=self._retry_policy,
+                )
+                validation = _fuzz_validation_result_from_activity(validation_payload)
+                if validation.is_valid:
+                    final = final_from_candidate(candidate, scan.id, workflow.now())
+                    await _persist_scan_state(
+                        scan_input.db_path,
+                        "save_final_finding",
+                        {"finding": _model_json_dict(final)},
+                    )
+                    final_findings.append(final)
+                    await self._emit_and_dispatch(
+                        scan_input,
+                        scan,
+                        artifact_root,
+                        "finding.validated",
+                        {"finding_id": final.id},
+                        finding=final,
+                        severity=final.severity,
+                    )
+                else:
+                    await _append_workflow_event(
+                        scan_input.db_path,
+                        scan.id,
+                        "finding.rejected",
+                        {"finding_id": candidate.id},
+                    )
+            if not fuzz_candidates:
+                await _append_workflow_event(
+                    scan_input.db_path,
+                    scan.id,
+                    "fuzz.no_crash",
+                    {
+                        "entry_point": entry_point.file,
+                        "runs": str(result_data.get("runs_executed", 0)),
+                    },
+                )
+
     async def _calibrate_one_finding(
         self,
         scan_input: "RunScanInput",
@@ -3181,6 +3905,138 @@ class RunScanWorkflow:
             {"manifest": _model_json_dict(manifest)},
         )
         return manifest
+
+    async def _resume_from_handoff_artifacts(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        round_tasks: list[AgentTask],
+    ) -> tuple[list[AgentTask], bool]:
+        """Load the cold-start artifacts and filter out already-covered tasks.
+
+        Returns ``(tasks_to_hunt, handoff_loaded)``. When no HuntHandoff exists
+        the tasks pass through unchanged and ``handoff_loaded`` is False (a clean
+        start). When one is loaded, its covered scope units seed
+        ``self._covered_scope_units`` and each surviving task receives the
+        handoff's open hypotheses as context. Emits ``hunt.resumed_from_artifacts``.
+        """
+        payload = await workflow.execute_activity(
+            "load-handoff-artifacts",
+            LoadHandoffArtifactsInput(scan_id=scan.id, artifact_root=artifact_root),
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=self._retry_policy,
+        )
+        output = _handoff_output_from_activity(payload)
+        if not output.found or output.hunt_handoff_json is None:
+            return round_tasks, False
+
+        handoff = HuntHandoff.model_validate_json(output.hunt_handoff_json)
+        covered = set(handoff.covered_scope_units)
+        self._covered_scope_units.update(covered)
+        pending = set(handoff.pending_task_ids)
+        resumed_tasks = [
+            _with_hypotheses(task, handoff.open_hypotheses)
+            for task in round_tasks
+            if task.id in pending or _task_scope_unit(task) not in covered
+        ]
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "hunt.resumed_from_artifacts",
+            {
+                "artifact_version": str(handoff.artifact_version),
+                "scan_ordinal": str(handoff.scan_ordinal),
+                "covered_units": str(len(covered)),
+                "open_hypotheses": str(len(handoff.open_hypotheses)),
+                "pending_tasks": str(handoff.pending_task_count),
+                "skipped_covered_tasks": str(len(round_tasks) - len(resumed_tasks)),
+                "architecture_doc_loaded": "true" if output.architecture_doc_json else "false",
+                "coverage_ledger_loaded": "true" if output.coverage_ledger_json else "false",
+            },
+        )
+        return resumed_tasks, True
+
+    async def _write_round_handoff(
+        self,
+        scan_input: "RunScanInput",
+        scan: Scan,
+        artifact_root: str,
+        round_index: int,
+        covered_tasks: list[AgentTask],
+        round_tasks: list[AgentTask],
+        candidate_findings: list[CandidateFinding],
+        round_candidate_start: int,
+        round_gaps: list[dict[str, Any]],
+    ) -> None:
+        """Persist the three versioned handoff artifacts at the end of a HUNT pass.
+
+        The covered scope units accumulate across rounds (seeded from a loaded
+        handoff on resume) so a re-written handoff never loses coverage. The
+        artifact_version is the round cursor + 1 — monotonic within the scan.
+        """
+        self._covered_scope_units.update(_task_scope_unit(t) for t in covered_tasks)
+        pending_ids = [
+            t.id for t in round_tasks if _task_scope_unit(t) not in self._covered_scope_units
+        ]
+        hypotheses = [str(gap.get("reason") or gap.get("hypothesis") or gap) for gap in round_gaps]
+        artifact_version = round_index + 1
+        scan_ordinal = _scan_ordinal(scan)
+        payload = await workflow.execute_activity(
+            "write-handoff-artifacts",
+            WriteHandoffArtifactsInput(
+                scan_id=scan.id,
+                artifact_root=artifact_root,
+                round_number=round_index,
+                workspace_id=scan.workspace_id,
+                scan_ordinal=scan_ordinal,
+                artifact_version=artifact_version,
+                architecture_doc_json=None,
+                requested_vuln_classes=tuple(vc.value for vc in scan.profile.vuln_classes),
+                completed_vuln_classes=tuple(
+                    sorted({c.vuln_class.value for c in candidate_findings})
+                ),
+                agent_tasks_total=len(round_tasks),
+                agent_tasks_scanned=len(covered_tasks),
+                covered_scope_units=tuple(sorted(self._covered_scope_units)),
+                candidate_finding_ids=tuple(
+                    c.id for c in candidate_findings[round_candidate_start:]
+                ),
+                pending_task_ids=tuple(pending_ids),
+                open_hypotheses=tuple(hypotheses),
+                created_at=workflow.now().isoformat(),
+            ),
+            start_to_close_timeout=timedelta(minutes=1),
+            retry_policy=self._retry_policy,
+        )
+        output = _write_handoff_output_from_activity(payload)
+        # Record each artifact's ref in the scan state so the handoff bundle is
+        # addressable through the same reference system as the other artifacts.
+        for ref_json in (
+            output.hunt_handoff_ref_json,
+            output.architecture_doc_ref_json,
+            output.coverage_ledger_ref_json,
+        ):
+            if ref_json is None:
+                continue
+            ref = ArtifactRef.model_validate_json(ref_json)
+            await _persist_scan_state(
+                scan_input.db_path,
+                "save_artifact_ref",
+                {"scan_id": scan.id, "artifact_ref": _model_json_dict(ref)},
+            )
+        await _append_workflow_event(
+            scan_input.db_path,
+            scan.id,
+            "hunt.handoff_written",
+            {
+                "round_index": str(round_index),
+                "artifact_version": str(artifact_version),
+                "scan_ordinal": str(scan_ordinal),
+                "covered_units": str(len(self._covered_scope_units)),
+                "pending_tasks": str(len(pending_ids)),
+            },
+        )
 
     async def _record_coverage(
         self,
@@ -3549,6 +4405,35 @@ async def _resolve_probe_body(
     return body_text_from_response_artifact(body_raw)
 
 
+async def _dispatch_timing_probe(
+    spec: HttpRequestSpec,
+    target_ep: TargetEndpoint,
+    allowed_hosts: tuple[str, ...],
+    artifact_root: str,
+    scan_id: str,
+    candidate_finding_id: str,
+) -> tuple[HttpResponseCapture, LiveProbeEvidence]:
+    """Dispatch ONE timing-oracle probe and return its capture + evidence.
+
+    Timing probes ride the SAME guarded egress funnel as every other dynamic
+    probe (``_dispatch_dynamic_probe``: ``allowed_hosts`` + scope exclusion) and
+    are single-attempt (never retried).  The evidence carries the probe latency
+    and the probe-spec annotations transported at dispatch time.
+    """
+    capture = await _dispatch_dynamic_probe(
+        spec, target_ep, allowed_hosts, artifact_root, scan_id, candidate_finding_id
+    )
+    evidence = LiveProbeEvidence(
+        status_code=capture.status_code,
+        body_text=await _resolve_probe_body(capture, artifact_root, scan_id),
+        elapsed_ms=capture.elapsed_ms,
+        injected_values=spec.injected_values,
+        indicator=spec.indicator,
+        injected_delay_ms=spec.injected_delay_ms,
+    )
+    return capture, evidence
+
+
 async def _persist_scan_stage(db_path: str, scan_id: str, stage: str) -> None:
     await _persist_scan_state(
         db_path,
@@ -3654,6 +4539,8 @@ def panel_json_for_role(scan: Scan, role: str) -> str | None:
         rpm=entry.rate_limit_rpm,
         turn_timeout_seconds=entry.turn_timeout_seconds,
         tiers=tiers,
+        context_window_tokens=entry.context_window_tokens,
+        context_window_threshold=entry.context_window_threshold,
     ).model_dump_json()
 
 
@@ -3695,6 +4582,75 @@ def _round_cursor_from_stage(current_stage: str | None) -> int:
     if order >= COMPLETED_STAGE_ORDER["COVERAGE"]:
         return LOOP_DONE
     return 0
+
+
+def _scan_ordinal(scan: Scan) -> int:
+    """The durable scan ordinal recorded on the scan metadata (default 1).
+
+    versioned-handoff-artifacts: the ordinal is sourced at scan creation from
+    durable state keyed by the target repo path (see ``max_scan_ordinal_for_repo``)
+    and persisted on the scan metadata so a resume reads the same value.
+    """
+    value = scan.metadata.get("scan_ordinal")
+    return value if isinstance(value, int) and value > 0 else 1
+
+
+def _task_scope_unit(task: AgentTask) -> str:
+    """The scope unit a hunter task covers (its scope, or its id when absent)."""
+    return task.scope or task.id
+
+
+def _with_hypotheses(task: AgentTask, hypotheses: list[str]) -> AgentTask:
+    """Return *task* with the handoff's open hypotheses appended as context.
+
+    Cold-start resume makes the previous round's unproven hypotheses available
+    to the resumed hunt agents (scenario ``cold_start_preserves_open_hypotheses``)
+    by threading them into the task's recon notes — the field hunters already
+    consume as leads.
+    """
+    if not hypotheses:
+        return task
+    block = "\n".join(f"- {hypothesis}" for hypothesis in hypotheses)
+    header = "## Open hypotheses from prior hunt round"
+    note = f"{task.recon_notes}\n\n{header}\n{block}" if task.recon_notes else f"{header}\n{block}"
+    return task.model_copy(update={"recon_notes": note})
+
+
+def _handoff_output_from_activity(payload: object) -> LoadHandoffArtifactsOutput:
+    if isinstance(payload, LoadHandoffArtifactsOutput):
+        return payload
+    if isinstance(payload, dict):
+        return LoadHandoffArtifactsOutput.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected handoff payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _write_handoff_output_from_activity(payload: object) -> WriteHandoffArtifactsOutput:
+    if isinstance(payload, WriteHandoffArtifactsOutput):
+        return payload
+    if isinstance(payload, dict):
+        return WriteHandoffArtifactsOutput.model_validate(cast(dict[str, Any], payload))
+    msg = f"Unexpected handoff write payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+def _recon_artifact_ref(payload: object) -> ArtifactRef | None:
+    """Extract the ArchitectureDoc ArtifactRef from a recon-synthesis payload.
+
+    Returns None for legacy payloads (a bare ArchitectureDoc) that carry no
+    persisted artifact, so the caller records nothing rather than failing.
+    """
+    ref_json: object = None
+    if isinstance(payload, ReconSynthesisOutput):
+        ref_json = payload.artifact_ref_json
+    elif isinstance(payload, dict):
+        ref_json = cast(dict[str, Any], payload).get("artifact_ref_json")
+    if not isinstance(ref_json, str) or not ref_json:
+        return None
+    try:
+        return ArtifactRef.model_validate_json(ref_json)
+    except Exception:
+        return None
 
 
 def should_dispatch_lifecycle_hooks(profile: ScanProfile) -> bool:
@@ -4068,8 +5024,10 @@ def build_differential_evidence(
     With a *baseline* (differential pair), the baseline is nested into
     ``additional`` so evaluators like SQLi's boolean-diff can compare the two
     bodies; without one the primary evidence is returned unchanged (single-probe
-    classes ignore ``additional`` anyway).  Pure function — safe inside
-    sandboxed workflow code.
+    classes ignore ``additional`` anyway).  The primary's probe annotations
+    (``elapsed_ms``/``injected_values``/``indicator``/``injected_delay_ms``) are
+    carried onto the nested evidence so the evaluator sees them.  Pure
+    function — safe inside sandboxed workflow code.
     """
     if baseline is None:
         return primary
@@ -4077,12 +5035,108 @@ def build_differential_evidence(
         status_code=primary.status_code,
         body_text=primary.body_text,
         additional=(baseline,),
+        elapsed_ms=primary.elapsed_ms,
+        injected_values=primary.injected_values,
+        indicator=primary.indicator,
+        injected_delay_ms=primary.injected_delay_ms,
+    )
+
+
+def timing_delay_for_specs(
+    vuln_class: VulnerabilityClass,
+    probe_specs: list[HttpRequestSpec],
+) -> int | None:
+    """Return the injected delay when *probe_specs* is a timing-oracle batch.
+
+    A timing batch needs the class's ``timing_profile`` flag AND a
+    delay-annotated primary probe with a companion CLEAN (un-annotated)
+    baseline spec — the agent proposes both, mirroring the differential pair.
+    Anything else routes to the hardened differential path; the timing path
+    never guesses a delay and never uses a delay-annotated spec as its own
+    baseline.  Pure function — safe inside sandboxed workflow code.
+    """
+    if not resolve_evaluator_spec(vuln_class).timing_profile:
+        return None
+    if len(probe_specs) < 2:
+        return None
+    primary, baseline = probe_specs[0], probe_specs[1]
+    if primary.injected_delay_ms is None or baseline.injected_delay_ms is not None:
+        return None
+    return primary.injected_delay_ms
+
+
+def timing_ladder_permitted(*, timing_probes_remaining: int) -> bool:
+    """R7 gate: the ladder re-probe batch needs a full batch of sub-budget.
+
+    The ladder only dispatches when the counter can cover the whole batch
+    (M probes); a partial ladder cannot confirm the scaling and is refused.
+    Pure function — safe inside sandboxed workflow code.
+    """
+    return timing_probes_remaining >= TIMING_ATTACK_SAMPLES
+
+
+def assemble_timing_evidence(
+    *,
+    attack: tuple[LiveProbeEvidence, ...],
+    baseline: tuple[LiveProbeEvidence, ...],
+    ladder: tuple[LiveProbeEvidence, ...] = (),
+) -> LiveProbeEvidence:
+    """Assemble the single evidence batch a timing evaluator consumes.
+
+    The primary probe is the FIRST attack probe; ``additional`` carries the N
+    baseline probes, then the remaining ``M-1`` attack probes, then (only after
+    the ladder ran) the M ladder attack probes.  The ladder reuses the initial
+    baseline, so no fresh baseline is appended for it.  Pure function — safe
+    inside sandboxed workflow code.
+    """
+    primary = attack[0]
+    return LiveProbeEvidence(
+        status_code=primary.status_code,
+        body_text=primary.body_text,
+        additional=baseline + attack[1:] + ladder,
+        elapsed_ms=primary.elapsed_ms,
+        injected_values=primary.injected_values,
+        indicator=primary.indicator,
+        injected_delay_ms=primary.injected_delay_ms,
     )
 
 
 # Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017):
 # re-exported at the top of this module from quarry_activities.verdict_evaluators
 # (the canonical home — see the import block above).
+
+
+def _legacy_proof_evidence_refs(capture: "Any", now: "datetime") -> list[ArtifactRef]:
+    """Reconstruct id-only evidence refs for a capture that predates D6.
+
+    Legacy and replay captures carry only artifact ids (no hash), so the refs are
+    rebuilt from the ids with an empty sha256 — the pre-quarantine behaviour.
+    """
+    evidence_ids: list[str] = []
+
+    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
+    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
+        evidence_ids.append(capture.stdout_artifact_ref)
+    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
+        evidence_ids.append(capture.stderr_artifact_ref)
+    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
+    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
+        evidence_ids.append(capture.request_artifact_ref)
+    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
+        evidence_ids.append(capture.body_artifact_ref)
+
+    return [
+        ArtifactRef(
+            id=ref_id,
+            uri=f"file://{ref_id}",
+            kind=ArtifactKind.TOOL_STDOUT,
+            content_type="text/plain",
+            sha256="",
+            size_bytes=0,
+            created_at=now,
+        )
+        for ref_id in evidence_ids
+    ]
 
 
 def build_proof_artifact(
@@ -4100,32 +5154,14 @@ def build_proof_artifact(
     *proof_type* is "cli_exec" for sandbox results or "dynamic_http" for HTTP.
     The evidence_refs are populated from stdout/stderr artifact refs (sandbox)
     or request/body artifact refs (HTTP), whichever are non-empty.
+
+    Quarantine (D6): the capture's stored ``artifact_refs`` carry the sha256 and
+    byte count the artifact store recorded, so the evidence refs report the real
+    hash. Legacy/replay captures that carry only ref ids fall back to
+    reconstructed refs with an empty hash.
     """
-    evidence_ids: list[str] = []
-
-    # SandboxExecCapture has stdout_artifact_ref / stderr_artifact_ref
-    if hasattr(capture, "stdout_artifact_ref") and capture.stdout_artifact_ref:
-        evidence_ids.append(capture.stdout_artifact_ref)
-    if hasattr(capture, "stderr_artifact_ref") and capture.stderr_artifact_ref:
-        evidence_ids.append(capture.stderr_artifact_ref)
-    # HttpResponseCapture has request_artifact_ref / body_artifact_ref
-    if hasattr(capture, "request_artifact_ref") and capture.request_artifact_ref:
-        evidence_ids.append(capture.request_artifact_ref)
-    if hasattr(capture, "body_artifact_ref") and capture.body_artifact_ref:
-        evidence_ids.append(capture.body_artifact_ref)
-
-    evidence_refs = [
-        ArtifactRef(
-            id=ref_id,
-            uri=f"file://{ref_id}",
-            kind=ArtifactKind.TOOL_STDOUT,
-            content_type="text/plain",
-            sha256="",
-            size_bytes=0,
-            created_at=now,
-        )
-        for ref_id in evidence_ids
-    ]
+    stored_refs = cast("list[ArtifactRef]", getattr(capture, "artifact_refs", []) or [])
+    evidence_refs = list(stored_refs) or _legacy_proof_evidence_refs(capture, now)
 
     scrubber_hits: int = getattr(capture, "scrubber_hits", 0)
     redaction_status: RedactionStatus = (
@@ -4153,6 +5189,8 @@ def build_prove_dispatch_inputs(
     artifact_root: str,
     target_endpoint_json: str | None,
     allowed_hosts: tuple[str, ...],
+    egress_policy_json: str | None = None,
+    canary_token: str | None = None,
 ) -> "tuple[list[Any], list[Any]]":
     """Convert a ProveResponse's proposed specs into activity input objects.
 
@@ -4161,8 +5199,11 @@ def build_prove_dispatch_inputs(
     :class:`~quarry_activities.inputs.HttpRequestActivityInput` ready to
     pass to ``workflow.execute_activity``.
 
-    HTTP specs are silently dropped when *target_endpoint_json* is None —
-    live HTTP probes require a target endpoint.
+    Sandbox exec specs carry *egress_policy_json* (the scenario-scoped
+    destination-set policy); ``None``/empty means the sandbox runs with no
+    egress.  *canary_token*, when set, activates the SSRF/XXE canary listener
+    inside the sandbox-exec activity.  HTTP specs are silently dropped when
+    *target_endpoint_json* is None — live HTTP probes require a target endpoint.
 
     Pure function — no I/O, safe to call from within workflow code.
     """
@@ -4171,11 +5212,12 @@ def build_prove_dispatch_inputs(
         exec_inputs.append(
             SandboxExecActivityInput(
                 spec_json=json.dumps(spec_dict),
-                target_endpoint_json=target_endpoint_json,
+                egress_policy_json=egress_policy_json,
                 allowed_hosts=allowed_hosts,
                 artifact_store_path=artifact_root,
                 scan_id=scan_id,
                 candidate_finding_id=finding_id,
+                canary_token=canary_token,
             )
         )
 
@@ -4248,7 +5290,13 @@ def _architecture_doc_from_activity(payload: object) -> ArchitectureDoc:
     if isinstance(payload, ArchitectureDoc):
         return payload
     if isinstance(payload, dict):
-        return ArchitectureDoc.model_validate(cast(dict[str, Any], payload))
+        data = cast(dict[str, Any], payload)
+        # versioned-handoff-artifacts: recon-synthesis now returns a wrapper
+        # (ReconSynthesisOutput) carrying doc_json + the artifact ref.
+        doc_json = data.get("doc_json")
+        if isinstance(doc_json, str):
+            return ArchitectureDoc.model_validate_json(doc_json)
+        return ArchitectureDoc.model_validate(data)
     msg = f"Unexpected ArchitectureDoc payload: {type(payload).__name__}"
     raise TypeError(msg)
 
@@ -4272,6 +5320,20 @@ def _kb_root_index_key_from_activity(payload: object) -> str | None:
     return "kb/index.json" if index.entity_keys or index.dependency_graph_key else None
 
 
+def _binary_analysis_key_from_activity(payload: object) -> str | None:
+    """Extract the binary-analysis artifact key from the activity payload.
+
+    Returns None when the payload carries no key, so the workflow records
+    nothing on the scan metadata (the report is still readable at its
+    well-known artifact-root key by the consumption-time injector).
+    """
+    if not isinstance(payload, dict):
+        return None
+    data = cast(dict[str, Any], payload)
+    key = data.get("artifact_key")
+    return key if isinstance(key, str) and key else None
+
+
 def _scan_kb_root_index_key(scan: Scan) -> str | None:
     """The KB root-index reference recorded on the scan metadata (cpc slice 3).
 
@@ -4292,6 +5354,16 @@ def _agent_tasks_from_activity(payload: object) -> list[AgentTask]:
     ]
 
 
+def _candidate_findings_from_activity(payload: object) -> list[CandidateFinding]:
+    """Coerce a dependency-risk-scanner payload into CandidateFindings."""
+    if not isinstance(payload, list):
+        return []
+    return [
+        item if isinstance(item, CandidateFinding) else CandidateFinding.model_validate(item)
+        for item in cast(list[object], payload)
+    ]
+
+
 def _validation_result_from_activity(payload: object) -> SecretValidationResult:
     if isinstance(payload, SecretValidationResult):
         return payload
@@ -4303,6 +5375,98 @@ def _validation_result_from_activity(payload: object) -> SecretValidationResult:
             checks_run=_required_str_list(values, "checks_run"),
         )
     msg = f"Unexpected validation payload: {type(payload).__name__}"
+    raise TypeError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Fuzz dispatch helpers (C5 fuzzing-harness)
+# ---------------------------------------------------------------------------
+
+#: Bounded budget for one fuzz pass (total runs / per-run wall-clock seconds).
+_FUZZ_DEFAULT_RUN_BUDGET: int = 64
+_FUZZ_DEFAULT_TIMEOUT_SECONDS: int = 10
+
+#: Base attacker-supplied value the mutation engine starts from when recon
+#: supplies no per-entry-point seed.
+_FUZZ_DEFAULT_SEED_INPUT: str = "AAAA"
+
+#: Entry-point kinds the fuzzer may dispatch on.
+_FUZZ_ENTRY_POINT_KINDS: frozenset[str] = frozenset({"fuzz_harness", "cli_arg"})
+
+
+def fuzz_entry_points_for_dispatch(round_tasks: list[AgentTask]) -> list[EntryPoint]:
+    """Unique CLI/fuzz-harness entry points across *round_tasks*, in discovery order."""
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    entry_points: list[EntryPoint] = []
+    for task in round_tasks:
+        for entry_point in task.entry_points:
+            if entry_point.kind not in _FUZZ_ENTRY_POINT_KINDS:
+                continue
+            key = (entry_point.file, entry_point.function, tuple(entry_point.invocation))
+            if key in seen:
+                continue
+            seen.add(key)
+            entry_points.append(entry_point)
+    return entry_points
+
+
+def fuzz_skip_reason(entry_point: EntryPoint) -> str | None:
+    """Why *entry_point* cannot be fuzzed in v1, or ``None`` when it can.
+
+    Fail-closed and explicit: a non-args channel, an empty invocation, or a
+    non-fuzzable kind skips the entry point with a recorded reason rather than
+    guessing how to invoke it.
+    """
+    if entry_point.kind not in _FUZZ_ENTRY_POINT_KINDS:
+        return "kind-not-fuzzable"
+    if not entry_point.invocation:
+        return "missing-invocation"
+    if entry_point.attacker_controlled_input != "args":
+        return f"channel-not-args:{entry_point.attacker_controlled_input}"
+    return None
+
+
+def fuzz_focus_skip_reason(focused_classes: list[VulnerabilityClass]) -> str | None:
+    """Why an *n*-class focus cannot dispatch fuzz, or ``None`` when it can.
+
+    Fuzz attributes every crash to the scan's single focused class, so a
+    multi-class or default-ALL focus skips the sweep entirely (requirement
+    ``Fuzz dispatch gates on single-class focus``).
+    """
+    if len(focused_classes) != 1:
+        return "focus-not-single-class"
+    return None
+
+
+def fuzz_binary_path(entry_point: EntryPoint) -> str:
+    """Repo-relative path of the built binary, taken from recon's ``invocation[0]``."""
+    raw = entry_point.invocation[0]
+    return raw[2:] if raw.startswith("./") else raw
+
+
+def _fuzz_result_mapping(payload: object) -> dict[str, object]:
+    """Return a ``fuzz`` activity payload as a mapping (empty when it is not one)."""
+    if isinstance(payload, dict):
+        return cast(dict[str, object], payload)
+    dump = getattr(payload, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        if isinstance(dumped, dict):
+            return cast(dict[str, object], dumped)
+    return {}
+
+
+def _fuzz_validation_result_from_activity(payload: object) -> FuzzValidationResult:
+    if isinstance(payload, FuzzValidationResult):
+        return payload
+    if isinstance(payload, dict):
+        values = cast(dict[str, Any], payload)
+        return FuzzValidationResult(
+            verdict=_required_str(values, "verdict"),
+            reasons=_required_str_list(values, "reasons"),
+            checks_run=_required_str_list(values, "checks_run"),
+        )
+    msg = f"Unexpected fuzz validation payload: {type(payload).__name__}"
     raise TypeError(msg)
 
 

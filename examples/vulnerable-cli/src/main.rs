@@ -3,10 +3,17 @@
 /// Vulnerabilities (intentional):
 /// 1. Command injection: --run-cmd passes user input directly to sh -c.
 /// 2. Path traversal: --read-file reads any path without canonicalization.
+/// 3. Tempfile race: --write-temp uses a predictable name in a shared
+///    directory with a check-then-create window (no mkstemp/O_EXCL), so an
+///    attacker who pre-plants the path wins the race.
+/// 4. Terminal escape injection: --echo-input echoes user input to stdout
+///    without stripping ANSI/terminal-control sequences.
+/// 5. Env injection: --edit executes the attacker-controlled $EDITOR value.
 ///
 /// DO NOT deploy in any real environment.
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 fn main() {
@@ -16,6 +23,9 @@ fn main() {
         eprintln!("Usage: vulnerable-cli <subcommand> [args]");
         eprintln!("  --run-cmd <shell-expression>  Execute shell expression (UNSAFE)");
         eprintln!("  --read-file <path>            Read and print file contents");
+        eprintln!("  --write-temp <content>        Write content to a shared temp file (UNSAFE)");
+        eprintln!("  --echo-input <value>          Echo a value to stdout (UNSAFE)");
+        eprintln!("  --edit <path>                 Open path with $EDITOR (UNSAFE)");
         exit(1);
     }
 
@@ -49,6 +59,53 @@ fn main() {
                     exit(1);
                 }
             }
+        }
+        "--edit" => {
+            if args.len() < 3 {
+                eprintln!("--edit requires an argument");
+                exit(1);
+            }
+            // VULNERABILITY: attacker-controlled $EDITOR is executed with an
+            // attacker-controlled path (environment-variable injection).
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+            let status = Command::new(&editor)
+                .arg(&args[2])
+                .status()
+                .expect("failed to launch editor");
+            exit(status.code().unwrap_or(1));
+        }
+        "--write-temp" => {
+            if args.len() < 3 {
+                eprintln!("--write-temp requires an argument");
+                exit(1);
+            }
+            // VULNERABILITY: predictable temp file name in a shared directory
+            // with a check-then-create window (no randomisation, no O_EXCL).
+            // An attacker who pre-plants the path wins the race and the tool
+            // then trusts the attacker-supplied content.
+            let path = match env::var("TMPDIR") {
+                Ok(dir) => PathBuf::from(format!("{}/vulnerable-cli-tmp", dir)),
+                Err(_) => Path::new("/tmp/vulnerable-cli-tmp").to_path_buf(),
+            };
+            if !path.exists() {
+                fs::write(&path, args[2].as_bytes()).expect("failed to write temp file");
+            }
+            match fs::read_to_string(&path) {
+                Ok(content) => print!("{}", content),
+                Err(e) => {
+                    eprintln!("Error reading temp file: {}", e);
+                    exit(1);
+                }
+            }
+        }
+        "--echo-input" => {
+            if args.len() < 3 {
+                eprintln!("--echo-input requires an argument");
+                exit(1);
+            }
+            // VULNERABILITY: no ANSI/terminal-control-sequence sanitization —
+            // attacker-controlled input escapes into the operator's terminal.
+            print!("{}", args[2]);
         }
         other => {
             eprintln!("Unknown subcommand: {}", other);

@@ -33,10 +33,12 @@ ADR-020 re-prompt sub-loop:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import uuid
 from collections.abc import Callable
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ValidationError, model_validator
 
@@ -45,13 +47,21 @@ from quarry.schemas import (
     AgentLoopResult,
     AgentStep,
     ArtifactKind,
+    ContextResetEvent,
     ProposedAction,
     ReasoningCheckResult,
 )
-from quarry_artifacts.local import LocalArtifactStore
+from quarry_artifacts.store import ArtifactStore, build_artifact_store
+from quarry_models.agent_log import (
+    AgentLogEvent,
+    AgentLogEventType,
+    agent_log_key,
+    last_model_invocation_id,
+)
 from quarry_models.guards import check_schema_mismatch, check_vague_reasoning
 from quarry_models.redaction import scrub
 from quarry_models.types import (
+    CHARS_PER_TOKEN,
     BudgetSpec,
     ModelMessage,
     ModelRequest,
@@ -62,7 +72,19 @@ from quarry_prompts import get_registry
 from quarry_prompts.build_prompt import build_prompt
 from quarry_tools.errors import UnauthorizedToolError
 
+if TYPE_CHECKING:
+    from quarry_artifacts.store import ArtifactStore
+
 _log = logging.getLogger(__name__)
+
+# ── Context-window reset (hunter-context-reset) ──────────────────────────────
+# On reset the loop keeps the most recent ``_RESET_RECENT_TURNS`` assistant+user
+# turn pairs and folds every older turn into one deterministic summary message.
+_RESET_STRATEGY = "sliding_window"
+_RESET_RECENT_TURNS = 2
+# One-line cap on a turn's condensed tool-result observation. A verbose
+# read_file/grep output must not re-inflate the context the reset just shrank.
+_OBSERVATION_MAX_CHARS = 200
 
 
 def _hash_text(text: str) -> str:
@@ -77,7 +99,7 @@ def _store_rejected_reasoning(
     tool_name: str,
     iteration: int,
     retry: int,
-    store: LocalArtifactStore | None,
+    store: ArtifactStore | None,
     scan_id: str | None,
 ) -> str:
     """Persist a rejected ActionReasoning as an artifact and return its ArtifactRef.id.
@@ -129,10 +151,131 @@ class ToolCallRequest(BaseModel):
         return d
 
 
-def _wrap_tool_result(tool_name: str, output: str) -> str:
-    """Wrap a tool result in <target_content> tags after scrubbing."""
-    scrubbed = scrub(output).text
-    return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed}\n</target_content>"
+def _wrap_tool_result(tool_name: str, scrubbed_output: str) -> str:
+    """Wrap an already-scrubbed tool result in <target_content> tags."""
+    return f"Tool '{tool_name}' result:\n<target_content>\n{scrubbed_output}\n</target_content>"
+
+
+def _estimate_tokens(messages: list[ModelMessage]) -> int:
+    """Estimate the token count of *messages* with the shared char/4 heuristic.
+
+    Mirrors ``quarry_plugins.budget.enforce_context_budget``: every message's full
+    content string is counted, then divided by ``CHARS_PER_TOKEN``. Deterministic
+    and dependency-free — a per-model tokenizer is out of scope (proposal Non-goals).
+    """
+    return sum(len(message.content) for message in messages) // CHARS_PER_TOKEN
+
+
+def _summarise_value(value: object) -> str:
+    """Render one summary field as a stable, single-line JSON literal."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return json.dumps(str(value), ensure_ascii=False)
+
+
+def _collect_structured_items(parsed: object, field: str) -> list[dict[str, Any]]:
+    """Collect one list-of-items field from a parsed model response.
+
+    ``hunt``'s response carries ``findings`` / ``coverage_gaps``; other roles'
+    response models simply have no such field, so a missing or non-list value
+    yields an empty list.
+    """
+    raw = getattr(parsed, field, None)
+    if not isinstance(raw, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for item in cast("list[object]", raw):
+        if isinstance(item, BaseModel):
+            items.append(item.model_dump(mode="json"))
+        elif isinstance(item, dict):
+            items.append({str(key): value for key, value in cast("dict[Any, Any]", item).items()})
+    return items
+
+
+def _condense_tool_results(tool_results: list[str]) -> str:
+    """Condense one turn's tool results into a single-line observation.
+
+    Keeps the first non-empty line of each result and caps the whole observation,
+    so a verbose ``read_file``/``grep`` output cannot re-inflate the context the
+    reset exists to shrink.
+    """
+    lines: list[str] = []
+    for result in tool_results:
+        first = next((line.strip() for line in result.splitlines() if line.strip()), "")
+        if first:
+            lines.append(first)
+    condensed = " | ".join(lines)
+    if len(condensed) > _OBSERVATION_MAX_CHARS:
+        condensed = condensed[: _OBSERVATION_MAX_CHARS - 3].rstrip() + "..."
+    return condensed
+
+
+def _build_reset_summary(
+    steps: list[AgentStep],
+    findings: list[dict[str, Any]],
+    gaps: list[dict[str, Any]],
+    observations: list[str],
+) -> str:
+    """Render the deterministic Markdown summary injected on a history reset.
+
+    Sections and keys are fixed so downstream parsers (gapfill, report) can extract
+    the compressed state without re-parsing conversation history. Every input is an
+    explicit parameter: this builder never reads raw history.
+    """
+    lines: list[str] = ["## Compressed context", "", "### Findings"]
+    for index, finding in enumerate(findings, start=1):
+        lines.append(
+            f"- finding {index}: title={_summarise_value(finding.get('title', ''))} "
+            f"component={_summarise_value(finding.get('affected_component', ''))} "
+            f"confidence={_summarise_value(finding.get('confidence', ''))} "
+            f"severity={_summarise_value(finding.get('severity', ''))} "
+            f"hypothesis={_summarise_value(finding.get('hypothesis', ''))}"
+        )
+    if not findings:
+        lines.append("- none")
+    lines.extend(["", "### Coverage Gaps"])
+    for index, gap in enumerate(gaps, start=1):
+        lines.append(
+            f"- gap {index}: area={_summarise_value(gap.get('area', ''))} "
+            f"reason={_summarise_value(gap.get('reason', ''))} "
+            f"vuln_class={_summarise_value(gap.get('vuln_class', ''))}"
+        )
+    if not gaps:
+        lines.append("- none")
+    lines.extend(["", "### Key Observations"])
+    for step in steps:
+        lines.append(
+            f"- step {step.iteration}: tools={_summarise_value(list(step.tool_calls))} "
+            f"reasoning={_summarise_value(step.reasoning_summary or '')}"
+        )
+    lines.extend(f"- {observation}" for observation in observations)
+    if not steps and not observations:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _reset_history(
+    history: list[ModelMessage],
+    system_prompt: str,
+    task_directive: str,
+    summary: str,
+    recent_n: int,
+) -> list[ModelMessage]:
+    """Rebuild *history* as [system, task directive, summary, ...recent turn pairs].
+
+    The task directive keeps its own message: the summary covers turn 1 onward, so
+    the pre-turn directive would otherwise be dropped by the reset.
+    """
+    retained = history[-2 * recent_n :] if recent_n > 0 else []
+    return [
+        ModelMessage(role="system", content=system_prompt),
+        ModelMessage(role="user", content=task_directive),
+        ModelMessage(role="user", content=summary),
+        *retained,
+    ]
 
 
 def _try_emit(
@@ -145,6 +288,43 @@ def _try_emit(
         event_sink(event_type, payload)
     except Exception:
         _log.warning("event_sink raised on %s; continuing", event_type, exc_info=True)
+
+
+def _redact_inputs(value: Any) -> Any:
+    """Recursively scrub every string in a tool-call input value.
+
+    Tool args (paths, patterns, URLs) are target-influenced and may carry a
+    secret literal; running them through the same ``scrub`` chokepoint the
+    prompt path uses keeps raw secrets out of the durable per-agent log.
+    """
+    if isinstance(value, str):
+        return scrub(value).text
+    if isinstance(value, dict):
+        mapping = cast("dict[Any, Any]", value)
+        return {str(k): _redact_inputs(v) for k, v in mapping.items()}
+    if isinstance(value, list):
+        items = cast("list[Any]", value)
+        return [_redact_inputs(v) for v in items]
+    return value
+
+
+def _append_log_line(store: ArtifactStore, key: str, entry: AgentLogEvent) -> None:
+    """Serialise *entry* as one JSONL line and append it to *key*.
+
+    The store's ``append_bytes`` op writes with ``O_APPEND``, so the line lands
+    after any existing lines — a replay appends, it never truncates.  A store
+    failure is logged and swallowed: a broken log must never crash the loop.
+    """
+    try:
+        data = entry.model_dump_json(exclude_none=True).encode("utf-8") + b"\n"
+        store.append_bytes(
+            key,
+            data,
+            kind=ArtifactKind.AGENT_LOG,
+            content_type="application/x-ndjson",
+        )
+    except Exception:
+        _log.warning("agent-log append failed for %s; continuing", key, exc_info=True)
 
 
 def _render_vague_feedback(
@@ -249,12 +429,30 @@ def run_agent_loop(
     # Per-tier cap on the total number of tool calls this loop may issue (MDASH
     # per-role caps, task 1.3).  ``None`` = bounded only by ``max_iterations``.
     tool_call_cap: int | None = None,
+    # Per-loop context-window enforcement (hunter-context-reset).  ``None`` = no
+    # limit: history grows unbounded exactly as before.  When set, the loop folds
+    # all but the most recent turns into a summary once the accumulated history
+    # reaches ``context_window_threshold`` of this limit.  The activity layer
+    # resolves both values from the role's ``RoleConfig``.
+    context_window_tokens: int | None = None,
+    context_window_threshold: float = 0.8,
     # Optional per-(provider, role) rate limiter (MDASH, design D5).  When set,
     # ``limiter.acquire()`` is called once per model turn before dispatch to
     # throttle to the role's configured rpm.  ``None`` = unthrottled.  The limiter
     # lives in the dispatch path (quarry_models), never in workflow code, so it is
     # replay-safe.
     limiter: Any | None = None,
+    # Per-agent durable execution log (per-agent-durable-logs).  When BOTH an
+    # instance id and a store are given, the loop appends one JSONL line per
+    # event (tool_call / tool_result / model_call / stop) to
+    # ``agents/<scan_id>/<role>/<instance_id>.jsonl`` via the store's
+    # ``append_bytes`` op (append-only, so replay never truncates).  Either
+    # absent => no log file is written (backward compatible).
+    agent_instance_id: str | None = None,
+    agent_log_store: ArtifactStore | None = None,
+    # True when this run is a replay of an already-logged task: log lines then
+    # carry ``replay: true`` so a replay is distinguishable from the original.
+    replay_mode: bool = False,
 ) -> AgentLoopResult:
     """Run a multi-turn agent loop and return the result.
 
@@ -296,6 +494,28 @@ def run_agent_loop(
         payloads (``agent.action_proposed`` or ``agent.reasoning_rejected``). Raw
         ``args`` and unredacted reasoning text are never passed through the sink.
         Callers (activities) use this to persist ``WorkflowEvent`` rows to the scan DB.
+        When a context-window reset fires, the loop additionally emits
+        ``agent.context_reset`` with ``agent_kind``, ``iteration``, ``tokens_before``,
+        ``tokens_after``, ``turns_compressed`` and ``strategy``.
+    context_window_tokens:
+        Per-loop context-window limit in tokens (hunter-context-reset). ``None``
+        (the default) leaves history unbounded, exactly as before. When set, the
+        loop estimates the accumulated history with the shared char/4 heuristic
+        after each turn and, once it reaches ``context_window_threshold`` of the
+        limit, folds all but the most recent ``_RESET_RECENT_TURNS`` turns into a
+        deterministic summary message that enumerates every finding and coverage
+        gap seen in the compressed turns.
+    context_window_threshold:
+        Fraction of ``context_window_tokens`` at which a reset fires. Default 0.8.
+    agent_instance_id:
+        Deterministic per-agent id (``<role>-<task_id_prefix_8>``). Together with
+        ``agent_log_store`` it enables the per-agent durable execution log.
+    agent_log_store:
+        Artifact store the per-agent JSONL log is appended to. When either this
+        or ``agent_instance_id`` is None, no log is written (backward compatible).
+    replay_mode:
+        True on a replay of an already-logged task; log lines then carry
+        ``replay: true`` so a replay is distinguishable from the original run.
 
     Returns
     -------
@@ -316,10 +536,56 @@ def run_agent_loop(
     ctx = task_context or {}
     parsed: Any = None  # last parsed model response; referenced after loop exhaustion
 
+    # Context-window reset bookkeeping (hunter-context-reset): each iteration's
+    # structured output and a condensed tool-result summary, retained so a reset
+    # summarises exactly the turns it compresses without re-parsing raw history.
+    turn_findings: dict[int, list[dict[str, Any]]] = {}
+    turn_gaps: dict[int, list[dict[str, Any]]] = {}
+    turn_results: dict[int, str] = {}
+
     # Build the ArtifactStore lazily if a path was provided.  None = no store.
-    _store: LocalArtifactStore | None = (
-        LocalArtifactStore(artifact_store_path) if artifact_store_path else None
+    _store: ArtifactStore | None = (
+        build_artifact_store(artifact_store_path) if artifact_store_path else None
     )
+
+    # Per-agent execution log (per-agent-durable-logs).  Resolve the log key once;
+    # every emission below is a no-op unless BOTH an instance id and a store were
+    # supplied (callers that omit them keep the previous behaviour).  ``_emit_log``
+    # stamps the shared envelope so each line is self-attributing.
+    _log_store: ArtifactStore | None = agent_log_store
+    _log_instance_id: str | None = agent_instance_id
+    _log_key: str | None = (
+        agent_log_key(scan_id or "unknown", role, _log_instance_id)
+        if _log_store is not None and _log_instance_id is not None
+        else None
+    )
+
+    def _emit_log(event: AgentLogEventType, iteration: int, **fields: Any) -> None:
+        if _log_store is None or _log_key is None or _log_instance_id is None:
+            return
+        _append_log_line(
+            _log_store,
+            _log_key,
+            AgentLogEvent(
+                instance_id=_log_instance_id,
+                timestamp=datetime.now(UTC),
+                event=event,
+                iteration=iteration,
+                replay=replay_mode,
+                **fields,
+            ),
+        )
+
+    def _finish(result: AgentLoopResult) -> AgentLoopResult:
+        """Emit the terminal ``stop`` line (always the final log line), then return."""
+        _emit_log(
+            "stop",
+            result.iterations_used,
+            stop_reason=result.stop_reason,
+            iterations_used=result.iterations_used,
+            total_cost=result.total_cost,
+        )
+        return result
 
     # ADR-019 per-part provenance is constant for the loop's lifetime (it describes
     # the seed rendered prompt); compute the request kwargs once and stamp them on
@@ -402,13 +668,15 @@ def run_agent_loop(
                             estimated_cost=cost_per_iteration,
                         )
                     )
-                    return AgentLoopResult(
-                        final_answer=None,
-                        steps=steps,
-                        iterations_used=iteration,
-                        total_cost=total_cost,
-                        stop_reason="schema_rejected",
-                        unauthorized_tool_denials=list(unauthorized_denials),
+                    return _finish(
+                        AgentLoopResult(
+                            final_answer=None,
+                            steps=steps,
+                            iterations_used=iteration,
+                            total_cost=total_cost,
+                            stop_reason="schema_rejected",
+                            unauthorized_tool_denials=list(unauthorized_denials),
+                        )
                     )
                 # Render repair feedback from the registry template (ADR-019).
                 feedback = _render_schema_repair_feedback(
@@ -438,6 +706,13 @@ def run_agent_loop(
                 model_call_failed = True
                 break  # leave the reasoning sub-loop; the outer loop consumes this turn
             parsed = response.parsed
+            # Per-agent log: one model_call line per real model call, carrying the
+            # recorded ModelInvocation id so the log cross-references provenance.
+            _emit_log(
+                "model_call",
+                iteration,
+                model_invocation_id=last_model_invocation_id(client),
+            )
             _log.info(
                 "[%s turn=%d] ← %s",
                 agent_kind,
@@ -456,13 +731,15 @@ def run_agent_loop(
                         estimated_cost=cost_per_iteration,
                     )
                 )
-                return AgentLoopResult(
-                    final_answer=None,
-                    steps=steps,
-                    iterations_used=iteration,
-                    total_cost=total_cost,
-                    stop_reason="guard_triggered",
-                    unauthorized_tool_denials=list(unauthorized_denials),
+                return _finish(
+                    AgentLoopResult(
+                        final_answer=None,
+                        steps=steps,
+                        iterations_used=iteration,
+                        total_cost=total_cost,
+                        stop_reason="guard_triggered",
+                        unauthorized_tool_denials=list(unauthorized_denials),
+                    )
                 )
 
             # Check proposed_actions reasoning (ADR-020)
@@ -501,13 +778,15 @@ def run_agent_loop(
                                 rejected_reasoning_refs=list(reprompt_rejected_refs),
                             )
                         )
-                        return AgentLoopResult(
-                            final_answer=None,
-                            steps=steps,
-                            iterations_used=iteration,
-                            total_cost=total_cost,
-                            stop_reason="reasoning_rejected",
-                            unauthorized_tool_denials=list(unauthorized_denials),
+                        return _finish(
+                            AgentLoopResult(
+                                final_answer=None,
+                                steps=steps,
+                                iterations_used=iteration,
+                                total_cost=total_cost,
+                                stop_reason="reasoning_rejected",
+                                unauthorized_tool_denials=list(unauthorized_denials),
+                            )
                         )
 
                     # Re-prompt: render feedback (ADR-019 — all text in .j2)
@@ -579,6 +858,10 @@ def run_agent_loop(
         assert response is not None
         assert parsed is not None
 
+        # Structured output this turn contributes to a future reset summary.
+        turn_findings[iteration] = _collect_structured_items(parsed, "findings")
+        turn_gaps[iteration] = _collect_structured_items(parsed, "coverage_gaps")
+
         # Extract tool_calls from the response (field is optional on the model)
         tool_calls: list[ToolCallRequest] = []
         raw_calls = getattr(parsed, "tool_calls", None)
@@ -596,13 +879,15 @@ def run_agent_loop(
             remaining = tool_call_cap - tool_calls_used
             if remaining <= 0:
                 _last_capped = parsed if isinstance(parsed, response_model) else None
-                return AgentLoopResult(
-                    final_answer=_last_capped,
-                    steps=steps,
-                    iterations_used=iteration,
-                    total_cost=total_cost,
-                    stop_reason="tool_call_cap",
-                    unauthorized_tool_denials=list(unauthorized_denials),
+                return _finish(
+                    AgentLoopResult(
+                        final_answer=_last_capped,
+                        steps=steps,
+                        iterations_used=iteration,
+                        total_cost=total_cost,
+                        stop_reason="tool_call_cap",
+                        unauthorized_tool_denials=list(unauthorized_denials),
+                    )
                 )
             if len(tool_calls) > remaining:
                 tool_calls = tool_calls[:remaining]
@@ -630,19 +915,28 @@ def run_agent_loop(
             _log.info("[%s turn=%d] final answer", agent_kind, iteration)
             # No tool calls → final answer
             final_answer = parsed
-            return AgentLoopResult(
-                final_answer=final_answer,
-                steps=steps,
-                iterations_used=iteration,
-                total_cost=total_cost,
-                stop_reason="final_answer",
-                unauthorized_tool_denials=list(unauthorized_denials),
+            return _finish(
+                AgentLoopResult(
+                    final_answer=final_answer,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="final_answer",
+                    unauthorized_tool_denials=list(unauthorized_denials),
+                )
             )
 
         # Execute tool calls and append results to history
         _log.info("[%s turn=%d] tools: %s", agent_kind, iteration, step_tool_names)
         tool_results: list[str] = []
         for tc in tool_calls:
+            # Per-agent log: the full (redacted) args of every dispatched call.
+            _emit_log(
+                "tool_call",
+                iteration,
+                tool_name=tc.tool,
+                inputs=cast("dict[str, Any]", _redact_inputs(tc.inputs)),
+            )
             try:
                 record = runner.run(tc.tool, tc.inputs)
                 output_text = record.output
@@ -653,11 +947,13 @@ def run_agent_loop(
                 if tc.tool not in unauthorized_denials:
                     unauthorized_denials.append(tc.tool)
                 _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
-                tool_results.append(
+                failure_text = (
                     f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
                     f"Retry with valid arguments (paths must be relative to the repo root, "
                     f"not URL routes)."
                 )
+                _emit_log("tool_result", iteration, output=scrub(failure_text).text)
+                tool_results.append(failure_text)
                 continue
             except Exception as exc:
                 # Any tool failure — bad/missing args, a path that escapes the repo
@@ -666,21 +962,29 @@ def run_agent_loop(
                 # error. Feed a descriptive message back so it retries; never crash
                 # the activity (which would lose every finding this agent produces).
                 _log.warning("[%s turn=%d] tool %s failed: %s", agent_kind, iteration, tc.tool, exc)
-                tool_results.append(
+                failure_text = (
                     f"Tool '{tc.tool}' failed: {type(exc).__name__}: {exc}. "
                     f"Retry with valid arguments (paths must be relative to the repo root, "
                     f"not URL routes)."
                 )
+                _emit_log("tool_result", iteration, output=scrub(failure_text).text)
+                tool_results.append(failure_text)
                 continue
 
-            # Redact secrets before the model ever sees the output. _wrap_tool_result
-            # scrubs the content (redaction MUST stay), so a target file that legitimately
-            # contains a secret — which a code-analysis agent must be able to read — reaches
-            # the model only as [REDACTED_SECRET_N], never raw. We deliberately do NOT halt
-            # the loop here: halting would make the agent unable to analyse any repository
-            # that contains a secret, and it added no protection beyond the scrub below
-            # (both use the same scrubber).
-            tool_results.append(_wrap_tool_result(tc.tool, output_text))
+            # Redact secrets before the model ever sees the output. scrub() is the
+            # single chokepoint (redaction MUST stay), so a target file that
+            # legitimately contains a secret — which a code-analysis agent must be
+            # able to read — reaches the model only as [REDACTED_SECRET_N], never
+            # raw. We deliberately do NOT halt the loop here: halting would make
+            # the agent unable to analyse any repository that contains a secret,
+            # and it added no protection beyond this scrub. The scrubbed text is
+            # used for BOTH the model's history and the per-agent log line.
+            scrubbed_output = scrub(output_text).text
+            _emit_log("tool_result", iteration, output=scrubbed_output)
+            tool_results.append(_wrap_tool_result(tc.tool, scrubbed_output))
+
+        # Condensed tool-call result summary for a future reset summary.
+        turn_results[iteration] = _condense_tool_results(tool_results)
 
         # Record the model's actual JSON response so open models don't echo our
         # synthetic summary string back on the next turn.
@@ -689,24 +993,89 @@ def run_agent_loop(
 
         # Budget check after executing tools
         if budget_spec.max_cost_usd is not None and total_cost >= budget_spec.max_cost_usd:
-            return AgentLoopResult(
-                final_answer=None,
-                steps=steps,
-                iterations_used=iteration,
-                total_cost=total_cost,
-                stop_reason="budget_exceeded",
-                unauthorized_tool_denials=list(unauthorized_denials),
+            return _finish(
+                AgentLoopResult(
+                    final_answer=None,
+                    steps=steps,
+                    iterations_used=iteration,
+                    total_cost=total_cost,
+                    stop_reason="budget_exceeded",
+                    unauthorized_tool_denials=list(unauthorized_denials),
+                )
             )
+
+        # ── Context-window enforcement (hunter-context-reset) ───────────────
+        # History has been appended for this turn; if it now reaches the role's
+        # threshold, fold every turn except the most recent _RESET_RECENT_TURNS into
+        # the summary before the next model call. No limit = no estimation at all.
+        if context_window_tokens is not None:
+            tokens_before = _estimate_tokens(history)
+            if tokens_before >= int(context_window_tokens * context_window_threshold):
+                turns_compressed = iteration - _RESET_RECENT_TURNS
+                if turns_compressed >= 1:
+                    compressed_steps = [
+                        step for step in steps if step.iteration <= turns_compressed
+                    ]
+                    compressed_range = range(1, turns_compressed + 1)
+                    summary = _build_reset_summary(
+                        compressed_steps,
+                        [f for i in compressed_range for f in turn_findings.get(i, [])],
+                        [g for i in compressed_range for g in turn_gaps.get(i, [])],
+                        [
+                            f"result {i}: {turn_results[i]}"
+                            for i in compressed_range
+                            if turn_results.get(i)
+                        ],
+                    )
+                    new_history = _reset_history(
+                        history,
+                        system_prompt,
+                        initial_user_message,
+                        summary,
+                        _RESET_RECENT_TURNS,
+                    )
+                    reset_event = ContextResetEvent(
+                        iteration=iteration,
+                        tokens_before=tokens_before,
+                        tokens_after=_estimate_tokens(new_history),
+                        turns_compressed=turns_compressed,
+                        strategy=_RESET_STRATEGY,
+                    )
+                    history = new_history
+                    steps[-1] = steps[-1].model_copy(update={"context_reset": reset_event})
+                    _log.info(
+                        "[%s turn=%d] context reset: %d turns compressed, %d→%d tokens",
+                        agent_kind,
+                        iteration,
+                        reset_event.turns_compressed,
+                        reset_event.tokens_before,
+                        reset_event.tokens_after,
+                    )
+                    if event_sink is not None:
+                        _try_emit(
+                            event_sink,
+                            "agent.context_reset",
+                            {
+                                "agent_kind": agent_kind,
+                                "iteration": str(iteration),
+                                "tokens_before": reset_event.tokens_before,
+                                "tokens_after": reset_event.tokens_after,
+                                "turns_compressed": reset_event.turns_compressed,
+                                "strategy": reset_event.strategy,
+                            },
+                        )
 
     # Exhausted iterations — preserve findings from the last response if the model
     # never submitted a clean final answer (no tool_calls). This prevents losing
     # findings that the model reported alongside tool_calls in its last turn.
     _last_response = parsed if isinstance(parsed, response_model) else None
-    return AgentLoopResult(
-        final_answer=_last_response,
-        steps=steps,
-        iterations_used=max_iterations,
-        total_cost=total_cost,
-        stop_reason="max_iterations",
-        unauthorized_tool_denials=list(unauthorized_denials),
+    return _finish(
+        AgentLoopResult(
+            final_answer=_last_response,
+            steps=steps,
+            iterations_used=max_iterations,
+            total_cost=total_cost,
+            stop_reason="max_iterations",
+            unauthorized_tool_denials=list(unauthorized_denials),
+        )
     )
