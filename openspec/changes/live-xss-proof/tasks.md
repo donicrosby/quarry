@@ -87,7 +87,10 @@
   - [ ] 4.1.9 Browser context teardown (fail-closed: if teardown fails, session
     expires on timeout)
 - [ ] 4.2 Integration test: `tests/quarry_activities/test_prove_xss.py` —
-    W1-dependent; skip-guard: `pytest.mark.skipif(missing_binary("browser-session"), reason="W1 browser-session-tool not deployed")`.
+    W1-dependent; skip-guard:
+    `pytest.mark.skipif(importlib.util.find_spec("quarry_activities.browser_session") is None, reason="W1 browser-session-tool not deployed")`
+    (import probe mirrors the `lazy-w1-dependency` requirement; W1 lands as an
+    in-repo module + `browser-session` Temporal activity, not a PATH binary).
     When W1 is deployed (locally or via CI lane), the tests run against a
     live browser session; otherwise the suite skips with a clear message.
   reflected mode
