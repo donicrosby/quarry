@@ -22,6 +22,8 @@ docker compose up --build -d        # or: task compose-up
 curl localhost:8000/healthz         # {"status":"ok"}
 ```
 
+Host port 8000 already in use? `QUARRY_SERVER_HOST_PORT=8001 docker compose up -d`.
+
 The server runs with `--no-worker`; the dedicated `worker` container owns the
 Temporal task queue. Model/git secrets are passed through from your shell or a
 `.env` file — see `.env.example`. Stop with `docker compose down`.

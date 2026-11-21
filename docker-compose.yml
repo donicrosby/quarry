@@ -38,7 +38,9 @@ services:
       QUARRY_PANEL: ${QUARRY_PANEL:-}
       CHUTES_API_KEY: ${CHUTES_API_KEY:-}
     ports:
-      - "8000:8000"
+      # Host side remappable for hosts where 8000 is taken:
+      #   QUARRY_SERVER_HOST_PORT=8001 docker compose up -d
+      - "${QUARRY_SERVER_HOST_PORT:-8000}:8000"
     volumes:
       - quarry-data:/data
       # User-local config (gitignored; cp quarry.toml.example quarry.toml first).
