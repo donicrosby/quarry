@@ -31,17 +31,20 @@ value exactly matches the canary token.
 - **THEN** `prove_xss` SHALL raise `RuntimeError` with a message naming the
   missing dependency rather than an opaque `ImportError`
 
-### Requirement: prove-stored-xss-two-request-chain
+### Requirement: prove-stored-xss-multi-step-chain
 
-The `prove_xss` activity in stored mode SHALL execute a two-request chain: first
-inject the canary payload into the write endpoint, then open the read endpoint
-and verify execution via `execute_js`. The activity SHALL enforce a minimum
-500 ms settling delay between inject and fetch.
+The `prove_xss` activity in stored mode SHALL execute a multi-step browser chain:
+first navigate to the target origin, then inject the canary payload into the
+write endpoint via a same-origin `fetch()` call from `execute_js`, wait a
+settling delay, open the read endpoint, and verify execution via `execute_js`.
+The activity SHALL enforce a minimum `settle_delay_ms` (default 500 ms) between
+inject and fetch, and SHALL detect CSP `connect-src` blocks on the fetch leg.
 
 #### Scenario: stored-canary-persists-and-executes
 
-- **WHEN** the canary is injected via POST to the write endpoint, the read
-  endpoint renders the stored content, and the canary executes browser-side
+- **WHEN** the canary is delivered to the write endpoint via `execute_js`
+  `fetch()` at `inject_spec`, the read endpoint renders the stored content,
+  and the canary executes browser-side
 - **THEN** `ProveXssOutput.grounded = true` with evidence kind `"window_global"`
 
 #### Scenario: stored-canary-persists-but-does-not-execute
@@ -71,12 +74,14 @@ HTTP callbacks without a separate side channel.
 
 ### Requirement: dom-source-sink-analysis
 
-The `analyze_bundle()` function SHALL parse a JavaScript source string with
-`tree-sitter-javascript` and report every pair where a closed-roster DOM source
-(e.g. `location.hash`) and a closed-roster DOM sink (e.g. `innerHTML`) appear
-within the same function body. Matches SHALL be tagged with a confidence level
-of `high` (direct assignment), `medium` (intermediate variable), or `low`
-(different functions, same bundle).
+The `analyze-dom-xss` activity SHALL parse JavaScript bundles with
+`tree-sitter-javascript` and pair every closed-roster DOM source with
+every closed-roster DOM sink that appears in the same bundle.
+
+Matches SHALL be tagged with a confidence level of `high` (direct
+assignment, same scope), `medium` (intermediate variable, same scope),
+or `low` (cross-function, same bundle). Top-level program code counts as
+one implicit scope.
 
 #### Scenario: direct-source-to-sink-high-confidence
 
@@ -186,7 +191,7 @@ manipulation, and no script injection beyond the assignment itself.
 ### Requirement: provenance-records-proof-method
 
 Every finding produced or updated by `prove_xss` or `analyze-dom-xss` SHALL
-record the proof method in its provenance field. Browser-confirmed findings
+record the proof method in its `cascade_step` field. Browser-confirmed findings
 SHALL carry `"browser-confirmed"`; DOM analysis findings SHALL carry
 `"static-dom-analysis"`.
 
@@ -194,14 +199,16 @@ SHALL carry `"browser-confirmed"`; DOM analysis findings SHALL carry
 
 - **WHEN** `prove_xss` returns `grounded = true`
 - **THEN** the caller SHALL record `"browser-confirmed"` in the finding's
-  provenance along with the canary token prefix and observation method
+  `cascade_step` along with the canary token prefix and observation method
 
 #### Scenario: dom-analysis-provenance
 
 - **WHEN** `analyze-dom-xss` produces a `DomSourceSinkMatch`
-- **THEN** the resulting `LiveAttackMapEntry` carries
-  `source = "code_analysis"` and the finding provenance records
-  `"static-dom-analysis"`
+- **THEN** the resulting `CandidateFinding` carries
+  `cascade_step = "static-dom-analysis"`, `grounded = False`, and
+  `source_refs` populated from the match's bundle URL and positions.
+  Future wiring into `LiveAttackMapEntry` / `merge_attack_maps` is a
+  deferred invariant.
 
 ### Requirement: lazy-w1-dependency
 

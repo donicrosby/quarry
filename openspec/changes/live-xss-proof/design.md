@@ -61,13 +61,14 @@ class ProveXssInput(BaseModel):
     mode: ProveXssMode
     target_url: str
     canary_token: str  # pre-generated; caller controls entropy
-    inject_spec: HttpRequestSpec  # reusing existing model from inputs.py
+    inject_spec: HttpRequestSpec | None = None  # stored mode only; reusing from quarry/schemas.py
     read_url: str | None = None  # for stored mode: the page that renders the stored canary
     browser_session_tool_name: str = "browser-session"
     allowed_hosts: list[str]
     scrubber: ScrubberConfig | None = None
     session_timeout_ms: int = 30_000
     page_load_timeout_ms: int = 15_000
+    settle_delay_ms: int = 500  # delay between stored inject and render-fetch
 
 class ProveXssOutput(BaseModel):
     grounded: bool
@@ -77,7 +78,7 @@ class ProveXssOutput(BaseModel):
 
 class CanaryEvidence(BaseModel):
     """Evidence that the canary was observed executing browser-side."""
-    kind: Literal["window_global", "console_log", "dialog_fire", "http_callback"]
+    kind: Literal["window_global", "http_callback"]
     value: str  # the raw read-back (matches canary_token)
     observation_method: str  # e.g. "execute_js('window._qry_xss')"
     timestamp_iso: str
@@ -108,8 +109,8 @@ class DomSourceSinkMatch(BaseModel):
 
 class DomConfidence(str, Enum):
     LOW = "low"        # same-bundle, different function
-    MEDIUM = "medium"  # same-function, complex path (e.g. via intermediate var)
-    HIGH = "high"      # same-function, direct assignment
+    MEDIUM = "medium"  # same scope, complex path (e.g. via intermediate var)
+    HIGH = "high"      # same scope, direct assignment
 ```
 
 ## D2 — Proof bar
@@ -137,15 +138,18 @@ This payload is inert — it sets a benign global — and is minimal enough to w
 across most injection contexts (HTML body, attribute break-out via `">`).
 
 ### Execution evidence (stored XSS)
-Two-request chain:
-1. **Inject**: use `browser_session.open_url` to POST/PUT the canary payload
-   to the injection endpoint. The payload is the same `<script>` fragment above
-   embedded in the form field/body parameter the candidate identifies.
-2. **Fetch**: after a short settling delay (500ms), call
-   `browser_session.open_url(read_url)` where `read_url` is the page that
-   renders stored content.
-3. **Verify**: `browser_session.execute_js("window._qry_xss")` — same pass/fail
-   logic as reflected.
+Multi-step chain via the browser session:
+1. **Navigate**: `open_url` to the target origin (any page the session can reach).
+2. **Inject**: `execute_js` issues a same-origin `fetch()` to POST the canary
+   payload to the inject endpoint (defined by the caller's `inject_spec`). The
+   payload is the same `<script>` fragment above, embedded in the body per
+   `{CANARY}` substitution. CSP `connect-src` that blocks the fetch SHALL be
+   detected and recorded as `grounded=false`.
+3. **Delay**: `settle_delay_ms` (default 500) to let the write land server-side.
+4. **Open**: `open_url(read_url)` where `read_url` is the page that renders
+   stored content.
+5. **Verify**: `execute_js("window._qry_xss")` — same pass/fail logic as
+   reflected.
 
 ### Fail-closed: negative scenario
 If `execute_js` returns `None` (global not set) or a mismatched value, OR if
@@ -166,7 +170,7 @@ global read-back is the authoritative signal.
 
 ### Input shape
 For stored XSS, the caller supplies:
-- `inject_spec`: an `HttpRequestSpec` (method, path, headers, body_template
+- `inject_spec`: an `HttpRequestSpec` (method, path, headers, body
   with `{CANARY}` placeholder) targeting the write endpoint
 - `read_url`: the URL that renders the stored content (e.g. the comment section
   of a blog post)
@@ -175,12 +179,28 @@ These are supplied by the caller — either the LLM triage step (which identifie
 the inject and read endpoints from crawl data and candidate analysis) or
 explicit test configuration. The `prove_xss` activity does not discover endpoints;
 that discovery is already performed by crawl and live-recon.
+The `{CANARY}` convention: wherever the literal string `{CANARY}` appears in
+`body`, `prove_xss` replaces it with the generated canary token before issuing
+the request. CSP `connect-src` on the inject path SHALL be accounted for in the
+proof grade (a blocked fetch leaves `grounded=false`).
 
 ### Ordering
-1. Inject: `open_url` with the inject URL (POST/PUT). Wait for response.
-2. Delay: 500ms (configurable via `session_timeout_ms`) to allow persistence.
-3. Fetch: `open_url` with the `read_url`.
-4. Verify: `execute_js("window._qry_xss")`.
+1. **Navigate**: `open_url` to any page on the target origin (so the browser is
+   same-origin for the subsequent fetch). The caller's `read_url` host MUST
+   match the inject endpoint's host; otherwise the canary fetch is cross-origin
+   and SHALL abort with `grounded=false`.
+2. **Inject**: `execute_js` with a `fetch()` call that POSTs the canary payload
+   to the inject endpoint defined by `inject_spec`. The fetch is same-origin,
+   so cookies and auth headers travel with the request. The payload is the
+   same `<script>` fragment, embedded in the body per the `{CANARY}`
+   substitution. CSP `connect-src` that blocks this fetch SHALL be detected
+   (JS exception or HTTP 4xx/5xx from the fetch response) and recorded as
+   `grounded=false`.
+3. **Delay**: `settle_delay_ms` (default 500, configurable on `ProveXssInput`)
+   to let the write land server-side.
+4. **Open**: `open_url` with the `read_url`.
+5. **Verify**: `execute_js("window._qry_xss")`. Same pass/fail logic as
+   reflected.
 
 ### Persistence miss grading
 If the canary is reflected unescaped in the response body (visible via
@@ -239,31 +259,49 @@ manipulation:
 | `$(...).append(...)` | jQuery `.append()` call |
 
 ### Taint model
-**Same-function only**: a source and sink SHALL be flagged as a match only when
-they appear within the same enclosing function body (as parsed by
-tree-sitter-javascript). No inter-procedural flow, no alias analysis, no
-inter-bundle propagation.
+Pair every closed-roster (source, sink) within the same bundle. Confidence tiers:
+
+- **`high`**: source and sink in the same enclosing scope (same function body OR
+  same top-level program block), direct assignment or call chain
+  (e.g. `x.innerHTML = location.hash`)
+- **`medium`**: same scope but through an intermediate variable
+  (e.g. `var x = location.hash; el.innerHTML = x`)
+- **`low`**: source and sink in the same bundle but different scopes
+  (cross-function; e.g. `location.hash` is read in one function, `innerHTML`
+  is assigned in another)
+
+Top-level program code (statements outside any function body) counts as one
+implicit scope — sources and sinks at the top level of the same bundle are
+eligible for `high` or `medium` confidence per the same rules.
 
 Rationale: inter-procedural taint tracking requires a full CFG + alias analysis
 (dataflow engine), which is an order-of-magnitude more complex and would be a
-separate capability. Same-function matching catches the common direct case (e.g.
-`el.innerHTML = location.hash`) while producing zero false negatives from
-missed inter-procedural flow (those are flagged at `confidence="low"` if the
-source and sink appear in the same bundle but different functions).
+separate capability. Cross-function pairing catches the common patterns while
+admitting the `low` confidence tier for cases where the flow isn't direct.
 
 ### Confidence model
-- `high`: source and sink in the same function, direct assignment or call chain
+- `high`: source and sink in the same scope (function body or top-level block),
+  direct assignment or call chain
   (e.g. `x.innerHTML = location.hash`)
-- `medium`: same function but through an intermediate variable
+- `medium`: same scope but through an intermediate variable
   (e.g. `var x = location.hash; el.innerHTML = x`)
 - `low`: source and sink in the same bundle but different functions (cross-function)
 
 ### Output schema
 Each `DomSourceSinkMatch` carries:
-- `source="code_analysis"` — the existing `LiveAttackMapEntry.source` value
 - `source_symbol`, `sink_symbol` — human-readable source and sink names
 - `source_line`/`source_col`, `sink_line`/`sink_col` — precise locations
 - `snippet` — the matched source code (≤ 200 chars, scrubbed)
+- `confidence` — one of `"high"`, `"medium"`, `"low"` per the tier rules above
+
+The `analyze-dom-xss` activity produces `CandidateFinding` records (NOT
+`LiveAttackMapEntry` — DOM findings don't carry `method`/`path`). Each
+`CandidateFinding` is constructed with `grounded = False` (static analysis
+only), `cascade_step = "static-dom-analysis"`, `source_refs` populated from
+the match's bundle URL and positions, and `snippet` in `evidence_path`.
+Future wiring of DOM findings into `merge_attack_maps` is a deferred
+invariant (requires shimming an endpoint-shaped entry from a bundle-shaped
+match).
 
 ## D5 — Containment
 
@@ -341,11 +379,12 @@ severity.
 ### Provenance / grounded semantics
 - `CandidateFinding.grounded = True` SHALL be set ONLY when browser execution
   evidence is positive (canary read-back matches)
-- DOM findings carry `LiveAttackMapEntry.source = "code_analysis"` (existing
-  value) and produce CandidateFinding entries with `grounded = False` (static
-  analysis is not execution proof)
-- The `prove_xss` activity SHALL record its execution trace in the finding's
-  `provenance` field: `"prove_xss: reflected, token=quarry-xss-{first_8}..., grounded=True"`
+- DOM analysis findings (from `analyze-dom-xss`) produce `CandidateFinding`
+  entries with `grounded = False` and `cascade_step = "static-dom-analysis"`
+  (static analysis is not execution proof). Future wiring into
+  `LiveAttackMapEntry` / `merge_attack_maps` is a deferred invariant.
+- `prove_xss` SHALL record its execution trace in the finding's `cascade_step`
+  field: `"browser-confirmed: reflected, token=quarry-xss-{first_8}..., grounded=True"`
 
 ### No-PII / redaction
 - All `get_dom()` snapshots pass through `Scrubber` before storage
@@ -355,7 +394,7 @@ severity.
 
 ### Report / coverage ledger
 - Browser-confirmed XSS findings SHALL appear in the report with provenance
-  label `"browser-confirmed"` (distinct from `"llm-corrobotated"`)
+  label `"browser-confirmed"` (distinct from `"corroborated"`)
 - DOM analysis findings SHALL appear with provenance label `"static-dom-analysis"`
 - Neither adds new coverage ledger dimensions beyond the existing
   `VulnerabilityClass.XSS` reporting path

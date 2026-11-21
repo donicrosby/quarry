@@ -29,16 +29,23 @@ the `tree-sitter-javascript` dependency already exists in the project.
    `@activity.defn(name="prove_xss")`): browser-backed proof for reflected and
    stored XSS. It injects a high-entropy canary token, opens the target in a
    browser session, and reads back a window global via `execute_js` to prove
-   execution — not just reflection. Stored XSS uses a two-request
-   inject-then-fetch chain.
+   execution — not just reflection. **Reflected XSS**: inject via query-string
+   / URL parameter through `open_url`. **Stored XSS**: first navigate to the
+   inject page, then issue a same-origin `fetch()` via `execute_js` to POST the
+   canary, wait for the write to land, then navigate to the render page and
+   read `window._qry_xss`. The proof grade accounts for CSP `connect-src` on
+   the fetch leg — a CSP block leaves the finding `grounded=false`.
 
 2. **New module `dom_xss_analysis`** (`src/quarry_activities/dom_xss_analysis.py`):
    static source→sink analysis of JavaScript bundles using `tree-sitter-javascript`.
    A closed roster of DOM sources (`location.hash`, `document.URL`, etc.) and
-   sinks (`innerHTML`, `eval`, `document.write`, etc.) is matched within the
-   same function body. An activity wrapper `@activity.defn(name="analyze-dom-xss")`
+   sinks (`innerHTML`, `document.write`, etc.) is paired per the confidence tier
+   in D4. An activity wrapper `@activity.defn(name="analyze-dom-xss")`
    re-fetches bundles on-demand, passes them through the analysis, and produces
-   `LiveAttackMapEntry` records with `source="code_analysis"`.
+   `CandidateFinding` records with `cascade_step = "static-dom-analysis"` and
+   `grounded = False`. Future wiring into `LiveAttackMapEntry` is specified as
+   a deferred invariant (DOM findings don't carry `method`/`path`, so
+   `merge_attack_maps` shimming is out of scope for this change).
 
 3. **New spec capability `live-xss-proof`** — a standalone capability, not a
    modification to `agentic-dynamic-validation`, because it replaces that
@@ -51,15 +58,18 @@ the `tree-sitter-javascript` dependency already exists in the project.
 
 - **New files**: `src/quarry_activities/prove_xss.py`,
   `src/quarry_activities/dom_xss_analysis.py`
-- **New models**: `ProveXssInput`, `ProveXssOutput`,
-  `AnalyzeDomXssInput`, `AnalyzeDomXssOutput`,
-  `DomSourceSinkMatch` in `src/quarry_activities/inputs.py`
+- **New models**: `ProveXssInput` (includes `settle_delay_ms: int = 500`),
+  `ProveXssOutput`, `CanaryEvidence`, `AnalyzeDomXssInput`,
+  `AnalyzeDomXssOutput`, `DomSourceSinkMatch` in
+  `src/quarry_activities/inputs.py`
 - **No change to `crawl.py` / `CrawlResult`**: bundle URLs (`CrawlResult.js_bundles`)
   already surface; `dom_xss_analysis` re-fetches bundle bodies independently
   rather than plumbing them through crawl
-- **No change to `live_recon.py`**: `merge_attack_maps` and
-  `LiveAttackMapEntry.source="code_analysis"` already exist; new DOM findings
-  merge through the existing seam
+- **No change to `live_recon.py`**: `LiveAttackMapEntry.source="code_analysis"`
+  already exists on the model; DOM findings are NOT merged into
+  `LiveAttackMapEntry` in this change (DOM findings don't carry
+  `method`/`path`). Future wiring via `merge_attack_maps` is a deferred
+  invariant.
 - **No change to `prompts/dynamic_validate/`**: the existing xss template is not
   modified or removed (it remains the triage path)
 - **No workflow wiring**: `RunScanWorkflow` / `run_scan.py` wiring is excluded
@@ -67,9 +77,15 @@ the `tree-sitter-javascript` dependency already exists in the project.
 - **Dependency**: requires W1 `browser_session` activity (`open_url`, `execute_js`,
   `get_dom`). Spec declares this as a dependency; `prove_xss` SHALL degrade with a
   clear error when the seam is absent
+- **Provenance via `cascade_step`**: `CandidateFinding.cascade_step` (already on
+  the model) carries the proof-method label: `"browser-confirmed"` for
+  `prove_xss` and `"static-dom-analysis"` for `analyze-dom-xss`. No new
+  `provenance` field is added; `cascade_step`'s existing purpose ("for report
+  provenance") fits the use case exactly.
 
 ## Non-goals
-- Full CFG-based inter-procedural taint analysis for DOM XSS (same-function only)
+- Full CFG-based inter-procedural taint analysis for DOM XSS (same-bundle
+  pairing only; no call-graph traversal)
 - Modifying or removing the existing LLM-only XSS dynamic_validate template
 - Wiring into the scan workflow (explicitly excluded, per D6)
 - Real exploit payload execution (only inert canary tokens)

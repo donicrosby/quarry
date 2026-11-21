@@ -36,9 +36,12 @@
   - [ ] 2.1.2 `_find_sinks(root_node) -> list[SinkNode]` — tree-sitter query
     matching the closed sink roster
   - [ ] 2.1.3 `_pair_sources_sinks(sources, sinks, root_node) -> list[DomSourceSinkMatch]`
-    — same-function pairing with confidence assignment
+    — pair every (source, sink) within the same bundle with confidence assignment
+    per design D4 (high = same scope direct, medium = intermediate var,
+    low = cross-function). Top-level code counts as one scope.
   - [ ] 2.1.4 `_classify_confidence(source, sink, root_node) -> DomConfidence`
-    — direct assignment = high, intermediate var = medium, cross-function = low
+    — same-scope direct = high, same-scope via intermediate = medium,
+    cross-function same-bundle = low
 - [ ] 2.2 Unit tests: `tests/quarry_activities/test_dom_xss_analysis.py`
   - [ ] 2.2.1 Test direct source→sink: `dom_vuln.js` → 1 match, `high`, `location.hash` → `innerHTML`
   - [ ] 2.2.2 Test intermediate var: `dom_vuln_medium.js` → 1 match, `medium`
@@ -84,6 +87,9 @@
   - [ ] 4.1.9 Browser context teardown (fail-closed: if teardown fails, session
     expires on timeout)
 - [ ] 4.2 Integration test: `tests/quarry_activities/test_prove_xss.py` —
+    W1-dependent; skip-guard: `pytest.mark.skipif(missing_binary("browser-session"), reason="W1 browser-session-tool not deployed")`.
+    When W1 is deployed (locally or via CI lane), the tests run against a
+    live browser session; otherwise the suite skips with a clear message.
   reflected mode
   - [ ] 4.2.1 Start fixture `reflect_app.py` on a local port; inject canary;
     verify `grounded=true`, evidence kind `"window_global"`
@@ -97,16 +103,19 @@
 ## Phase 5 — prove_xss stored mode
 
 - [ ] 5.1 Implement `prove_xss` stored mode
-  - [ ] 5.1.1 Two-request chain: `open_url` POST inject, 500ms delay,
-    `open_url` GET read
-  - [ ] 5.1.2 Canary substitution in `HttpRequestSpec.body_template` via
-    `{CANARY}` placeholder
+    - [ ] 5.1.1 Multi-step browser chain: `open_url` to target origin,
+      `execute_js` with same-origin `fetch()` to POST stored canary,
+      `settle_delay_ms` delay, `open_url` GET read, `execute_js` read-back.
+      Detect CSP `connect-src` blocks.
+    - [ ] 5.1.2 Canary substitution in `HttpRequestSpec.body` via
+      `{CANARY}` placeholder (the literal string `{CANARY}` in `body` is
+      replaced with the generated canary token at inject time)
   - [ ] 5.1.3 Same `execute_js` verification as reflected mode
   - [ ] 5.1.4 Handle persistence miss: `get_dom()` check before `execute_js` —
     if canary is visible in DOM but not executed, record specific error
-- [ ] 5.2 Integration test: stored mode
-  - [ ] 5.2.1 Start fixture `store_app.py`; POST canary comment, GET view page;
-    verify `grounded=true`
+- [ ] 5.2 Integration test: stored mode (W1-dependent; same skip-guard as 4.2)
+  - [ ] 5.2.1 Start fixture `store_app.py`; navigate, inject via `execute_js`
+    `fetch()`, settle, open view page, `execute_js` verify; `grounded=true`
   - [ ] 5.2.2 Store a canary that renders unescaped but add CSP blocking →
     `grounded=false`, error notes "canary visible in DOM but not executed"
   - [ ] 5.2.3 Inject to non-existent endpoint → `grounded=false`, error recorded
