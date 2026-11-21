@@ -75,14 +75,34 @@ services:
   #
   # HARDENING: no `ports:` entry. The proxy is reachable only on the compose
   # network; publishing :8788 to the host would expose an intercepting proxy.
+  proxy-init:
+    # One-shot volume ownership init for the recording proxy.
+    #
+    # Why this exists: the mitmproxy image entrypoint usermods its `mitmproxy`
+    # user to the uid owning /home/mitmproxy/.mitmproxy (the proxy-certs
+    # volume) and ALWAYS gosu-drops to that user for mitmdump — any
+    # `user:` override on the proxy service is a no-op. Fresh named volumes
+    # copy uid-1000 content from the image (certs) or start root-owned
+    # (capture), so without this init the proxy runs as uid 1000 against a
+    # root-owned capture volume and dies: PermissionError mkdir
+    # /data/traffic-capture/blobs (observed, reproducible).
+    image: alpine:3.20
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1000:1000 /captures /certs && chmod 755 /certs"]
+    volumes:
+      - traffic-capture:/captures
+      - proxy-certs:/certs
+    restart: "no"
   proxy:
     image: mitmproxy/mitmproxy:12.3.1
-    # Runs as root: the recording addon must mkdir() inside the fresh
-    # root-owned traffic-capture volume, and the mitmproxy image defaults to
-    # uid 1000 (PermissionError at startup). Acceptable for a localhost-only
-    # dev stack; if this ever leaves localhost, switch to a chown-init
-    # container pattern instead.
-    user: "0:0"
+    # Actual runtime uid is decided by the entrypoint (usermod+gosu, see
+    # proxy-init), NOT by `user:` — the init container normalizes both
+    # volumes to 1000:1000 so the dropped-to user owns what it writes.
+    # Localhost-only dev stack; the chown-init is the documented pattern if
+    # this ever leaves localhost.
+    depends_on:
+      proxy-init:
+        condition: service_completed_successfully
     command:
       # Program name required: the image entrypoint execs "$@" verbatim, so a
       # bare flags list dies with `exec: --: invalid option` at startup.
