@@ -77,6 +77,12 @@ services:
   # network; publishing :8788 to the host would expose an intercepting proxy.
   proxy:
     image: mitmproxy/mitmproxy:12.3.1
+    # Runs as root: the recording addon must mkdir() inside the fresh
+    # root-owned traffic-capture volume, and the mitmproxy image defaults to
+    # uid 1000 (PermissionError at startup). Acceptable for a localhost-only
+    # dev stack; if this ever leaves localhost, switch to a chown-init
+    # container pattern instead.
+    user: "0:0"
     command:
       # Program name required: the image entrypoint execs "$@" verbatim, so a
       # bare flags list dies with `exec: --: invalid option` at startup.
