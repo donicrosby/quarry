@@ -17,9 +17,12 @@ and a Markdown report with full provenance.
 Brings up Temporal, the API server (port 8000), and the worker in one command:
 
 ```bash
+cp quarry.toml.example quarry.toml  # panel/model config (gitignored)
 docker compose up --build -d        # or: task compose-up
 curl localhost:8000/healthz         # {"status":"ok"}
 ```
+
+Host port 8000 already in use? `QUARRY_SERVER_HOST_PORT=8001 docker compose up -d`.
 
 The server runs with `--no-worker`; the dedicated `worker` container owns the
 Temporal task queue. Model/git secrets are passed through from your shell or a
