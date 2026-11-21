@@ -364,6 +364,26 @@ _ALLOWLIST = [
     src.quarry.schemas.covered_occupants,
     src.quarry.schemas.corroboration_promotion,
     src.quarry_activities.corroborator.skipped_steps,
+
+    # live-xss-proof (W8/W16): the closed DOM source/sink rosters, the
+    # CandidateFinding seam the provenance requirement lands on, the
+    # browser-confirmed provenance helper, and the input/output faces the
+    # activities are type-checked against. Vulture cannot see test usage.
+    src.quarry_activities.dom_xss_analysis.SOURCE_ROSTER,
+    src.quarry_activities.dom_xss_analysis.SINK_ROSTER,
+    src.quarry_activities.dom_xss_analysis.dom_match_to_candidate_finding,
+    src.quarry_activities.prove_xss.prove_xss_cascade_step,
+    src.quarry_activities.inputs.ProveXssMode.REFLECTED,
+    src.quarry_activities.inputs.DomSourceSinkMatch.source_col,
+    src.quarry_activities.inputs.DomSourceSinkMatch.sink_col,
+    src.quarry_activities.inputs.DomSourceSinkMatch.function_name,
+    src.quarry_activities.inputs.AnalyzeDomXssOutput.bundles_analyzed,
+    src.quarry_activities.inputs.AnalyzeDomXssOutput.bundles_failed,
+    src.quarry_activities.inputs.CanaryEvidence.observation_method,
+    src.quarry_activities.inputs.CanaryEvidence.timestamp_iso,
+    src.quarry_activities.inputs.ProveXssInput.browser_session_tool_name,
+    src.quarry_activities.inputs.ProveXssOutput.canary_evidence,
+    src.quarry_activities.inputs.ProveXssOutput.dom_snapshot,
 ]
 
 _ = _ALLOWLIST  # mark the allowlist itself as used (vulture sees only definitions otherwise)

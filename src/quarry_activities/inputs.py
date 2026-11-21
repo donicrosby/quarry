@@ -7,9 +7,11 @@ Temporal boundary. Activities convert strings back to richer domain objects or
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from enum import StrEnum
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from quarry.schemas import (
     AuthzMatrixEndpoint,
@@ -17,6 +19,7 @@ from quarry.schemas import (
     BuildCommand,
     CanaryCallback,
     ChangedFile,
+    HttpRequestSpec,
 )
 
 
@@ -501,3 +504,138 @@ class CrawlActivityInput(BaseModel):
     max_js_bundles: int = 25
     scan_id: str = ""
     rendered_pages: dict[str, str] | None = None
+
+
+# --- live-xss-proof (W8 reflected/stored XSS + W16 DOM source/sink) ---------
+
+_CANARY_TOKEN_RE = re.compile(r"^quarry-xss-[0-9a-f]{32}$")
+
+
+class ProveXssMode(StrEnum):
+    """Proof mode for the ``prove_xss`` activity."""
+
+    REFLECTED = "reflected"
+    STORED = "stored"
+
+
+class DomConfidence(StrEnum):
+    """Confidence tier for one DOM source->sink pairing."""
+
+    LOW = "low"  # same bundle, different function
+    MEDIUM = "medium"  # same scope, complex path (e.g. via intermediate var)
+    HIGH = "high"  # same scope, direct assignment
+
+
+class ScrubberConfig(BaseModel):
+    """Redaction knobs for XSS activity inputs.
+
+    The run ``Scrubber`` (``quarry_models.redaction``) currently takes no
+    configuration; this model exists so the inputs carry a stable,
+    JSON-serializable optional field and future redaction knobs land without a
+    schema break. Referenced by the live-xss-proof design (D1).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+
+class DomSourceSinkMatch(BaseModel):
+    """One DOM-XSS source->sink pairing found while parsing a JS bundle."""
+
+    model_config = ConfigDict(frozen=True)
+
+    bundle_url: str
+    source_symbol: str
+    sink_symbol: str
+    source_line: int
+    source_col: int
+    sink_line: int
+    sink_col: int
+    function_name: str | None = None
+    confidence: DomConfidence
+    snippet: str
+
+
+def _empty_dom_matches() -> list[DomSourceSinkMatch]:
+    return []
+
+
+def _empty_str_list() -> list[str]:
+    return []
+
+
+class AnalyzeDomXssInput(BaseModel):
+    """Input for the ``analyze-dom-xss`` activity (W16)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    bundle_urls: list[str]
+    allowed_hosts: list[str]
+    max_bundle_bytes: int = 1_000_000
+    scrubber: ScrubberConfig | None = None
+
+
+class AnalyzeDomXssOutput(BaseModel):
+    """Output for the ``analyze-dom-xss`` activity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    findings: list[DomSourceSinkMatch] = Field(default_factory=_empty_dom_matches)
+    bundles_analyzed: int = 0
+    bundles_failed: int = 0
+    errors: list[str] = Field(default_factory=_empty_str_list)
+
+
+class CanaryEvidence(BaseModel):
+    """Evidence that the canary was observed executing browser-side."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["window_global", "http_callback"]
+    value: str  # the raw read-back (matches canary_token)
+    observation_method: str  # e.g. execute_js('window._qry_xss')
+    timestamp_iso: str
+
+
+class ProveXssInput(BaseModel):
+    """Input for the ``prove_xss`` activity (W8)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: ProveXssMode
+    target_url: str
+    canary_token: str
+    inject_spec: HttpRequestSpec | None = None
+    read_url: str | None = None
+    browser_session_tool_name: str = "browser-session"
+    allowed_hosts: list[str]
+    scrubber: ScrubberConfig | None = None
+    session_timeout_ms: int = 30_000
+    page_load_timeout_ms: int = 15_000
+    settle_delay_ms: int = 500
+
+    @field_validator("canary_token")
+    @classmethod
+    def _validate_canary_token(cls, v: str) -> str:
+        if not _CANARY_TOKEN_RE.match(v):
+            msg = f"canary_token must match quarry-xss-<32 hex chars>, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("target_url")
+    @classmethod
+    def _validate_target_url(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            msg = f"target_url must be an http(s) URL, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+
+class ProveXssOutput(BaseModel):
+    """Output for the ``prove_xss`` activity."""
+
+    model_config = ConfigDict(frozen=True)
+
+    grounded: bool
+    canary_evidence: CanaryEvidence | None = None
+    dom_snapshot: str | None = None
+    error: str | None = None
