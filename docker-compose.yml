@@ -1,5 +1,6 @@
 # Quarry local stack: Temporal (dev) + API server + worker.
 #
+#   cp quarry.toml.example quarry.toml   # user-local config (gitignored) — required
 #   docker compose up --build
 #
 # The server runs with --no-worker so the dedicated worker container owns the
@@ -40,7 +41,16 @@ services:
       - "8000:8000"
     volumes:
       - quarry-data:/data
-      - ./quarry.toml:/app/quarry.toml:ro
+      # User-local config (gitignored; cp quarry.toml.example quarry.toml first).
+      # create_host_path: false fails fast if the file is missing — without it
+      # Docker silently creates an empty DIRECTORY here and every scan 500s
+      # when the config loader read()s it (IsADirectoryError).
+      - type: bind
+        source: ./quarry.toml
+        target: /app/quarry.toml
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       temporal:
         condition: service_healthy
@@ -66,6 +76,9 @@ services:
   proxy:
     image: mitmproxy/mitmproxy:12.3.1
     command:
+      # Program name required: the image entrypoint execs "$@" verbatim, so a
+      # bare flags list dies with `exec: --: invalid option` at startup.
+      - "mitmdump"
       - "--listen-host"
       - "0.0.0.0"
       - "--listen-port"

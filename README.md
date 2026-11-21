@@ -17,6 +17,7 @@ and a Markdown report with full provenance.
 Brings up Temporal, the API server (port 8000), and the worker in one command:
 
 ```bash
+cp quarry.toml.example quarry.toml  # panel/model config (gitignored)
 docker compose up --build -d        # or: task compose-up
 curl localhost:8000/healthz         # {"status":"ok"}
 ```

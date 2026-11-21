@@ -58,3 +58,5 @@ Thumbs.db
 # Lock file generated when launching the FastAPI example via `uv run`
 examples/vulnerable-fastapi/uv.lock
 quarry.toml
+# Local compose overrides (host-port remaps etc.; docker compose reads it automatically)
+docker-compose.override.yml
