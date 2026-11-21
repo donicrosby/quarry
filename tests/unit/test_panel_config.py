@@ -45,6 +45,33 @@ def test_load_quarry_config_focus_classes_from_file(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# load_quarry_config — directory-shaped candidates are skipped, not read
+# ---------------------------------------------------------------------------
+
+
+def test_load_quarry_config_skips_directory_shaped_candidate(tmp_path: Path) -> None:
+    """A directory literally named ``quarry.toml`` must be skipped, not read.
+
+    Regression: reading it raised ``IsADirectoryError``, which 500'd every
+    ``POST /scans`` because the loader runs on the request path.
+    """
+    dir_candidate = tmp_path / "quarry.toml"
+    dir_candidate.mkdir()
+    cfg = load_quarry_config(path=dir_candidate)
+    assert isinstance(cfg, QuarryConfig)
+
+
+def test_load_quarry_config_skips_directory_shaped_candidate_in_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory-shaped candidate in cwd is skipped and defaults returned."""
+    (tmp_path / "quarry.toml").mkdir()
+    monkeypatch.chdir(tmp_path)
+    cfg = load_quarry_config()
+    assert isinstance(cfg, QuarryConfig)
+
+
+# ---------------------------------------------------------------------------
 # load_quarry_config — credential rejection
 # ---------------------------------------------------------------------------
 
