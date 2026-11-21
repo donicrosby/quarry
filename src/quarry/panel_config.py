@@ -317,6 +317,28 @@ class ScanConfig(BaseModel):
     reasoning_lexicon: ReasoningLexiconConfig | None = None
 
 
+class CredibilityConfig(BaseModel):
+    """Write-time credibility gating + corroboration cascade budget (``[credibility]``).
+
+    Presence of this section in quarry.toml enables the credibility economics:
+    write-time tier discounting feeds the cascade's step-1 gate and the coverage
+    ledger's covered-cell test, and the cascade runs before the debater.
+
+    ``probe_budget`` / ``model_budget`` are per-scan hard ceilings on the two
+    independent counters (deterministic probe units and paid debater calls).
+    ``unlimited`` is an EXPLICIT per-counter opt-in: a zero cap with no
+    ``*_unlimited`` flag still gates, it never silently means unlimited.
+    ``severity_threshold`` is the step-3 passive-pass bound — a finding whose
+    severity ranks below it is resolved without spending probe or model budget.
+    """
+
+    probe_budget: int = 20
+    model_budget: int = 5
+    probe_unlimited: bool = False
+    model_unlimited: bool = False
+    severity_threshold: Severity = Severity.MEDIUM
+
+
 class IntegrationTomlEntry(BaseModel):
     """One ``[integrations.<name>]`` table in quarry.toml.
 
@@ -339,6 +361,11 @@ class QuarryConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     integrations: dict[str, IntegrationTomlEntry] = Field(default_factory=dict)
     scan: ScanConfig = Field(default_factory=ScanConfig)
+    # Write-time credibility economics + the cost-ordered corroboration cascade.
+    # ``None`` means the ``[credibility]`` section is absent, and the scan keeps
+    # the pre-change behaviour: no write-time discounting, no cascade, no
+    # tier-aware coverage cells.
+    credibility: CredibilityConfig | None = None
 
 
 def _check_for_credentials(raw: dict[str, Any]) -> None:

@@ -323,6 +323,8 @@ def tempfile_match_to_candidate_finding(
         ],
         evidence_path=[EvidencePathElement(path=match.file_path, line=match.line_number)],
         confidence=Confidence.MEDIUM,
+        # Deterministic predictable-temp-path scanner — tool-observed.
+        grounded=True,
         severity_rationale=model_omitted_severity_rationale(),
         created_by=created_by,
         created_at=created_at or utc_now(),

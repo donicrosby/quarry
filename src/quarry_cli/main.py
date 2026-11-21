@@ -33,6 +33,7 @@ from quarry_benchmark.cybergym import (
 )
 from quarry_benchmark.cybergym import load_manifest as _load_cybergym_manifest
 from quarry_benchmark.cybergym import select_subset as _select_cybergym_subset
+from quarry_cli.traffic import traffic_app
 from quarry_client.client import QuarryClient
 from quarry_models.litellm_client import LiteLLMModelClient
 from quarry_plugins.base import ContextInjectorPlugin
@@ -57,6 +58,7 @@ app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(provenance_app, name="provenance")
 app.add_typer(plugin_app, name="plugin")
 app.add_typer(ci_app, name="context-injector")
+app.add_typer(traffic_app, name="traffic")
 
 
 @scan_app.command("run")

@@ -205,7 +205,6 @@ _ALLOWLIST = [
     # timing receipt is serialized onto finding.dynamic_validated (vulture's AST
     # walk does not see the keyword-argument name in the receipt constructor).
     src.quarry_activities.verdict_evaluators.VerdictReceipt.induced_delay_ms,
-
     # --- Protocol signature params, dunder params, instance attrs ---
     src.quarry_artifacts.s3_store.Body,
     src.quarry_artifacts.s3_store.Bucket,
@@ -269,7 +268,6 @@ _ALLOWLIST = [
     src.quarry_tools.treesitter.frame,
     src.quarry_tools.treesitter.signum,
     src.quarry_workflows.tracer_stage.trace_id,
-
     # --- BaseHTTPRequestHandler dynamic dispatch (do_* methods + silenced log) ---
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_GET,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_POST,
@@ -279,7 +277,6 @@ _ALLOWLIST = [
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.do_PATCH,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message,
     src.quarry_activities.sandbox_exec._CanaryRequestHandler.log_message.format,
-
     # --- Plugin/tool/sink singleton instances (registered by discovery, referenced only in tests) ---
     src.quarry.benchmark_inventory.inventory_as_dicts,
     # Plugin-level match->CandidateFinding converters: the spec pins them on the
@@ -288,10 +285,21 @@ _ALLOWLIST = [
     # tests reference these directly.
     src.quarry_plugins.vuln_classes.tempfile_race.tempfile_match_to_candidate_finding,
     src.quarry_plugins.vuln_classes.terminal_escape.terminal_match_to_candidate_finding,
-
     # --- browser-worker-playwright: helpers referenced only from tests/ ---
     src.quarry_activities.playwright_driver.store_screenshot,
-
+    # live-crawl: merge helper is the code/crawl attribution seam W6 (GraphQL
+    # discovery) and W16 (DOM analysis) consume; exercised by tests today.
+    src.quarry_activities.live_recon.merge_attack_maps,
+    # --- traffic-capture-verified-evidence: operator API, library callbacks, third-party attrs ---
+    # mitmdump discovers the addon list by name from the -s script (not an in-tree call).
+    src.quarry_traffic.addon.addons,
+    # Public evidence-store read surface consumed by operators/reporting/tests.
+    src.quarry_traffic.evidence.EvidenceStore.binds,
+    # sqlite3/tarfile attributes assigned on third-party objects vulture cannot follow.
+    src.quarry_traffic.capture_index.CaptureIndex._conn.row_factory,
+    src.quarry_traffic.evidence.EvidenceStore._conn.row_factory,
+    src.quarry_traffic.capture_store.TarInfo.size,
+    src.quarry_traffic.capture_store.TarInfo.mtime,
     # --- REAL CRUFT — allowlisted for §4 follow-up (cruft-purge §7.1; do not delete here) ---
     src.quarry.panel_config.resolve_dynamic,
     src.quarry.schemas.VerdictDefaults,
@@ -302,6 +310,12 @@ _ALLOWLIST = [
     src.quarry.schemas.SENSITIVE_ENV_KEYS,
     src.quarry.schemas.VerdictDefaults.deployment_intent,
     src.quarry.schemas.VerdictDefaults.reverification_outcome,
+    # multi-persona-authz-matrix: pydantic fields set by BaseModel __init__.
+    src.quarry.schemas.PersonaScope.privilege_level,
+    src.quarry.schemas.AuthzMatrixPersona.privilege_level,
+    src.quarry.schemas.AuthzMatrixCell.body_hash,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_path,
+    src.quarry.schemas.AuthzMatrixRow.endpoint_method,
     src.quarry_activities.browser_login.BrowserLoginResolver,
     src.quarry_activities.calibrate.RULE_REDUNDANT_CAPABILITY_DOWNGRADE,
     src.quarry_activities.credentials.CredentialProvider,
@@ -343,6 +357,13 @@ _ALLOWLIST = [
     src.quarry_workflows.exploitation_loop.StepOutcome,
     src.quarry_workflows.roe.repo_path_in_scope,
     src.quarry_workflows.run_scan.select_dynamic_probe_spec,
+    # credibility-economics: pydantic fields set through model_copy / constructors
+    # that vulture's AST walk cannot see.
+    src.quarry.schemas.credibility_discount,
+    src.quarry.schemas.occupant_count,
+    src.quarry.schemas.covered_occupants,
+    src.quarry.schemas.corroboration_promotion,
+    src.quarry_activities.corroborator.skipped_steps,
 ]
 
 _ = _ALLOWLIST  # mark the allowlist itself as used (vulture sees only definitions otherwise)

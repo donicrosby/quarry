@@ -61,6 +61,9 @@ __all__ = [
     "sql_injection_evaluator",
     "ssrf_evaluator",
     "ssti_evaluator",
+    "timing_differential_evaluator",
+    "TIMING_INJECTED_DELAY_FRACTION",
+    "TIMING_MIN_SIGMA_MULTIPLIER",
 ]
 
 # Live-verdict vocabulary for the agentic dynamic-validation stage (ADR-017).
@@ -174,18 +177,24 @@ class LiveProbeEvidence:
     be resolved — evaluators treat a missing body as non-corroboration, never
     an error.
 
+    ``duration_seconds`` / ``injected_delay_seconds`` carry the timing signal for
+    the timing-differential evaluator (blind SQLi / command injection): the
+    primary probe's observed round-trip duration, and the delay the probe
+    intended to inject. Both default to None so status/marker evaluators ignore
+    them and pre-existing callers are unaffected.
     Timing/differential annotations are transported from the dispatched
     :class:`~quarry.schemas.HttpRequestSpec` at workflow dispatch time (the
     same way ``body_text``/``status_code`` flow): ``elapsed_ms`` is the probe
     latency, ``injected_values`` the agent-declared injected payload
     substrings, ``indicator`` the optional hunter-supplied success marker, and
     ``injected_delay_ms`` the agent-declared delay that opts the probe into the
-    statistical timing path (absent → the hardened differential path).
-    """
+    statistical timing path (absent → the hardened differential path)."""
 
     status_code: int
     body_text: str | None = None
     additional: tuple[LiveProbeEvidence, ...] = field(default=())
+    duration_seconds: float | None = None
+    injected_delay_seconds: float | None = None
     elapsed_ms: int | None = None
     injected_values: tuple[str, ...] | None = None
     indicator: str | None = None
@@ -450,7 +459,7 @@ def _differential_verdict(ev: LiveProbeEvidence) -> Verdict:
 # ---------------------------------------------------------------------------
 
 
-def _median(values: list[int]) -> float:
+def _median(values: list[int] | list[float]) -> float:
     return float(statistics.median(values))
 
 
@@ -590,7 +599,6 @@ def ssti_evaluator(ev: LiveProbeEvidence) -> Verdict:
 
 def sql_injection_evaluator(ev: LiveProbeEvidence) -> Verdict:
     """SQLi evaluator — composition dispatch over timing and differential paths.
-
     A single registered evaluator handles BOTH blind-SQLi and boolean SQLi so
     the registry stays one-evaluator-per-class:
 
@@ -690,6 +698,73 @@ def file_upload_evaluator(ev: LiveProbeEvidence) -> Verdict:
     return LIVE_NOT_CORROBORATED
 
 
+# ---------------------------------------------------------------------------
+# Timing-differential evaluator (credibility-economics step 4)
+# ---------------------------------------------------------------------------
+
+# K: how many robust baseline sigmas the induced delay must clear. Pinned (not a
+# magic number inside the predicate) so the rule is auditable and the fixtures
+# can assert the exact bound.
+TIMING_MIN_SIGMA_MULTIPLIER = 3.0
+# The induced delay must also clear this fraction of the delay the probe
+# intended to inject — a timing signal smaller than that is noise, not evidence.
+TIMING_INJECTED_DELAY_FRACTION = 0.6
+# 1.4826 * MAD is the consistency constant that makes the median absolute
+# deviation an unbiased estimator of sigma for normally distributed samples.
+_MAD_TO_SIGMA = 1.4826
+
+
+def _mad_robust_sigma(values: list[float]) -> float:
+    """MAD-based robust standard deviation of *values*."""
+    centre = _median(values)
+    return _MAD_TO_SIGMA * _median([abs(v - centre) for v in values])
+
+
+def timing_differential_evaluator(ev: LiveProbeEvidence) -> Verdict:
+    """Timing-differential evaluator for blind SQLi / command injection.
+
+    Blind classes produce no marker in the body, so the signal is *time*: the
+    attack probe induces a delay the baseline probes do not. The primary probe
+    (``ev``) is the attack sample; ``ev.additional`` carries the baseline
+    samples. Corroboration requires ALL of:
+
+    - at least 2 baseline samples and a baseline spread (an all-identical
+      baseline has no measurable noise, so the threshold would collapse to zero),
+    - a majority of the baseline samples strictly below the attack duration
+      (majority-sample consistency: a single fast baseline must not decide it),
+    - the observed delay (attack − median baseline) clearing
+      ``max(K * robust_sigma(baseline), 0.6 * injected_delay)``.
+
+    Returns ``inconclusive`` when the timing samples are absent — the caller
+    (the cascade's step 4) then falls through to the debater. ``not_corroborated``
+    means the delay did not clear the bound (no induced timing signal).
+    """
+    attack = ev.duration_seconds
+    if attack is None:
+        return LIVE_INCONCLUSIVE
+    baselines = [b.duration_seconds for b in ev.additional if b.duration_seconds is not None]
+    if len(baselines) < 2:
+        return LIVE_INCONCLUSIVE
+    baseline_median = _median(baselines)
+    sigma = _mad_robust_sigma(baselines)
+    if sigma <= 0.0:
+        # A degenerate (zero-spread) baseline cannot produce a calibrated bound.
+        return LIVE_INCONCLUSIVE
+    observed = attack - baseline_median
+    if observed <= 0.0:
+        return LIVE_NOT_CORROBORATED
+    faster = sum(1 for value in baselines if value < attack)
+    if faster * 2 <= len(baselines):
+        return LIVE_NOT_CORROBORATED
+    injected = ev.injected_delay_seconds
+    required = TIMING_MIN_SIGMA_MULTIPLIER * sigma
+    if injected is not None:
+        required = max(required, TIMING_INJECTED_DELAY_FRACTION * injected)
+    if observed >= required:
+        return LIVE_CORROBORATED
+    return LIVE_NOT_CORROBORATED
+
+
 def register_builtin_evaluators() -> None:
     """Register the shipped per-class evaluators (idempotent, import-safe).
 
@@ -712,6 +787,7 @@ def register_builtin_evaluators() -> None:
         timing_profile=True,
     )
     register_evaluator(VulnerabilityClass.SSRF, ssrf_evaluator, min_probes=2)
+    register_evaluator(VulnerabilityClass.COMMAND_INJECTION, timing_differential_evaluator)
     # FILE_UPLOAD corroborates through a CHAIN (upload + fetch-back), so it
     # needs the pair: ``min_probes=2`` makes dynamic dispatch keep both the
     # agent's upload and fetch-back proposals instead of silently dropping the
