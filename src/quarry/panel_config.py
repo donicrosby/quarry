@@ -385,10 +385,17 @@ def load_quarry_config(path: Path | None = None) -> QuarryConfig:
     """Load and parse a quarry.toml file.
 
     Search order:
-    1. Explicit *path* argument (if provided and exists).
+    1. Explicit *path* argument (if provided and is a regular file).
     2. ``quarry.toml`` in the current working directory.
     3. ``~/.config/quarry/quarry.toml``.
     4. Return all-defaults ``QuarryConfig()`` if none found.
+
+    Directory-shaped candidates are skipped silently so the loader never
+    raises ``IsADirectoryError``. This is the durable guard for the common
+    fresh-host case where Docker Compose silently creates an empty directory
+    for a missing ``./quarry.toml`` bind source (the compose-side
+    ``bind.create_host_path: false`` fail-fast is complementary, not a
+    replacement).
 
     Raises ``ValueError`` at parse time if the file contains credential-like
     top-level keys (e.g. ``ANTHROPIC_API_KEY``).
@@ -400,7 +407,7 @@ def load_quarry_config(path: Path | None = None) -> QuarryConfig:
     candidates.append(Path.home() / ".config" / "quarry" / "quarry.toml")
 
     for candidate in candidates:
-        if candidate.exists():
+        if candidate.is_file():
             text = candidate.read_text(encoding="utf-8")
             raw: dict[str, Any] = tomllib.loads(text)
             _check_for_credentials(raw)

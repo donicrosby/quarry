@@ -29,7 +29,7 @@ if [ "$fail" -ne 0 ]; then
     echo "One or more prerequisites are missing. Start them first:"
     echo ""
     echo "  # 1. Temporal server"
-    echo "  docker compose -f docker-compose.temporal.yml up -d"
+    echo "  docker compose -f docker-compose.yml up -d"
     echo ""
     echo "  # 2. Vulnerable-FastAPI target (in a separate terminal)"
     echo "  task target"

@@ -1,6 +1,7 @@
 """Scan workflow and local runner."""
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import asdict, replace
@@ -89,6 +90,7 @@ from quarry_activities.inputs import (
     DispatchLifecycleHooksInput,
     FuzzSpec,
     HttpRequestActivityInput,
+    IngestCanaryCallbacksInput,
     LoadHandoffArtifactsInput,
     LoadHandoffArtifactsOutput,
     ReadArtifactTextInput,
@@ -2191,7 +2193,7 @@ class RunScanWorkflow:
                 return_exceptions=True,
             )
 
-            for task_result in hunt_results:
+            for hunt_task, task_result in zip(runnable_tasks, hunt_results, strict=True):
                 if isinstance(task_result, BaseException):
                     # A hunter failed (timeout, crash); record it and keep the rest.
                     await _append_workflow_event(
@@ -2205,6 +2207,12 @@ class RunScanWorkflow:
                 hunter_gaps.extend(task_gaps)
                 for finding_dict in task_findings:
                     candidate = CandidateFinding.model_validate(finding_dict)
+                    # Correlate the finding with the hunt task that produced it:
+                    # canary callbacks captured during proof are indexed against
+                    # this id so capture queries can join traffic to the hunt.
+                    candidate = candidate.model_copy(
+                        update={"metadata": {**candidate.metadata, "hunt_task_id": hunt_task.id}}
+                    )
                     # Post-hunt: label OOS findings, skip from final promotion
                     is_oos = any(
                         exc.kind == "route" and exc.value in (candidate.affected_component or "")
@@ -3303,6 +3311,27 @@ class RunScanWorkflow:
                                             else SandboxExecCapture.model_validate(exec_raw)
                                         )
                                         exec_caps.append(cap)
+                                        if cap.canary_callbacks:
+                                            # B10 returns callbacks in memory on the
+                                            # capture; the worker-side consumer indexes
+                                            # them (best-effort: an index failure must
+                                            # never fail a proof capture).
+                                            with contextlib.suppress(Exception):
+                                                await workflow.execute_activity(
+                                                    "ingest-canary-callbacks",
+                                                    args=[
+                                                        IngestCanaryCallbacksInput(
+                                                            callbacks=tuple(cap.canary_callbacks),
+                                                            hunt_task_id=str(
+                                                                finding.metadata.get(
+                                                                    "hunt_task_id", ""
+                                                                )
+                                                            ),
+                                                        )
+                                                    ],
+                                                    start_to_close_timeout=timedelta(minutes=1),
+                                                    retry_policy=RetryPolicy(maximum_attempts=1),
+                                                )
                                         local_artifacts.append(
                                             build_proof_artifact(
                                                 finding,

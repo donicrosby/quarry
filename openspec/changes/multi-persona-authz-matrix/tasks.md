@@ -183,33 +183,21 @@
   (`tests/unit/test_authz_matrix_dispatch_wiring.py`).
 
 ## Group 7: Validation and edge cases
-- [ ] Handle persona with login-flow/browser-login auth: the matrix SHALL
-  trigger login once per persona, cache the session credential per the
-  profile's TTL (`LoginStep.ttl_seconds`/`BrowserLoginStep.ttl_seconds`,
-  `CredentialCache`), and reuse across endpoint requests.
-  - DEVIATION (not implemented; escalated): this task is not implementable as
-    written against the rest of the reviewed change. Each matrix cell dispatches
-    through the shared `http-request` activity, which constructs a fresh
-    `CredentialCache` per call (`dynamic_http.py`), so a matrix-local
-    login-once cache cannot be injected without editing `dynamic_http.py` —
-    which Group 2 pins as do-not-touch — and inline resolved credentials may not
-    travel on `HttpRequestSpec` ("carries no inline secrets"). The ADDED
-    Requirement of record ("Matrix probes every attack-map endpoint as every
-    persona") says only that the cell dispatches `profile_ref` through the
-    `http-request` activity, which the matrix does. A spec decision is required:
-    relax this line to "inherits shared-path credential resolution", or amend
-    the change to pin an injection seam in `dynamic_http.py`. Escalated to the
-    planner; not silently dropped.
+- [ ] Handle persona with login-flow/browser-login auth: the matrix inherits
+  shared-path credential resolution — each cell forwards `profile_ref` plus
+  the serialized `AuthProfileSet` to `http_request_activity`, and
+  `dynamic_http.py` owns credential resolution and per-scan
+  `CredentialCache` caching. The matrix adds no credential handling of its
+  own (DECIDED: planner t_3a740ff2 option 1 — relax; login-once-per-persona
+  cross-cell caching is accepted debt documented here).
 - [ ] Handle HTTP errors during matrix collection: a 5xx or transport error on
   one endpoint SHALL NOT abort the matrix; record in the cell and continue.
 - [ ] Request rate limiting: space persona requests per endpoint to avoid
   triggering target-side rate limits (minimum 1s between requests to the same
   host).
-- [ ] Unit test: login-flow persona reuses cached credential across matrix rows.
-  - DEVIATION: blocked on the same contradiction above; the delivered test
-    asserts the matrix forwards the persona's `profile_ref` + `AuthProfileSet`
-    to the shared egress path, which owns credential resolution and caching
-    (`tests/unit/test_authz_matrix_activity.py::test_login_flow_persona_delegates_credential_resolution`).
+- [ ] Unit test: login-flow persona delegates credential resolution to the shared
+  egress path (`tests/unit/test_authz_matrix_activity.py::
+  test_login_flow_persona_delegates_credential_resolution`).
 - [ ] Unit test: target 5xx on one endpoint doesn't abort the matrix for
   remaining endpoints.
 

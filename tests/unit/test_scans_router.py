@@ -111,6 +111,35 @@ async def test_start_scan_starts_temporal_workflow(scan_api: ScanApiTestContext)
     assert isinstance(scan_input.panel_entries, list)
 
 
+async def test_start_scan_survives_directory_shaped_config_candidate(
+    scan_api: ScanApiTestContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a junk DIRECTORY named quarry.toml in cwd must not 500 POST /scans.
+
+    ``load_quarry_config()`` runs on the request path (the panel is resolved
+    outside the sandboxed workflow), so reading a directory-shaped candidate
+    raised ``IsADirectoryError`` and took the whole scan API down.
+    """
+    junk_cwd = tmp_path / "cwd-with-junk-config"
+    junk_cwd.mkdir()
+    (junk_cwd / "quarry.toml").mkdir()  # directory, not a regular file
+    monkeypatch.chdir(junk_cwd)
+
+    response = await scan_api.client.post(
+        "/scans",
+        json={
+            "repo_path": "/tmp/example-repo",
+            "target_url": "http://localhost:8000",
+            "output_dir": "/tmp/quarry-output",
+            "db_path": str(scan_api.db_path),
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "RUNNING"
+    assert len(scan_api.temporal_client.started_workflows) == 1
+
+
 async def test_resume_scan_starts_temporal_workflow(scan_api: ScanApiTestContext) -> None:
     seed_scan_database(scan_api.db_path, status=ScanStatus.CANCELLED)
 
