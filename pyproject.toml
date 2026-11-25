@@ -25,7 +25,7 @@ dependencies = [
   "tree-sitter-c>=0.24.0",
   "tree-sitter-go>=0.23.0",
   "tree-sitter-javascript>=0.23.0",
-  "typer>=0.16.0",
+  "typer>=0.29.2",
   "uvicorn>=0.34.3",
 ]
 
