@@ -39,7 +39,7 @@ browser = ["playwright>=1.49.0"]
 # stays dependency-light; a worker only installs the extra for the backend it is
 # configured with. Both modules import their client lazily.
 artifacts-redis = ["redis>=5"]
-artifacts-s3 = ["boto3>=1.35"]
+artifacts-s3 = ["boto3>=1.44.5"]
 
 [dependency-groups]                                                                                                            
   dev = [
@@ -51,7 +51,7 @@ artifacts-s3 = ["boto3>=1.35"]
   "pytest-timeout>=2.3.1",
   "pytest-xdist>=3.6.0",
   "redis>=5",
-  "boto3>=1.35",
+  "boto3>=1.44.5",
   # Recording-proxy funnel e2e (tests/integration/test_traffic_capture_proxy.py)
   # drives `mitmdump`; without this declared the lane's core integration test
   # skips silently (module-level importorskip) in every clean env. Pin matches
